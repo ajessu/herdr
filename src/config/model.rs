@@ -90,6 +90,15 @@ pub enum AgentPanelScopeConfig {
     All,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TabStatusMode {
+    #[default]
+    Off,
+    Attention,
+    All,
+}
+
 impl AgentPanelScopeConfig {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -445,6 +454,8 @@ pub struct UiConfig {
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
+    /// Show agent status dots on tab bar labels.
+    pub show_tab_status: TabStatusMode,
     /// Optional visual toast notifications for background workspace events.
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
@@ -628,6 +639,7 @@ impl Default for UiConfig {
             show_agent_labels_on_pane_borders: false,
             agent_panel_scope: AgentPanelScopeConfig::All,
             accent: "cyan".into(),
+            show_tab_status: TabStatusMode::Off,
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
         }
@@ -1242,5 +1254,41 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn tab_status_mode_defaults_off_and_parses() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.show_tab_status, TabStatusMode::Off);
+
+        let toml_off = r#"
+[ui]
+show_tab_status = "off"
+"#;
+        let config: Config = toml::from_str(toml_off).unwrap();
+        assert_eq!(config.ui.show_tab_status, TabStatusMode::Off);
+
+        let toml_attention = r#"
+[ui]
+show_tab_status = "attention"
+"#;
+        let config: Config = toml::from_str(toml_attention).unwrap();
+        assert_eq!(config.ui.show_tab_status, TabStatusMode::Attention);
+
+        let toml_all = r#"
+[ui]
+show_tab_status = "all"
+"#;
+        let config: Config = toml::from_str(toml_all).unwrap();
+        assert_eq!(config.ui.show_tab_status, TabStatusMode::All);
+    }
+
+    #[test]
+    fn tab_status_mode_rejects_unknown_value() {
+        let toml = r#"
+[ui]
+show_tab_status = "blocked"
+"#;
+        assert!(toml::from_str::<Config>(toml).is_err());
     }
 }

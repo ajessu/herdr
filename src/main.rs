@@ -257,6 +257,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
+# Show agent status dots on tab bar labels.
+# off = no dots (default)
+# attention = dots for blocked and done (idle+unseen) states only
+# all = dots for all known agent states (blocked, working, done, idle)
+# show_tab_status = "off"
+
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications
