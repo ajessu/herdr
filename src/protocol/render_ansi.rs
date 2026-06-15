@@ -90,7 +90,7 @@ impl BlitEncoder {
         let mut bytes = Vec::new();
         let mut next_last_visible_cursor = self.last_visible_cursor;
         let mut next_last_cursor_shape = self.last_cursor_shape;
-        blit_frame_to_with_cursor_memory(
+        let cups_skipped = blit_frame_to_with_cursor_memory(
             &mut bytes,
             frame,
             prev,
@@ -104,6 +104,7 @@ impl BlitEncoder {
             crate::render_prof::counter("ansi_encode.scanned_cells", stats.scanned_cells);
             crate::render_prof::counter("ansi_encode.changed_cells", stats.changed_cells);
             crate::render_prof::counter("ansi_encode.changed_runs", stats.changed_runs);
+            crate::render_prof::counter("ansi_encode.cups_skipped", cups_skipped);
             if full {
                 crate::render_prof::event("ansi_encode.full");
             } else {
@@ -385,7 +386,7 @@ fn cells_equal(a: &CellData, b: &CellData) -> bool {
 fn blit_frame_to(writer: impl Write, frame: &FrameData, prev: Option<&FrameData>) {
     let mut last_visible_cursor = None;
     let mut last_cursor_shape = 0;
-    blit_frame_to_with_cursor_memory(
+    let _ = blit_frame_to_with_cursor_memory(
         writer,
         frame,
         prev,
@@ -402,7 +403,7 @@ fn blit_frame_to_with_cursor_memory(
     last_visible_cursor: &mut Option<(u16, u16)>,
     last_cursor_shape: &mut u8,
     suppress_visible_cursor: bool,
-) {
+) -> u64 {
     blit_frame_to_with_cursor_memory_and_policy(
         &mut writer,
         frame,
@@ -411,7 +412,7 @@ fn blit_frame_to_with_cursor_memory(
         last_cursor_shape,
         repeat_ime_anchor_after_sync(),
         suppress_visible_cursor,
-    );
+    )
 }
 
 fn blit_frame_to_with_cursor_memory_and_policy(
@@ -422,7 +423,7 @@ fn blit_frame_to_with_cursor_memory_and_policy(
     last_cursor_shape: &mut u8,
     repeat_ime_anchor: bool,
     suppress_visible_cursor: bool,
-) {
+) -> u64 {
     // On first frame or size change, do a full redraw.
     let full_redraw =
         prev.is_none() || prev.is_some_and(|p| p.width != frame.width || p.height != frame.height);
@@ -441,15 +442,13 @@ fn blit_frame_to_with_cursor_memory_and_policy(
     // must not inherit it.
     let _ = writer.write_all(b"\x1b]8;;\x1b\\");
 
-    if full_redraw {
-        // Clear the screen and write all cells.
+    let cups_skipped = if full_redraw {
         let _ = writer.write_all(b"\x1b[2J\x1b[H");
-        write_all_cells(&mut writer, frame);
+        write_all_cells(&mut writer, frame)
     } else {
-        // Diff-based update: only write changed cells.
         let prev = prev.unwrap();
-        write_changed_cells(&mut writer, frame, prev);
-    }
+        write_changed_cells(&mut writer, frame, prev)
+    };
 
     // Position the cursor while it is still hidden, then restore visibility.
     // Showing before moving makes slow terminals and IMEs briefly observe the
@@ -476,6 +475,7 @@ fn blit_frame_to_with_cursor_memory_and_policy(
         write_ime_anchor_cursor_state(&mut writer, host_cursor);
     }
     let _ = writer.flush();
+    cups_skipped
 }
 
 #[cfg(windows)]
@@ -491,6 +491,40 @@ fn repeat_ime_anchor_after_sync() -> bool {
 /// Writes all cells in the frame (full redraw).
 fn cell_width(cell: &CellData) -> usize {
     cell.symbol.width()
+}
+
+struct CursorTracker {
+    row: u16,
+    col: u16,
+    cups_skipped: u64,
+}
+
+impl CursorTracker {
+    fn new() -> Self {
+        Self {
+            row: u16::MAX,
+            col: u16::MAX,
+            cups_skipped: 0,
+        }
+    }
+
+    fn move_to(&mut self, writer: &mut impl Write, row: u16, col: u16) {
+        if self.row == row && self.col == col {
+            self.cups_skipped += 1;
+        } else {
+            let _ = write!(writer, "\x1b[{};{}H", row + 1, col + 1);
+            self.row = row;
+            self.col = col;
+        }
+    }
+
+    fn advance(&mut self, width: usize) {
+        self.col = self.col.saturating_add(width as u16);
+    }
+
+    fn reset_for_row(&mut self) {
+        self.col = u16::MAX;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -584,9 +618,12 @@ fn write_ime_anchor_cursor_state(writer: &mut impl Write, cursor: HostCursorStat
     }
 }
 
-fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
+fn write_all_cells(writer: &mut impl Write, frame: &FrameData) -> u64 {
+    let mut cursor = CursorTracker::new();
+    let mut last_sgr = String::new();
     let mut active_hyperlink = None;
     for row in 0..frame.height {
+        cursor.reset_for_row();
         let mut to_skip = 0usize;
         for col in 0..frame.width {
             if to_skip > 0 {
@@ -601,12 +638,13 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
                 continue;
             }
 
-            // Move cursor to position (1-based).
-            let _ = write!(writer, "\x1b[{};{}H", row + 1, col + 1);
+            cursor.move_to(writer, row, col);
 
-            // Set style.
             let sgr = build_sgr(cell.fg, cell.bg, cell.modifier);
-            let _ = writer.write_all(sgr.as_bytes());
+            if sgr != last_sgr {
+                let _ = writer.write_all(sgr.as_bytes());
+                last_sgr = sgr;
+            }
 
             write_hyperlink_if_changed(
                 writer,
@@ -614,16 +652,17 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
                 cell_hyperlink_uri(frame, cell),
             );
 
-            // Write the symbol.
             let _ = writer.write_all(cell.symbol.as_bytes());
-            to_skip = cell_width(cell).saturating_sub(1);
+            let w = cell_width(cell);
+            cursor.advance(w.max(1));
+            to_skip = w.saturating_sub(1);
         }
     }
 
     close_hyperlink(writer, &mut active_hyperlink);
 
-    // Reset style at the end.
     let _ = writer.write_all(b"\x1b[0m");
+    cursor.cups_skipped
 }
 
 fn cell_hyperlink_uri<'a>(frame: &'a FrameData, cell: &CellData) -> Option<&'a str> {
@@ -682,7 +721,9 @@ fn close_hyperlink(writer: &mut impl Write, active: &mut Option<String>) {
 
 fn write_cell(
     writer: &mut impl Write,
-    cursor_position: Option<(u16, u16)>,
+    cursor: &mut CursorTracker,
+    row: u16,
+    col: u16,
     cell: &CellData,
     last_sgr: &mut String,
     active_hyperlink: &mut Option<String>,
@@ -692,9 +733,7 @@ fn write_cell(
         return;
     }
 
-    if let Some(position) = cursor_position {
-        write_cursor_position(writer, position);
-    }
+    cursor.move_to(writer, row, col);
 
     let sgr = build_sgr(cell.fg, cell.bg, cell.modifier);
     if sgr != *last_sgr {
@@ -704,6 +743,7 @@ fn write_cell(
 
     write_hyperlink_if_changed(writer, active_hyperlink, cell_hyperlink_uri(frame, cell));
     let _ = writer.write_all(cell.symbol.as_bytes());
+    cursor.advance(cell_width(cell).max(1));
 }
 
 /// Writes only the cells that changed between the previous and current frame.
@@ -722,18 +762,17 @@ fn cells_visually_equal(
     // Skip flag is only for ratatui internal use, not visual.
 }
 
-fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameData) {
-    let mut last_sgr = String::new(); // Track last SGR to avoid redundant style changes.
+fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameData) -> u64 {
+    let mut cursor = CursorTracker::new();
+    let mut last_sgr = String::new();
     let mut active_hyperlink = None;
     let sanitized_hyperlinks = sanitized_frame_hyperlinks(frame);
     let prev_sanitized_hyperlinks = sanitized_frame_hyperlinks(prev);
 
     for row in 0..frame.height {
+        cursor.reset_for_row();
         let mut invalidated = 0usize;
         let mut to_skip = 0usize;
-        // Herdr clients disable host autowrap, so safe cells can advance inline
-        // without spilling into adjacent rows during a resize race.
-        let mut next_inline_col = None;
 
         for col in 0..frame.width {
             let idx = (row as usize) * (frame.width as usize) + (col as usize);
@@ -749,18 +788,16 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
                 ) || invalidated > 0)
                 && to_skip == 0
             {
-                let cursor_position =
-                    (next_inline_col != Some(col) || invalidated > 0).then_some((col, row));
                 write_cell(
                     writer,
-                    cursor_position,
+                    &mut cursor,
+                    row,
+                    col,
                     cell,
                     &mut last_sgr,
                     &mut active_hyperlink,
                     frame,
                 );
-                next_inline_col = (cell.symbol.is_ascii() && cell_width(cell) == 1)
-                    .then_some(col.saturating_add(1));
             }
 
             to_skip = cell_width(cell).saturating_sub(1);
@@ -771,10 +808,10 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
 
     close_hyperlink(writer, &mut active_hyperlink);
 
-    // Reset style if we wrote anything.
     if !last_sgr.is_empty() {
         let _ = writer.write_all(b"\x1b[0m");
     }
+    cursor.cups_skipped
 }
 
 // ---------------------------------------------------------------------------
@@ -1778,6 +1815,9 @@ mod tests {
 
         assert!(output_str.contains("\x1b[1;1H"));
         assert!(!output_str.contains("\x1b[1;2H"));
+        // \x1b[1;3H is emitted by the host cursor park (bottom-right when
+        // frame.cursor is None), not by a per-cell CUP — the wide char's
+        // cursor advance means "Z" at col 2 needs no per-cell CUP.
         assert!(output_str.contains("\x1b[1;3H"));
     }
 
@@ -1812,9 +1852,17 @@ mod tests {
         blit_frame_to(&mut output, &curr, Some(&prev));
         let output_str = String::from_utf8(output).unwrap();
 
+        // "A" at col 0 gets CUP (row start resets tracker), then " " at col 1
+        // is written due to invalidation but cursor is already there (no CUP needed).
         assert!(output_str.contains("\x1b[1;1H"));
         assert!(
-            output_str.contains("\x1b[1;2H"),
+            !output_str.contains("\x1b[1;2H"),
+            "space at col 1 should not need CUP (cursor already there after writing A)"
+        );
+        let cup_pos = output_str.find("\x1b[1;1H").unwrap();
+        let after_cup = &output_str[cup_pos..];
+        assert!(
+            after_cup.contains('A') && after_cup.contains(' '),
             "cells hidden by a previous wide grapheme must be redrawn when they become visible"
         );
     }
@@ -1852,5 +1900,228 @@ mod tests {
 
         assert!(output_str.contains("\x1b[1;1H"));
         assert!(!output_str.contains("\x1b[1;2H"));
+    }
+
+    fn count_cups(output: &str) -> usize {
+        let mut count = 0;
+        let mut remaining = output;
+        while let Some(pos) = remaining.find("\x1b[") {
+            let after = &remaining[pos + 2..];
+            if after.contains('H') {
+                let h_pos = after.find('H').unwrap();
+                let params = &after[..h_pos];
+                if params.chars().all(|c| c.is_ascii_digit() || c == ';') && !params.is_empty() {
+                    count += 1;
+                }
+            }
+            remaining = &remaining[pos + 2..];
+        }
+        count
+    }
+
+    fn count_sgr_sequences(output: &str) -> usize {
+        let mut count = 0;
+        let mut remaining = output;
+        while let Some(pos) = remaining.find("\x1b[") {
+            let after = &remaining[pos + 2..];
+            if let Some(m_pos) = after.find('m') {
+                let params = &after[..m_pos];
+                if params.chars().all(|c| c.is_ascii_digit() || c == ';') && !params.is_empty() {
+                    count += 1;
+                }
+            }
+            remaining = &remaining[pos + 2..];
+        }
+        count
+    }
+
+    #[test]
+    fn cursor_tracking_contiguous_cells_emit_single_cup_per_row() {
+        let cells: Vec<CellData> = (0..10)
+            .map(|i| make_cell(&format!("{}", (b'A' + i) as char), 0, 0, 0))
+            .collect();
+        let frame = make_frame(10, 1, cells);
+
+        let mut output = Vec::new();
+        write_all_cells(&mut output, &frame);
+        let output_str = String::from_utf8(output).unwrap();
+
+        let cups = count_cups(&output_str);
+        assert_eq!(
+            cups, 1,
+            "contiguous cells on same row should emit exactly 1 CUP"
+        );
+    }
+
+    #[test]
+    fn cursor_tracking_multi_row_emits_cup_per_row_start() {
+        let cells: Vec<CellData> = (0..9).map(|_| make_cell("X", 0, 0, 0)).collect();
+        let frame = make_frame(3, 3, cells);
+
+        let mut output = Vec::new();
+        write_all_cells(&mut output, &frame);
+        let output_str = String::from_utf8(output).unwrap();
+
+        let cups = count_cups(&output_str);
+        assert_eq!(
+            cups, 3,
+            "3-row frame should emit exactly 3 CUPs (one per row start)"
+        );
+    }
+
+    #[test]
+    fn cursor_tracking_scattered_changes_emit_cup_per_group() {
+        let width = 60u16;
+        let prev_cells: Vec<CellData> = (0..width).map(|_| make_cell(".", 0, 0, 0)).collect();
+        let mut curr_cells = prev_cells.clone();
+        curr_cells[3] = make_cell("A", 0, 0, 0);
+        curr_cells[10] = make_cell("B", 0, 0, 0);
+        curr_cells[50] = make_cell("C", 0, 0, 0);
+
+        let prev = make_frame(width, 1, prev_cells);
+        let curr = make_frame(width, 1, curr_cells);
+
+        let mut output = Vec::new();
+        write_changed_cells(&mut output, &curr, &prev);
+        let output_str = String::from_utf8(output).unwrap();
+
+        let cups = count_cups(&output_str);
+        assert_eq!(cups, 3, "3 scattered changes should emit exactly 3 CUPs");
+    }
+
+    #[test]
+    fn cursor_tracking_contiguous_diff_cells_emit_single_cup() {
+        let width = 10u16;
+        let prev_cells: Vec<CellData> = (0..width).map(|_| make_cell(".", 0, 0, 0)).collect();
+        let mut curr_cells = prev_cells.clone();
+        curr_cells[3] = make_cell("A", 0, 0, 0);
+        curr_cells[4] = make_cell("B", 0, 0, 0);
+        curr_cells[5] = make_cell("C", 0, 0, 0);
+        curr_cells[6] = make_cell("D", 0, 0, 0);
+        curr_cells[7] = make_cell("E", 0, 0, 0);
+
+        let prev = make_frame(width, 1, prev_cells);
+        let curr = make_frame(width, 1, curr_cells);
+
+        let mut output = Vec::new();
+        write_changed_cells(&mut output, &curr, &prev);
+        let output_str = String::from_utf8(output).unwrap();
+
+        let cups = count_cups(&output_str);
+        assert_eq!(
+            cups, 1,
+            "5 contiguous changed cells should emit exactly 1 CUP"
+        );
+        assert!(output_str.contains("ABCDE"));
+    }
+
+    #[test]
+    fn cursor_tracking_wide_char_advances_correctly() {
+        let frame = FrameData {
+            cells: vec![
+                make_cell(WIDE_GRAPHEME, 0, 0, 0),
+                make_cell(" ", 0, 0, 0),
+                make_cell("A", 0, 0, 0),
+                make_cell("B", 0, 0, 0),
+            ],
+            width: 4,
+            height: 1,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        write_all_cells(&mut output, &frame);
+        let output_str = String::from_utf8(output).unwrap();
+
+        // Wide char at col 0 (width 2) → skip col 1 → col 2 "A" (cursor already at 2) → col 3 "B"
+        let cups = count_cups(&output_str);
+        assert_eq!(
+            cups, 1,
+            "wide char followed by contiguous cells needs only 1 CUP at row start"
+        );
+    }
+
+    #[test]
+    fn cursor_tracking_skip_cell_mid_row_forces_cup() {
+        let frame = FrameData {
+            cells: vec![
+                make_cell("A", 0, 0, 0),
+                CellData {
+                    symbol: "".to_owned(),
+                    fg: 0,
+                    bg: 0,
+                    modifier: 0,
+                    skip: true,
+                    hyperlink: None,
+                },
+                make_cell("B", 0, 0, 0),
+            ],
+            width: 3,
+            height: 1,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        write_all_cells(&mut output, &frame);
+        let output_str = String::from_utf8(output).unwrap();
+
+        // "A" at col 0: CUP emitted (row start). advance(1). cursor.col=1.
+        // col 1: skip=true → skipped, cursor NOT advanced.
+        // "B" at col 2: move_to(0, 2) → cursor.col is 1, not 2 → CUP emitted.
+        let cups = count_cups(&output_str);
+        assert_eq!(cups, 2, "skip cell mid-row should force a new CUP");
+    }
+
+    #[test]
+    fn sgr_caching_in_full_redraw_skips_redundant_writes() {
+        let cells: Vec<CellData> = (0..5)
+            .map(|i| {
+                make_cell(
+                    &format!("{}", (b'A' + i) as char),
+                    0x00_00_00_02,
+                    0x00_00_00_01,
+                    1,
+                )
+            })
+            .collect();
+        let frame = make_frame(5, 1, cells);
+
+        let mut output = Vec::new();
+        write_all_cells(&mut output, &frame);
+        let output_str = String::from_utf8(output).unwrap();
+
+        // All 5 cells have the same style — SGR should appear exactly once
+        // (plus the final reset \x1b[0m).
+        let sgr_count = count_sgr_sequences(&output_str);
+        assert_eq!(
+            sgr_count, 2,
+            "same-style cells should emit SGR once + final reset"
+        );
+    }
+
+    #[test]
+    fn sgr_caching_emits_new_sgr_when_style_changes() {
+        let cells = vec![
+            make_cell("A", 0x00_00_00_02, 0, 0), // fg=Red
+            make_cell("B", 0x00_00_00_02, 0, 0), // fg=Red (same)
+            make_cell("C", 0x00_00_00_03, 0, 0), // fg=Green (different)
+            make_cell("D", 0x00_00_00_03, 0, 0), // fg=Green (same)
+        ];
+        let frame = make_frame(4, 1, cells);
+
+        let mut output = Vec::new();
+        write_all_cells(&mut output, &frame);
+        let output_str = String::from_utf8(output).unwrap();
+
+        // 2 distinct styles + final reset = 3 SGR sequences
+        let sgr_count = count_sgr_sequences(&output_str);
+        assert_eq!(
+            sgr_count, 3,
+            "should emit new SGR only when style changes + final reset"
+        );
     }
 }
