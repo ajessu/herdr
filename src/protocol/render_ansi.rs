@@ -1597,9 +1597,10 @@ mod tests {
 
         assert!(output_str.contains("\x1b[1;1H"));
         assert!(!output_str.contains("\x1b[1;2H"));
-        // After cursor tracking: wide char at col 0 advances cursor by 2,
-        // so "Z" at col 2 needs no CUP — cursor is already there.
-        assert!(!output_str.contains("\x1b[1;3H"));
+        // \x1b[1;3H is emitted by the host cursor park (bottom-right when
+        // frame.cursor is None), not by a per-cell CUP — the wide char's
+        // cursor advance means "Z" at col 2 needs no per-cell CUP.
+        assert!(output_str.contains("\x1b[1;3H"));
     }
 
     #[test]
@@ -1718,9 +1719,9 @@ mod tests {
 
     #[test]
     fn cursor_tracking_contiguous_cells_emit_single_cup_per_row() {
-        let cells: Vec<CellData> = (0..10).map(|i| {
-            make_cell(&format!("{}", (b'A' + i) as char), 0, 0, 0)
-        }).collect();
+        let cells: Vec<CellData> = (0..10)
+            .map(|i| make_cell(&format!("{}", (b'A' + i) as char), 0, 0, 0))
+            .collect();
         let frame = make_frame(10, 1, cells);
 
         let mut output = Vec::new();
@@ -1728,7 +1729,10 @@ mod tests {
         let output_str = String::from_utf8(output).unwrap();
 
         let cups = count_cups(&output_str);
-        assert_eq!(cups, 1, "contiguous cells on same row should emit exactly 1 CUP");
+        assert_eq!(
+            cups, 1,
+            "contiguous cells on same row should emit exactly 1 CUP"
+        );
     }
 
     #[test]
@@ -1741,7 +1745,10 @@ mod tests {
         let output_str = String::from_utf8(output).unwrap();
 
         let cups = count_cups(&output_str);
-        assert_eq!(cups, 3, "3-row frame should emit exactly 3 CUPs (one per row start)");
+        assert_eq!(
+            cups, 3,
+            "3-row frame should emit exactly 3 CUPs (one per row start)"
+        );
     }
 
     #[test]
@@ -1783,7 +1790,10 @@ mod tests {
         let output_str = String::from_utf8(output).unwrap();
 
         let cups = count_cups(&output_str);
-        assert_eq!(cups, 1, "5 contiguous changed cells should emit exactly 1 CUP");
+        assert_eq!(
+            cups, 1,
+            "5 contiguous changed cells should emit exactly 1 CUP"
+        );
         assert!(output_str.contains("ABCDE"));
     }
 
@@ -1809,7 +1819,10 @@ mod tests {
 
         // Wide char at col 0 (width 2) → skip col 1 → col 2 "A" (cursor already at 2) → col 3 "B"
         let cups = count_cups(&output_str);
-        assert_eq!(cups, 1, "wide char followed by contiguous cells needs only 1 CUP at row start");
+        assert_eq!(
+            cups, 1,
+            "wide char followed by contiguous cells needs only 1 CUP at row start"
+        );
     }
 
     #[test]
@@ -1817,7 +1830,14 @@ mod tests {
         let frame = FrameData {
             cells: vec![
                 make_cell("A", 0, 0, 0),
-                CellData { symbol: "".to_owned(), fg: 0, bg: 0, modifier: 0, skip: true, hyperlink: None },
+                CellData {
+                    symbol: "".to_owned(),
+                    fg: 0,
+                    bg: 0,
+                    modifier: 0,
+                    skip: true,
+                    hyperlink: None,
+                },
                 make_cell("B", 0, 0, 0),
             ],
             width: 3,
@@ -1840,9 +1860,16 @@ mod tests {
 
     #[test]
     fn sgr_caching_in_full_redraw_skips_redundant_writes() {
-        let cells: Vec<CellData> = (0..5).map(|i| {
-            make_cell(&format!("{}", (b'A' + i) as char), 0x00_00_00_02, 0x00_00_00_01, 1)
-        }).collect();
+        let cells: Vec<CellData> = (0..5)
+            .map(|i| {
+                make_cell(
+                    &format!("{}", (b'A' + i) as char),
+                    0x00_00_00_02,
+                    0x00_00_00_01,
+                    1,
+                )
+            })
+            .collect();
         let frame = make_frame(5, 1, cells);
 
         let mut output = Vec::new();
@@ -1852,7 +1879,10 @@ mod tests {
         // All 5 cells have the same style — SGR should appear exactly once
         // (plus the final reset \x1b[0m).
         let sgr_count = count_sgr_sequences(&output_str);
-        assert_eq!(sgr_count, 2, "same-style cells should emit SGR once + final reset");
+        assert_eq!(
+            sgr_count, 2,
+            "same-style cells should emit SGR once + final reset"
+        );
     }
 
     #[test]
@@ -1871,6 +1901,9 @@ mod tests {
 
         // 2 distinct styles + final reset = 3 SGR sequences
         let sgr_count = count_sgr_sequences(&output_str);
-        assert_eq!(sgr_count, 3, "should emit new SGR only when style changes + final reset");
+        assert_eq!(
+            sgr_count, 3,
+            "should emit new SGR only when style changes + final reset"
+        );
     }
 }
