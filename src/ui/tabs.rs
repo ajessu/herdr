@@ -1,43 +1,253 @@
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
+    text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
 
 use super::widgets::panel_contrast_fg;
 use crate::app::AppState;
+use crate::config::TabStatusMode;
 
 const MIN_TAB_WIDTH: u16 = 8;
 const NEW_TAB_WIDTH: u16 = 3;
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
 
+// ---------------------------------------------------------------------------
+// TabChrome — structured per-tab label model
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub(crate) struct TabStatusDot {
+    pub glyph: &'static str,
+    pub style: Style,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TabChrome {
+    pub status: Option<TabStatusDot>,
+    pub name: String,
+    pub zoomed: bool,
+}
+
+impl TabChrome {
+    pub fn display_width(&self, mode: TabStatusMode) -> u16 {
+        let status_w: u16 = if matches!(mode, TabStatusMode::Off) {
+            0
+        } else {
+            2
+        };
+        let name_w = u16::try_from(self.name.chars().count()).unwrap_or(u16::MAX);
+        let mod_w: u16 = if self.zoomed { 2 } else { 0 };
+        status_w.saturating_add(name_w).saturating_add(mod_w)
+    }
+
+    pub fn into_spans(&self, mode: TabStatusMode, rect_width: u16) -> Vec<Span<'_>> {
+        let mut spans: Vec<Span> = Vec::with_capacity(6);
+
+        // Leading space
+        spans.push(Span::raw(" "));
+
+        // Status slot (only when mode != Off)
+        if !matches!(mode, TabStatusMode::Off) {
+            if let Some(ref dot) = self.status {
+                spans.push(Span::styled(dot.glyph, dot.style));
+                spans.push(Span::raw(" "));
+            } else {
+                spans.push(Span::raw("  "));
+            }
+        }
+
+        // Name
+        spans.push(Span::raw(self.name.as_str()));
+
+        // Zoom modifier
+        if self.zoomed {
+            spans.push(Span::raw(" Z"));
+        }
+
+        // Trailing pad to fill rect_width
+        let content_width = spans.iter().fold(0u16, |acc, s| {
+            acc.saturating_add(u16::try_from(s.content.chars().count()).unwrap_or(u16::MAX))
+        });
+        let pad = rect_width.saturating_sub(content_width);
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad as usize)));
+        }
+
+        spans
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chrome builders
+// ---------------------------------------------------------------------------
+
+fn tab_status_dot(
+    state: crate::detect::AgentState,
+    seen: bool,
+    mode: TabStatusMode,
+    palette: &crate::app::state::Palette,
+) -> Option<TabStatusDot> {
+    use crate::detect::AgentState;
+
+    let visible = match mode {
+        TabStatusMode::Off => false,
+        TabStatusMode::Attention => matches!(
+            (state, seen),
+            (AgentState::Blocked, _) | (AgentState::Idle, false)
+        ),
+        TabStatusMode::All => !matches!(state, AgentState::Unknown),
+    };
+    if !visible {
+        return None;
+    }
+    let (glyph, style) = super::status::state_dot(state, seen, palette);
+    Some(TabStatusDot { glyph, style })
+}
+
+pub(crate) fn build_tab_chromes(
+    ws: &crate::workspace::Workspace,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    show_tab_status: TabStatusMode,
+    palette: &crate::app::state::Palette,
+) -> Vec<TabChrome> {
+    use crate::detect::AgentState;
+
+    let mut chromes: Vec<TabChrome> = Vec::with_capacity(ws.tabs.len());
+    let mut attention_count = 0usize;
+    let mut dot_count = 0usize;
+
+    for tab_idx in 0..ws.tabs.len() {
+        let (chrome, source) = build_tab_chrome(ws, tab_idx, terminals, show_tab_status, palette);
+        if chrome.status.is_some() {
+            dot_count += 1;
+        }
+        if let Some((state, seen)) = source {
+            if matches!(state, AgentState::Blocked)
+                || matches!((state, seen), (AgentState::Idle, false))
+            {
+                attention_count += 1;
+            }
+        }
+        chromes.push(chrome);
+    }
+
+    if !matches!(show_tab_status, TabStatusMode::Off) {
+        tracing::debug!(
+            visible_tabs = chromes.len(),
+            dot_count,
+            attention_count,
+            "tab chrome built"
+        );
+    }
+
+    chromes
+}
+
+fn build_tab_chrome(
+    ws: &crate::workspace::Workspace,
+    tab_idx: usize,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    show_tab_status: TabStatusMode,
+    palette: &crate::app::state::Palette,
+) -> (TabChrome, Option<(crate::detect::AgentState, bool)>) {
+    let name = ws
+        .tab_display_name(tab_idx)
+        .unwrap_or_else(|| (tab_idx + 1).to_string());
+    let Some(tab) = ws.tabs.get(tab_idx) else {
+        return (
+            TabChrome {
+                status: None,
+                name,
+                zoomed: false,
+            },
+            None,
+        );
+    };
+    let zoomed = tab.zoomed;
+
+    let (status, source) = if matches!(show_tab_status, TabStatusMode::Off) {
+        (None, None)
+    } else {
+        let (state, seen) = crate::app::actions::tab_aggregate_state(tab, terminals);
+        let dot = tab_status_dot(state, seen, show_tab_status, palette);
+        let glyph = dot.as_ref().map(|d| d.glyph).unwrap_or("none");
+        tracing::trace!(
+            tab_idx,
+            %name,
+            ?state,
+            seen,
+            ?show_tab_status,
+            glyph,
+            "tab chrome"
+        );
+        (dot, Some((state, seen)))
+    };
+
+    (
+        TabChrome {
+            status,
+            name,
+            zoomed,
+        },
+        source,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Shared helper for both call sites (compute_view_internal & refresh_tab_bar_view)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn build_tab_bar_inputs(
+    ws: &crate::workspace::Workspace,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    show_tab_status: TabStatusMode,
+    palette: &crate::app::state::Palette,
+) -> (Vec<TabChrome>, usize, TabStatusMode) {
+    let chromes = build_tab_chromes(ws, terminals, show_tab_status, palette);
+    (chromes, ws.active_tab, show_tab_status)
+}
+
+// ---------------------------------------------------------------------------
+// TabBarView
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TabBarView {
     pub scroll: usize,
     pub tab_hit_areas: Vec<Rect>,
+    pub tab_chrome: Vec<TabChrome>,
+    pub tab_status_mode: TabStatusMode,
     pub scroll_left_hit_area: Rect,
     pub scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
 }
 
-fn tab_width(ws: &crate::workspace::Workspace, tab_idx: usize) -> u16 {
-    (tab_chrome_label(ws, tab_idx).chars().count() as u16 + 4).max(MIN_TAB_WIDTH)
+fn tab_width(chrome: &TabChrome, mode: TabStatusMode) -> u16 {
+    chrome
+        .display_width(mode)
+        .saturating_add(4)
+        .max(MIN_TAB_WIDTH)
 }
 
-fn tab_chrome_label(ws: &crate::workspace::Workspace, tab_idx: usize) -> String {
-    let name = ws
-        .tab_display_name(tab_idx)
-        .unwrap_or_else(|| (tab_idx + 1).to_string());
-    if ws.tabs.get(tab_idx).is_some_and(|tab| tab.zoomed) {
-        format!("{name} Z")
-    } else {
-        name
-    }
-}
-
-fn layout_tab_hit_areas(ws: &crate::workspace::Workspace, area: Rect, scroll: usize) -> Vec<Rect> {
-    let mut rects = vec![Rect::default(); ws.tabs.len()];
+fn layout_tab_hit_areas(
+    chromes: &[TabChrome],
+    mode: TabStatusMode,
+    area: Rect,
+    scroll: usize,
+) -> Vec<Rect> {
+    let mut rects = vec![Rect::default(); chromes.len()];
     if area.width == 0 || area.height == 0 {
         return rects;
     }
@@ -48,7 +258,7 @@ fn layout_tab_hit_areas(ws: &crate::workspace::Workspace, area: Rect, scroll: us
         if x >= right {
             break;
         }
-        let desired = tab_width(ws, idx);
+        let desired = tab_width(&chromes[idx], mode);
         let remaining = right.saturating_sub(x);
         let width = desired.min(remaining).max(1);
         *rect = Rect::new(x, area.y, width, 1);
@@ -57,14 +267,19 @@ fn layout_tab_hit_areas(ws: &crate::workspace::Workspace, area: Rect, scroll: us
     rects
 }
 
-fn centered_tab_scroll(ws: &crate::workspace::Workspace, area: Rect) -> usize {
-    let mut best_scroll = ws.active_tab;
+fn centered_tab_scroll(
+    chromes: &[TabChrome],
+    active_tab: usize,
+    mode: TabStatusMode,
+    area: Rect,
+) -> usize {
+    let mut best_scroll = active_tab;
     let mut best_distance = u16::MAX;
     let viewport_center = area.x.saturating_mul(2).saturating_add(area.width);
 
-    for scroll in 0..=ws.active_tab {
-        let rects = layout_tab_hit_areas(ws, area, scroll);
-        let Some(active_rect) = rects.get(ws.active_tab).copied() else {
+    for scroll in 0..=active_tab {
+        let rects = layout_tab_hit_areas(chromes, mode, area, scroll);
+        let Some(active_rect) = rects.get(active_tab).copied() else {
             continue;
         };
         if active_rect.width == 0 {
@@ -94,10 +309,10 @@ fn trailing_tab_controls_x(tab_hit_areas: &[Rect], fallback_x: u16) -> u16 {
         .unwrap_or(fallback_x)
 }
 
-fn max_tab_scroll(ws: &crate::workspace::Workspace, area: Rect) -> usize {
-    (0..ws.tabs.len())
+fn max_tab_scroll(chromes: &[TabChrome], mode: TabStatusMode, area: Rect) -> usize {
+    (0..chromes.len())
         .find(|&scroll| {
-            layout_tab_hit_areas(ws, area, scroll)
+            layout_tab_hit_areas(chromes, mode, area, scroll)
                 .last()
                 .is_some_and(|rect| rect.width > 0)
         })
@@ -105,7 +320,9 @@ fn max_tab_scroll(ws: &crate::workspace::Workspace, area: Rect) -> usize {
 }
 
 pub(crate) fn compute_tab_bar_view(
-    ws: &crate::workspace::Workspace,
+    chromes: Vec<TabChrome>,
+    active_tab: usize,
+    mode: TabStatusMode,
     area: Rect,
     current_scroll: usize,
     follow_active: bool,
@@ -116,15 +333,18 @@ pub(crate) fn compute_tab_bar_view(
     }
 
     if !mouse_chrome {
-        let max_scroll = max_tab_scroll(ws, area);
+        let max_scroll = max_tab_scroll(&chromes, mode, area);
         let scroll = if follow_active {
-            centered_tab_scroll(ws, area).min(max_scroll)
+            centered_tab_scroll(&chromes, active_tab, mode, area).min(max_scroll)
         } else {
             current_scroll.min(max_scroll)
         };
+        let tab_hit_areas = layout_tab_hit_areas(&chromes, mode, area, scroll);
         return TabBarView {
             scroll,
-            tab_hit_areas: layout_tab_hit_areas(ws, area, scroll),
+            tab_hit_areas,
+            tab_chrome: chromes,
+            tab_status_mode: mode,
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area: Rect::default(),
@@ -138,7 +358,7 @@ pub(crate) fn compute_tab_bar_view(
         area.width.saturating_sub(NEW_TAB_WIDTH),
         area.height,
     );
-    let all_tabs = layout_tab_hit_areas(ws, all_tabs_area, 0);
+    let all_tabs = layout_tab_hit_areas(&chromes, mode, all_tabs_area, 0);
     let overflow = all_tabs.iter().any(|rect| rect.width == 0);
     if !overflow {
         let new_tab_x = trailing_tab_controls_x(&all_tabs, area.x);
@@ -151,6 +371,8 @@ pub(crate) fn compute_tab_bar_view(
         return TabBarView {
             scroll: 0,
             tab_hit_areas: all_tabs,
+            tab_chrome: chromes,
+            tab_status_mode: mode,
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area,
@@ -168,13 +390,13 @@ pub(crate) fn compute_tab_bar_view(
         area.height,
     );
 
-    let max_scroll = max_tab_scroll(ws, tab_area);
+    let max_scroll = max_tab_scroll(&chromes, mode, tab_area);
     let scroll = if follow_active {
-        centered_tab_scroll(ws, tab_area).min(max_scroll)
+        centered_tab_scroll(&chromes, active_tab, mode, tab_area).min(max_scroll)
     } else {
         current_scroll.min(max_scroll)
     };
-    let tab_hit_areas = layout_tab_hit_areas(ws, tab_area, scroll);
+    let tab_hit_areas = layout_tab_hit_areas(&chromes, mode, tab_area, scroll);
     let trailing_x = trailing_tab_controls_x(&tab_hit_areas, tab_area_x).min(tab_area_right);
     let right_hit_area = Rect::new(
         trailing_x,
@@ -195,6 +417,8 @@ pub(crate) fn compute_tab_bar_view(
     TabBarView {
         scroll,
         tab_hit_areas,
+        tab_chrome: chromes,
+        tab_status_mode: mode,
         scroll_left_hit_area: left_hit_area,
         scroll_right_hit_area: right_hit_area,
         new_tab_hit_area,
@@ -334,10 +558,13 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         } else {
             Style::default().fg(p.overlay1).bg(p.surface0)
         };
-        let width = rect.width as usize;
-        let name = tab_chrome_label(ws, idx);
-        let text = format!(" {:width$}", name, width = width.saturating_sub(1));
-        frame.render_widget(Paragraph::new(text).style(style), rect);
+
+        let spans = if let Some(chrome) = app.view.tab_chrome.get(idx) {
+            chrome.into_spans(app.view.tab_status_mode, rect.width)
+        } else {
+            vec![Span::raw(" ".repeat(rect.width as usize))]
+        };
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(style), rect);
     }
 
     if let Some(crate::app::state::DragState {
@@ -406,6 +633,35 @@ mod tests {
             .to_string()
     }
 
+    fn make_ws_with_tabs(names: &[&str]) -> crate::workspace::Workspace {
+        assert!(
+            !names.is_empty(),
+            "make_ws_with_tabs requires at least one tab"
+        );
+        let mut ws = Workspace::test_new("test");
+        ws.tabs[0].set_custom_name(names[0].to_string());
+        for &name in &names[1..] {
+            ws.test_add_tab(Some(name));
+        }
+        ws
+    }
+
+    fn chromes_from_ws(ws: &crate::workspace::Workspace) -> Vec<TabChrome> {
+        (0..ws.tabs.len())
+            .map(|i| {
+                let name = ws
+                    .tab_display_name(i)
+                    .unwrap_or_else(|| (i + 1).to_string());
+                let zoomed = ws.tabs.get(i).is_some_and(|tab| tab.zoomed);
+                TabChrome {
+                    status: None,
+                    name,
+                    zoomed,
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn tab_bar_marks_zoomed_tabs_without_renaming_them() {
         let mut app = AppState::test_new();
@@ -417,8 +673,19 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.view.tab_bar_rect = Rect::new(0, 0, 30, 1);
-        let view = compute_tab_bar_view(&app.workspaces[0], app.view.tab_bar_rect, 0, true, false);
+        let chromes = chromes_from_ws(&app.workspaces[0]);
+        let view = compute_tab_bar_view(
+            chromes,
+            app.workspaces[0].active_tab,
+            TabStatusMode::Off,
+            app.view.tab_bar_rect,
+            0,
+            true,
+            false,
+        );
         app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.tab_chrome = view.tab_chrome;
+        app.view.tab_status_mode = view.tab_status_mode;
 
         let backend = TestBackend::new(30, 1);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -438,49 +705,45 @@ mod tests {
 
     #[test]
     fn zoom_marker_counts_toward_tab_width() {
-        let mut ws = Workspace::test_new("test");
-        ws.tabs[0].set_custom_name("abcdefgh".into());
-        ws.tabs[0].zoomed = true;
-
-        assert_eq!(tab_width(&ws, 0), 14);
+        let chrome = TabChrome {
+            status: None,
+            name: "abcdefgh".into(),
+            zoomed: true,
+        };
+        assert_eq!(tab_width(&chrome, TabStatusMode::Off), 14);
     }
 
     // Characterization tests pinning the current tab bar layout behavior.
-    // The TabChrome restructure must keep these passing. Pinned invariants:
     // gap=1 col between tabs, MIN_TAB_WIDTH=8, padding=4 cols around the label,
     // zoom suffix " Z", no status-dot column (TabStatusMode::Off baseline).
-    // When step-3 introduces TabStatusMode, calls must default to Off to preserve
-    // the literal expectations below.
-
-    fn make_ws_with_tabs(names: &[&str]) -> crate::workspace::Workspace {
-        assert!(
-            !names.is_empty(),
-            "make_ws_with_tabs requires at least one tab"
-        );
-        let mut ws = Workspace::test_new("test");
-        ws.tabs[0].set_custom_name(names[0].to_string());
-        for &name in &names[1..] {
-            ws.test_add_tab(Some(name));
-        }
-        ws
-    }
 
     #[test]
     fn overflow_detected_when_tabs_exceed_area() {
-        // 3 tabs named "ab" each → tab_width = (2+4).max(8) = 8.
-        // Total with gaps: 8 + 1 + 8 + 1 + 8 = 26 cols.
-        // mouse_chrome=true reserves NEW_TAB_WIDTH(3): all_tabs_area = area.width - 3.
-        // At area=30, all_tabs_area=27, all three tabs fit.
         let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 30, 1);
-        let view = compute_tab_bar_view(&ws, area, 0, true, true);
+        let view = compute_tab_bar_view(
+            chromes.clone(),
+            ws.active_tab,
+            TabStatusMode::Off,
+            area,
+            0,
+            true,
+            true,
+        );
         assert_eq!(view.scroll_left_hit_area.width, 0);
         assert_eq!(view.scroll_right_hit_area.width, 0);
 
-        // At area=21, all_tabs_area=18. tab2 starts at x=18, x>=right triggers break,
-        // tab2 keeps default Rect (width=0). Overflow detected.
         let narrow_area = Rect::new(0, 0, 21, 1);
-        let view_narrow = compute_tab_bar_view(&ws, narrow_area, 0, true, true);
+        let view_narrow = compute_tab_bar_view(
+            chromes,
+            ws.active_tab,
+            TabStatusMode::Off,
+            narrow_area,
+            0,
+            true,
+            true,
+        );
         assert!(view_narrow.scroll_left_hit_area.width > 0);
         assert!(view_narrow.scroll_right_hit_area.width > 0);
     }
@@ -488,9 +751,17 @@ mod tests {
     #[test]
     fn no_overflow_non_mouse_mode_all_tabs_visible() {
         let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
-        // 3 tabs × 8 width + 2 gaps = 26.
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 26, 1);
-        let view = compute_tab_bar_view(&ws, area, 0, true, false);
+        let view = compute_tab_bar_view(
+            chromes,
+            ws.active_tab,
+            TabStatusMode::Off,
+            area,
+            0,
+            true,
+            false,
+        );
         assert_eq!(view.tab_hit_areas.len(), 3);
         assert!(view.tab_hit_areas.iter().all(|r| r.width > 0));
     }
@@ -498,9 +769,17 @@ mod tests {
     #[test]
     fn overflow_in_non_mouse_mode_clips_last_tab() {
         let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
-        // x advances: tab0@0 (w=8) → 9, tab1@9 (w=8) → 18, tab2@18 remaining=2 → w=2.
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 20, 1);
-        let view = compute_tab_bar_view(&ws, area, 0, true, false);
+        let view = compute_tab_bar_view(
+            chromes,
+            ws.active_tab,
+            TabStatusMode::Off,
+            area,
+            0,
+            true,
+            false,
+        );
         assert_eq!(view.tab_hit_areas[0].width, 8);
         assert_eq!(view.tab_hit_areas[1].width, 8);
         assert_eq!(view.tab_hit_areas[2].width, 2);
@@ -508,17 +787,25 @@ mod tests {
 
     #[test]
     fn centered_scroll_centers_active_tab_in_viewport() {
-        // 5 tabs × 8 width + 4 gaps = 44. Area=25. Active=middle.
-        // scroll=1 places tab2 at x=9, w=8: center=26, distance=1 from viewport_center=25.
-        // scroll=0 distance=18, scroll=2 distance=17. Best is scroll=1.
         let mut ws = make_ws_with_tabs(&["aa", "bb", "cc", "dd", "ee"]);
         ws.active_tab = 2;
+        let chromes = chromes_from_ws(&ws);
 
         let area = Rect::new(0, 0, 25, 1);
-        assert_eq!(centered_tab_scroll(&ws, area), 1);
+        assert_eq!(
+            centered_tab_scroll(&chromes, ws.active_tab, TabStatusMode::Off, area),
+            1
+        );
 
-        // Same scroll must surface on the integrated TabBarView.
-        let view = compute_tab_bar_view(&ws, area, 0, true, false);
+        let view = compute_tab_bar_view(
+            chromes,
+            ws.active_tab,
+            TabStatusMode::Off,
+            area,
+            0,
+            true,
+            false,
+        );
         assert_eq!(view.scroll, 1);
     }
 
@@ -526,30 +813,48 @@ mod tests {
     fn centered_scroll_first_tab_stays_at_zero() {
         let mut ws = make_ws_with_tabs(&["aa", "bb", "cc", "dd", "ee"]);
         ws.active_tab = 0;
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 25, 1);
-        let scroll = centered_tab_scroll(&ws, area);
+        let scroll = centered_tab_scroll(&chromes, ws.active_tab, TabStatusMode::Off, area);
         assert_eq!(scroll, 0);
     }
 
     #[test]
     fn centered_scroll_last_tab_scrolls_to_show_it() {
-        // scroll=3 places tab4 at x=9, w=8: distance=1. scroll<3 leaves tab4 farther right.
         let mut ws = make_ws_with_tabs(&["aa", "bb", "cc", "dd", "ee"]);
         ws.active_tab = 4;
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 25, 1);
-        assert_eq!(centered_tab_scroll(&ws, area), 3);
+        assert_eq!(
+            centered_tab_scroll(&chromes, ws.active_tab, TabStatusMode::Off, area),
+            3
+        );
 
-        // compute_tab_bar_view clamps the centered scroll by max_tab_scroll.
-        // max_tab_scroll for this layout is 2 (smallest scroll where tab4 stays visible),
-        // so view.scroll should be min(3, 2) = 2 even though centered_tab_scroll wants 3.
-        let view = compute_tab_bar_view(&ws, area, 0, true, false);
+        let view = compute_tab_bar_view(
+            chromes,
+            ws.active_tab,
+            TabStatusMode::Off,
+            area,
+            0,
+            true,
+            false,
+        );
         assert_eq!(view.scroll, 2);
     }
 
     #[test]
     fn compute_tab_bar_view_returns_default_for_zero_width_area() {
         let ws = make_ws_with_tabs(&["aa", "bb"]);
-        let view = compute_tab_bar_view(&ws, Rect::new(0, 0, 0, 1), 0, true, true);
+        let chromes = chromes_from_ws(&ws);
+        let view = compute_tab_bar_view(
+            chromes,
+            ws.active_tab,
+            TabStatusMode::Off,
+            Rect::new(0, 0, 0, 1),
+            0,
+            true,
+            true,
+        );
         assert_eq!(view.scroll, 0);
         assert!(view.tab_hit_areas.is_empty());
         assert_eq!(view.scroll_left_hit_area.width, 0);
@@ -560,10 +865,10 @@ mod tests {
     #[test]
     fn layout_positions_tabs_sequentially_with_gap() {
         let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(5, 3, 50, 1);
-        let rects = layout_tab_hit_areas(&ws, area, 0);
+        let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 0);
 
-        // Each tab is width 8 with a 1-column gap between them.
         assert_eq!(rects[0], Rect::new(5, 3, 8, 1));
         assert_eq!(rects[1], Rect::new(14, 3, 8, 1));
         assert_eq!(rects[2], Rect::new(23, 3, 8, 1));
@@ -572,9 +877,9 @@ mod tests {
     #[test]
     fn layout_clips_last_tab_on_right_edge() {
         let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
-        // right=20. tab0@0(w=8), tab1@9(w=8), tab2@18 remaining=2 → w=2.
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 20, 1);
-        let rects = layout_tab_hit_areas(&ws, area, 0);
+        let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 0);
 
         assert_eq!(rects[0].width, 8);
         assert_eq!(rects[0].x, 0);
@@ -587,11 +892,10 @@ mod tests {
     #[test]
     fn layout_no_left_clipping_scrolled_tabs_are_zeroed() {
         let ws = make_ws_with_tabs(&["ab", "cd", "ef", "gh"]);
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 50, 1);
-        let rects = layout_tab_hit_areas(&ws, area, 2);
+        let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 2);
 
-        // Tabs before the scroll point get default Rect (width=0). The visible
-        // tabs start at area.x — there is no left-clipping path to test.
         assert_eq!(rects[0].width, 0);
         assert_eq!(rects[1].width, 0);
         assert_eq!(rects[2].x, 0);
@@ -603,9 +907,9 @@ mod tests {
     #[test]
     fn layout_clipped_tab_has_at_least_one_column() {
         let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
-        // area=10: tab0(0..8), tab1@9 remaining=1 → w=1 (.max(1) floor).
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 10, 1);
-        let rects = layout_tab_hit_areas(&ws, area, 0);
+        let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 0);
 
         assert_eq!(rects[0].width, 8);
         assert_eq!(rects[1].x, 9);
@@ -616,9 +920,9 @@ mod tests {
     #[test]
     fn layout_with_nonzero_area_x_offset() {
         let ws = make_ws_with_tabs(&["ab", "cd"]);
-        // right = 10 + 20 = 30. tab0@10 w=8, tab1@19 w=8.
+        let chromes = chromes_from_ws(&ws);
         let area = Rect::new(10, 0, 20, 1);
-        let rects = layout_tab_hit_areas(&ws, area, 0);
+        let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 0);
 
         assert_eq!(rects[0], Rect::new(10, 0, 8, 1));
         assert_eq!(rects[1], Rect::new(19, 0, 8, 1));
@@ -640,8 +944,19 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
 
-        let view = compute_tab_bar_view(&app.workspaces[0], area, 0, true, mouse_chrome);
+        let chromes = chromes_from_ws(&app.workspaces[0]);
+        let view = compute_tab_bar_view(
+            chromes,
+            active_tab,
+            TabStatusMode::Off,
+            area,
+            0,
+            true,
+            mouse_chrome,
+        );
         app.view.tab_hit_areas = view.tab_hit_areas.clone();
+        app.view.tab_chrome = view.tab_chrome.clone();
+        app.view.tab_status_mode = view.tab_status_mode;
         app.view.tab_scroll_left_hit_area = view.scroll_left_hit_area;
         app.view.tab_scroll_right_hit_area = view.scroll_right_hit_area;
         (app, view)
@@ -656,7 +971,6 @@ mod tests {
 
     #[test]
     fn drop_indicator_x_between_tabs_is_one_before_target() {
-        // 3 tabs × 8 width + 1-col gaps. tab1.x=9, tab2.x=18.
         let (app, _) = app_with_tab_bar(&["ab", "cd", "ef"]);
         assert_eq!(tab_drop_indicator_x(&app, &app.workspaces[0], 1), Some(8));
         assert_eq!(tab_drop_indicator_x(&app, &app.workspaces[0], 2), Some(17));
@@ -664,7 +978,6 @@ mod tests {
 
     #[test]
     fn drop_indicator_x_at_end_returns_after_last_tab() {
-        // tab2.x=18, tab2.width=8 → after = 26.
         let (app, _) = app_with_tab_bar(&["ab", "cd", "ef"]);
         let tab_count = app.workspaces[0].tabs.len();
         assert_eq!(
@@ -675,7 +988,6 @@ mod tests {
 
     #[test]
     fn drop_indicator_x_at_known_widths() {
-        // "hello" and "world" are both 5 chars → tab_width = (5+4).max(8) = 9.
         let (app, view) = app_with_tab_bar(&["hello", "world"]);
         assert_eq!(view.tab_hit_areas[0], Rect::new(0, 0, 9, 1));
         assert_eq!(view.tab_hit_areas[1], Rect::new(10, 0, 9, 1));
@@ -685,30 +997,349 @@ mod tests {
         assert_eq!(tab_drop_indicator_x(&app, &app.workspaces[0], 2), Some(19));
     }
 
-    // Scroll-clipped variants: when mouse_chrome=true overflow forces some tabs offscreen,
-    // tab_drop_indicator_x routes insert_idx==0 and insert_idx==tabs.len() through the
-    // scroll button hit areas instead of the visible-tab edges.
-
     #[test]
     fn drop_indicator_x_at_start_uses_left_scroll_button_when_left_clipped() {
-        // 5 tabs × 8 + 4 gaps = 44 cols don't fit in width=25; centering tab 2 hides tab 0.
-        // Then first_visible.0 != 0 → tab_drop_indicator_x routes through left scroll button.
         let area = Rect::new(0, 0, 25, 1);
         let (app, view) = app_with_tab_bar_in(&["aa", "bb", "cc", "dd", "ee"], area, true, 2);
         assert_eq!(view.tab_hit_areas[0].width, 0);
-        // TAB_SCROLL_BUTTON_WIDTH=3 at area.x=0 → button right edge = 3.
         assert_eq!(tab_drop_indicator_x(&app, &app.workspaces[0], 0), Some(3));
     }
 
     #[test]
     fn drop_indicator_x_at_end_uses_right_scroll_button_when_right_clipped() {
-        // Same overflow setup; tab 4 also offscreen → routes through right scroll button.
         let area = Rect::new(0, 0, 25, 1);
         let (app, view) = app_with_tab_bar_in(&["aa", "bb", "cc", "dd", "ee"], area, true, 2);
         assert_eq!(view.tab_hit_areas[4].width, 0);
-        // reserved_trailing = NEW_TAB_WIDTH(3) + TAB_SCROLL_BUTTON_WIDTH(3) = 6
-        // → tab_area_right = 25 - 6 = 19 → right button x=19, tab_drop returns x-1=18.
         assert_eq!(view.scroll_right_hit_area.x.saturating_sub(1), 18);
         assert_eq!(tab_drop_indicator_x(&app, &app.workspaces[0], 5), Some(18));
+    }
+
+    // --- New unit tests for TabChrome ---
+
+    #[test]
+    fn tab_status_dot_truth_table() {
+        use crate::app::state::Palette;
+        use crate::detect::AgentState;
+
+        let p = Palette::catppuccin();
+
+        // Off mode → always None
+        assert!(tab_status_dot(AgentState::Blocked, false, TabStatusMode::Off, &p).is_none());
+        assert!(tab_status_dot(AgentState::Working, false, TabStatusMode::Off, &p).is_none());
+        assert!(tab_status_dot(AgentState::Idle, false, TabStatusMode::Off, &p).is_none());
+        assert!(tab_status_dot(AgentState::Idle, true, TabStatusMode::Off, &p).is_none());
+        assert!(tab_status_dot(AgentState::Unknown, false, TabStatusMode::Off, &p).is_none());
+
+        // Attention mode → only Blocked and Idle+unseen
+        assert!(tab_status_dot(AgentState::Blocked, false, TabStatusMode::Attention, &p).is_some());
+        assert!(tab_status_dot(AgentState::Blocked, true, TabStatusMode::Attention, &p).is_some());
+        assert!(tab_status_dot(AgentState::Idle, false, TabStatusMode::Attention, &p).is_some());
+        assert!(tab_status_dot(AgentState::Working, false, TabStatusMode::Attention, &p).is_none());
+        assert!(tab_status_dot(AgentState::Idle, true, TabStatusMode::Attention, &p).is_none());
+        assert!(tab_status_dot(AgentState::Unknown, false, TabStatusMode::Attention, &p).is_none());
+
+        // All mode → everything except Unknown
+        assert!(tab_status_dot(AgentState::Blocked, false, TabStatusMode::All, &p).is_some());
+        assert!(tab_status_dot(AgentState::Working, false, TabStatusMode::All, &p).is_some());
+        assert!(tab_status_dot(AgentState::Idle, false, TabStatusMode::All, &p).is_some());
+        assert!(tab_status_dot(AgentState::Idle, true, TabStatusMode::All, &p).is_some());
+        assert!(tab_status_dot(AgentState::Unknown, false, TabStatusMode::All, &p).is_none());
+    }
+
+    #[test]
+    fn display_width_invariants() {
+        // mode == Off, no zoom, no dot: name.len()
+        let c = TabChrome {
+            status: None,
+            name: "hello".into(),
+            zoomed: false,
+        };
+        assert_eq!(c.display_width(TabStatusMode::Off), 5);
+
+        // mode == Off, zoomed: name.len() + 2
+        let c = TabChrome {
+            status: None,
+            name: "hello".into(),
+            zoomed: true,
+        };
+        assert_eq!(c.display_width(TabStatusMode::Off), 7);
+
+        // mode == All, no dot, no zoom: name.len() + 2 (slot reservation)
+        let c = TabChrome {
+            status: None,
+            name: "hello".into(),
+            zoomed: false,
+        };
+        assert_eq!(c.display_width(TabStatusMode::All), 7);
+
+        // mode == All, with dot, with zoom: name.len() + 4
+        let c = TabChrome {
+            status: Some(TabStatusDot {
+                glyph: "●",
+                style: Style::default(),
+            }),
+            name: "hello".into(),
+            zoomed: true,
+        };
+        assert_eq!(c.display_width(TabStatusMode::All), 9);
+
+        // Width is independent of which dot variant
+        let c1 = TabChrome {
+            status: Some(TabStatusDot {
+                glyph: "●",
+                style: Style::default().fg(ratatui::style::Color::Red),
+            }),
+            name: "test".into(),
+            zoomed: false,
+        };
+        let c2 = TabChrome {
+            status: Some(TabStatusDot {
+                glyph: "○",
+                style: Style::default().fg(ratatui::style::Color::Green),
+            }),
+            name: "test".into(),
+            zoomed: false,
+        };
+        assert_eq!(
+            c1.display_width(TabStatusMode::All),
+            c2.display_width(TabStatusMode::All)
+        );
+    }
+
+    #[test]
+    fn into_spans_ordering_and_padding() {
+        // With status slot (mode=All), with dot
+        let c = TabChrome {
+            status: Some(TabStatusDot {
+                glyph: "●",
+                style: Style::default().fg(ratatui::style::Color::Red),
+            }),
+            name: "test".into(),
+            zoomed: true,
+        };
+        let spans = c.into_spans(TabStatusMode::All, 15);
+        assert_eq!(spans[0].content.as_ref(), " ");
+        assert_eq!(spans[1].content.as_ref(), "●");
+        assert_eq!(spans[2].content.as_ref(), " ");
+        assert_eq!(spans[3].content.as_ref(), "test");
+        assert_eq!(spans[4].content.as_ref(), " Z");
+        assert_eq!(spans[5].content.len(), 6);
+
+        // Reserved-but-empty status slot (mode=All, no dot) must not override fg
+        let c = TabChrome {
+            status: None,
+            name: "abc".into(),
+            zoomed: false,
+        };
+        let spans = c.into_spans(TabStatusMode::All, 10);
+        assert_eq!(spans[0].content.as_ref(), " ");
+        assert_eq!(spans[1].content.as_ref(), "  ");
+        assert!(spans[1].style.fg.is_none(), "empty slot must not set fg");
+        assert_eq!(spans[2].content.as_ref(), "abc");
+        assert_eq!(spans[3].content.len(), 4);
+
+        // No status slot (mode=Off)
+        let c = TabChrome {
+            status: None,
+            name: "xyz".into(),
+            zoomed: false,
+        };
+        let spans = c.into_spans(TabStatusMode::Off, 8);
+        assert_eq!(spans[0].content.as_ref(), " ");
+        assert_eq!(spans[1].content.as_ref(), "xyz");
+        assert_eq!(spans[2].content.len(), 4);
+    }
+
+    #[test]
+    fn width_increases_by_two_when_mode_switches_off_to_all() {
+        let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
+        let chromes = chromes_from_ws(&ws);
+        let area = Rect::new(0, 0, 80, 1);
+
+        let view_off = compute_tab_bar_view(
+            chromes.clone(),
+            ws.active_tab,
+            TabStatusMode::Off,
+            area,
+            0,
+            true,
+            false,
+        );
+        let view_all = compute_tab_bar_view(
+            chromes,
+            ws.active_tab,
+            TabStatusMode::All,
+            area,
+            0,
+            true,
+            false,
+        );
+
+        for i in 0..3 {
+            assert_eq!(
+                view_all.tab_hit_areas[i].width,
+                view_off.tab_hit_areas[i].width + 2,
+                "tab {i} width should increase by 2"
+            );
+        }
+    }
+
+    // --- Render snapshot tests ---
+
+    fn render_to_buffer(app: &AppState, area: Rect) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(area.x + area.width, area.y + area.height.max(1));
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_tab_bar(app, frame, area))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn render_snapshot_active_tab_bg_paints_full_rect() {
+        let mut app = AppState::test_new();
+        let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.show_tab_status = TabStatusMode::All;
+
+        let area = Rect::new(0, 0, 40, 1);
+        app.view.tab_bar_rect = area;
+        let chromes = chromes_from_ws(&app.workspaces[0]);
+        let view = compute_tab_bar_view(
+            chromes,
+            app.workspaces[0].active_tab,
+            TabStatusMode::All,
+            area,
+            0,
+            true,
+            false,
+        );
+        let active_rect = view.tab_hit_areas[0];
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.tab_chrome = view.tab_chrome;
+        app.view.tab_status_mode = view.tab_status_mode;
+
+        let buffer = render_to_buffer(&app, area);
+
+        // Active-tab accent bg must cover every cell of the active tab's rect.
+        for x in active_rect.x..active_rect.x + active_rect.width {
+            let cell = &buffer[(x, active_rect.y)];
+            assert_eq!(
+                cell.bg, app.palette.accent,
+                "cell at x={x} should have accent bg, got {:?}",
+                cell.bg
+            );
+        }
+    }
+
+    #[test]
+    fn render_snapshot_glyphs_for_mixed_states() {
+        // Build chromes manually with explicit dots to avoid the workspace/terminal
+        // plumbing needed for full integration. This pins the render path: a
+        // TabChrome with a given dot.glyph produces that glyph in the buffer at
+        // the expected column with the expected fg color.
+        let p = crate::app::state::Palette::catppuccin();
+        let chromes = vec![
+            TabChrome {
+                status: Some(TabStatusDot {
+                    glyph: "●",
+                    style: Style::default().fg(p.red),
+                }),
+                name: "a".into(),
+                zoomed: false,
+            },
+            TabChrome {
+                status: Some(TabStatusDot {
+                    glyph: "●",
+                    style: Style::default().fg(p.yellow),
+                }),
+                name: "b".into(),
+                zoomed: false,
+            },
+            TabChrome {
+                status: Some(TabStatusDot {
+                    glyph: "●",
+                    style: Style::default().fg(p.teal),
+                }),
+                name: "c".into(),
+                zoomed: false,
+            },
+            TabChrome {
+                status: Some(TabStatusDot {
+                    glyph: "○",
+                    style: Style::default().fg(p.green),
+                }),
+                name: "d".into(),
+                zoomed: false,
+            },
+        ];
+
+        let mut app = AppState::test_new();
+        let mut ws = make_ws_with_tabs(&["a", "b", "c", "d"]);
+        ws.active_tab = 0;
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+
+        let area = Rect::new(0, 0, 60, 1);
+        app.view.tab_bar_rect = area;
+        let view = compute_tab_bar_view(chromes, 0, TabStatusMode::All, area, 0, true, false);
+        app.view.tab_hit_areas = view.tab_hit_areas.clone();
+        app.view.tab_chrome = view.tab_chrome;
+        app.view.tab_status_mode = view.tab_status_mode;
+
+        let buffer = render_to_buffer(&app, area);
+
+        let expected = [(p.red, "●"), (p.yellow, "●"), (p.teal, "●"), (p.green, "○")];
+        for (idx, (color, glyph)) in expected.iter().enumerate() {
+            let rect = view.tab_hit_areas[idx];
+            // Leading space + dot → dot is at rect.x + 1.
+            let cell = &buffer[(rect.x + 1, rect.y)];
+            assert_eq!(cell.symbol(), *glyph, "tab {idx} glyph");
+            assert_eq!(cell.fg, *color, "tab {idx} fg");
+        }
+    }
+
+    #[test]
+    fn render_uses_view_mode_not_app_show_tab_status() {
+        // Pins the mode-drift fix: render reads app.view.tab_status_mode, not
+        // app.show_tab_status. Set the two fields to different values and
+        // verify rendering uses the view-stored mode.
+        let mut app = AppState::test_new();
+        let ws = make_ws_with_tabs(&["a", "b"]);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.show_tab_status = TabStatusMode::All;
+
+        let area = Rect::new(0, 0, 30, 1);
+        app.view.tab_bar_rect = area;
+        let chromes = chromes_from_ws(&app.workspaces[0]);
+        // Compute layout with Off — narrower tabs, no status slot.
+        let view = compute_tab_bar_view(
+            chromes,
+            app.workspaces[0].active_tab,
+            TabStatusMode::Off,
+            area,
+            0,
+            true,
+            false,
+        );
+        let off_tab_width = view.tab_hit_areas[0].width;
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.tab_chrome = view.tab_chrome;
+        app.view.tab_status_mode = view.tab_status_mode;
+        assert_eq!(app.view.tab_status_mode, TabStatusMode::Off);
+
+        let buffer = render_to_buffer(&app, area);
+        // First non-space char after the leading space should be the tab name 'a'
+        // (mode=Off → no status slot column). If render incorrectly read
+        // app.show_tab_status (=All), it would render two extra spaces or a
+        // styled empty slot before the name.
+        let cell = &buffer[(1, 0)];
+        assert_eq!(
+            cell.symbol(),
+            "a",
+            "expected name at col 1 when view mode is Off (tab width {off_tab_width})"
+        );
     }
 }

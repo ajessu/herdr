@@ -1498,14 +1498,24 @@ impl AppState {
         let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
             self.tab_scroll = 0;
             self.view.tab_hit_areas.clear();
+            self.view.tab_chrome.clear();
+            self.view.tab_status_mode = crate::config::TabStatusMode::Off;
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
             self.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
             self.view.new_tab_hit_area = ratatui::layout::Rect::default();
             return;
         };
 
-        let layout = crate::ui::compute_tab_bar_view(
+        let (chromes, active_tab, mode) = crate::ui::build_tab_bar_inputs(
             ws,
+            &self.terminals,
+            self.show_tab_status,
+            &self.palette,
+        );
+        let layout = crate::ui::compute_tab_bar_view(
+            chromes,
+            active_tab,
+            mode,
             area,
             self.tab_scroll,
             self.tab_scroll_follow_active,
@@ -1513,6 +1523,8 @@ impl AppState {
         );
         self.tab_scroll = layout.scroll;
         self.view.tab_hit_areas = layout.tab_hit_areas;
+        self.view.tab_chrome = layout.tab_chrome;
+        self.view.tab_status_mode = layout.tab_status_mode;
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
         self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;

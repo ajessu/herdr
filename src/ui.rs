@@ -84,7 +84,7 @@ pub(crate) use self::{
         mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
     },
     panes::pane_is_scrolled_back,
-    tabs::compute_tab_bar_view,
+    tabs::{build_tab_bar_inputs, compute_tab_bar_view, TabChrome},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 use crate::app::state::ViewLayout;
@@ -221,8 +221,12 @@ fn compute_view_internal(
         .active
         .and_then(|i| app.workspaces.get(i))
         .map(|ws| {
+            let (chromes, active_tab, mode) =
+                build_tab_bar_inputs(ws, &app.terminals, app.show_tab_status, &app.palette);
             compute_tab_bar_view(
-                ws,
+                chromes,
+                active_tab,
+                mode,
                 tab_bar_rect,
                 app.tab_scroll,
                 app.tab_scroll_follow_active,
@@ -273,6 +277,8 @@ fn compute_view_internal(
         workspace_card_areas,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
+        tab_chrome: tab_bar_view.tab_chrome,
+        tab_status_mode: tab_bar_view.tab_status_mode,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
@@ -342,6 +348,8 @@ fn compute_mobile_view(
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
+        tab_chrome: Vec::new(),
+        tab_status_mode: crate::config::TabStatusMode::Off,
         tab_scroll_left_hit_area: Rect::default(),
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
