@@ -287,6 +287,7 @@ mouse_scroll_lines = 3
 confirm_close = true
 prompt_new_tab_name = true
 show_agent_labels_on_pane_borders = false
+show_tab_status = "off"
 agent_panel_scope = "all"
 accent = "cyan"
 ```
@@ -308,6 +309,52 @@ Set `redraw_on_focus_gained = false` to avoid the visible full-screen refresh wh
 Set `mouse_scroll_lines` to change how many pane scrollback lines each mouse wheel notch scrolls. The default is 3. Pane apps that request mouse reporting still receive wheel events directly. Alternate-screen apps have no scrollback to scroll; see [Scrollback](#scrollback).
 
 Set `show_agent_labels_on_pane_borders = true` if you want detected agent labels in split pane borders when no manual pane label is set.
+
+## Tab status dots
+
+Show colored agent status dots on tab bar labels so you can scan tab activity without opening the sidebar. Set the mode in your config and reload:
+
+```toml
+[ui]
+show_tab_status = "attention"
+```
+
+Three modes (default is `"off"`):
+
+| Mode | Shows dots for | Use when |
+| --- | --- | --- |
+| `"off"` (default) | Nothing | You prefer a clean tab bar |
+| `"attention"` | Tabs in blocked or done (idle+unseen) state | You want tabs needing your attention to stand out |
+| `"all"` | All known agent states (blocked, working, done, idle) | You want a full activity overview |
+
+Dot colors follow the sidebar: red for blocked, yellow for working, teal for done, green for idle. Filled circle for blocked, working, and done states; open circle for idle. Unknown panes show no dot in any mode.
+
+A tab is "done" when an agent in it finished while you were on another tab; focusing the tab clears the dot to idle. When a tab contains multiple panes, the dot reflects the highest-priority pane state.
+
+### Active-tab contrast
+
+The dot inherits its foreground color from the agent state. On the active tab's accent background, some dot colors may have low contrast depending on your theme. Herdr does not auto-adjust dot colors on the active tab — choose a theme whose accent and state colors work together, or rely on the inactive tabs where contrast is higher.
+
+### Width tradeoff
+
+When `show_tab_status` is not `"off"`, every tab reserves 2 extra columns for the dot slot (1 glyph + 1 separator), even when a tab has no dot. This keeps layout stable across state transitions but means the tab bar fills up sooner on narrow terminals. With 10 tabs, that is 20 extra columns — enough to push a narrow terminal into tab-bar scroll mode. Use `"attention"` if you want dots but have limited width.
+
+### Sidebar vs tab priority
+
+The sidebar workspace dot and the tab bar dot answer different questions and use different priority orderings:
+
+- **Sidebar** (workspace row): "Has this workspace produced output worth seeing?" Priority: done > working.
+- **Tab bar** (per tab): "What is happening in this tab right now?" Priority: working > done.
+
+For a workspace with one done pane and one working pane, the sidebar shows the done color (teal) while the tab shows the working color (yellow). This divergence is intentional.
+
+### Mobile layout
+
+The mobile single-column layout shows a workspace-level agent indicator, not per-tab dots. `show_tab_status` has no visible effect at mobile terminal widths.
+
+### Live-reload caveat
+
+`show_tab_status` lives in the `[ui]` config section. If you set an invalid value (anything other than `"off"`, `"attention"`, or `"all"`), Herdr rejects the entire `[ui]` section on reload and keeps all prior `[ui]` values — not just `show_tab_status`. Double-check spelling when editing this field.
 
 ## Notifications
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added configurable agent status dots on tab bar labels with `[ui] show_tab_status`. Three modes: `"off"` (default, no dots), `"attention"` (dots for blocked and done tabs only), and `"all"` (dots for all known agent states). Dot colors match the sidebar's existing state palette. Enabled modes reserve a constant-width slot per tab to prevent layout jitter on state transitions.
+
 ## [0.7.0] - 2026-06-15
 
 ### Added
