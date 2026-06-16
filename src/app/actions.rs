@@ -1510,6 +1510,7 @@ impl AppState {
             ws,
             &self.terminals,
             self.show_tab_status,
+            self.spinner_tick,
             &self.palette,
         );
         let layout = crate::ui::compute_tab_bar_view(

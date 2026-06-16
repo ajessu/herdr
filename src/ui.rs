@@ -221,8 +221,13 @@ fn compute_view_internal(
         .active
         .and_then(|i| app.workspaces.get(i))
         .map(|ws| {
-            let (chromes, active_tab, mode) =
-                build_tab_bar_inputs(ws, &app.terminals, app.show_tab_status, &app.palette);
+            let (chromes, active_tab, mode) = build_tab_bar_inputs(
+                ws,
+                &app.terminals,
+                app.show_tab_status,
+                app.spinner_tick,
+                &app.palette,
+            );
             compute_tab_bar_view(
                 chromes,
                 active_tab,

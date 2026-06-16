@@ -88,6 +88,7 @@ fn tab_status_dot(
     state: crate::detect::AgentState,
     seen: bool,
     mode: TabStatusMode,
+    tick: u32,
     palette: &crate::app::state::Palette,
 ) -> Option<TabStatusDot> {
     use crate::detect::AgentState;
@@ -103,7 +104,7 @@ fn tab_status_dot(
     if !visible {
         return None;
     }
-    let (glyph, style) = super::status::state_dot(state, seen, palette);
+    let (glyph, style) = super::status::agent_icon(state, seen, tick, palette);
     Some(TabStatusDot { glyph, style })
 }
 
@@ -114,6 +115,7 @@ pub(crate) fn build_tab_chromes(
         crate::terminal::TerminalState,
     >,
     show_tab_status: TabStatusMode,
+    spinner_tick: u32,
     palette: &crate::app::state::Palette,
 ) -> Vec<TabChrome> {
     use crate::detect::AgentState;
@@ -123,7 +125,8 @@ pub(crate) fn build_tab_chromes(
     let mut dot_count = 0usize;
 
     for tab_idx in 0..ws.tabs.len() {
-        let (chrome, source) = build_tab_chrome(ws, tab_idx, terminals, show_tab_status, palette);
+        let (chrome, source) =
+            build_tab_chrome(ws, tab_idx, terminals, show_tab_status, spinner_tick, palette);
         if chrome.status.is_some() {
             dot_count += 1;
         }
@@ -157,6 +160,7 @@ fn build_tab_chrome(
         crate::terminal::TerminalState,
     >,
     show_tab_status: TabStatusMode,
+    spinner_tick: u32,
     palette: &crate::app::state::Palette,
 ) -> (TabChrome, Option<(crate::detect::AgentState, bool)>) {
     let name = ws
@@ -178,7 +182,7 @@ fn build_tab_chrome(
         (None, None)
     } else {
         let (state, seen) = crate::app::actions::tab_aggregate_state(tab, terminals);
-        let dot = tab_status_dot(state, seen, show_tab_status, palette);
+        let dot = tab_status_dot(state, seen, show_tab_status, spinner_tick, palette);
         let glyph = dot.as_ref().map(|d| d.glyph).unwrap_or("none");
         tracing::trace!(
             tab_idx,
@@ -213,9 +217,10 @@ pub(crate) fn build_tab_bar_inputs(
         crate::terminal::TerminalState,
     >,
     show_tab_status: TabStatusMode,
+    spinner_tick: u32,
     palette: &crate::app::state::Palette,
 ) -> (Vec<TabChrome>, usize, TabStatusMode) {
-    let chromes = build_tab_chromes(ws, terminals, show_tab_status, palette);
+    let chromes = build_tab_chromes(ws, terminals, show_tab_status, spinner_tick, palette);
     (chromes, ws.active_tab, show_tab_status)
 }
 
@@ -1022,28 +1027,42 @@ mod tests {
         use crate::detect::AgentState;
 
         let p = Palette::catppuccin();
+        let tick = 0u32;
 
         // Off mode → always None
-        assert!(tab_status_dot(AgentState::Blocked, false, TabStatusMode::Off, &p).is_none());
-        assert!(tab_status_dot(AgentState::Working, false, TabStatusMode::Off, &p).is_none());
-        assert!(tab_status_dot(AgentState::Idle, false, TabStatusMode::Off, &p).is_none());
-        assert!(tab_status_dot(AgentState::Idle, true, TabStatusMode::Off, &p).is_none());
-        assert!(tab_status_dot(AgentState::Unknown, false, TabStatusMode::Off, &p).is_none());
+        assert!(tab_status_dot(AgentState::Blocked, false, TabStatusMode::Off, tick, &p).is_none());
+        assert!(tab_status_dot(AgentState::Working, false, TabStatusMode::Off, tick, &p).is_none());
+        assert!(tab_status_dot(AgentState::Idle, false, TabStatusMode::Off, tick, &p).is_none());
+        assert!(tab_status_dot(AgentState::Idle, true, TabStatusMode::Off, tick, &p).is_none());
+        assert!(tab_status_dot(AgentState::Unknown, false, TabStatusMode::Off, tick, &p).is_none());
 
         // Attention mode → only Blocked and Idle+unseen
-        assert!(tab_status_dot(AgentState::Blocked, false, TabStatusMode::Attention, &p).is_some());
-        assert!(tab_status_dot(AgentState::Blocked, true, TabStatusMode::Attention, &p).is_some());
-        assert!(tab_status_dot(AgentState::Idle, false, TabStatusMode::Attention, &p).is_some());
-        assert!(tab_status_dot(AgentState::Working, false, TabStatusMode::Attention, &p).is_none());
-        assert!(tab_status_dot(AgentState::Idle, true, TabStatusMode::Attention, &p).is_none());
-        assert!(tab_status_dot(AgentState::Unknown, false, TabStatusMode::Attention, &p).is_none());
+        assert!(
+            tab_status_dot(AgentState::Blocked, false, TabStatusMode::Attention, tick, &p).is_some()
+        );
+        assert!(
+            tab_status_dot(AgentState::Blocked, true, TabStatusMode::Attention, tick, &p).is_some()
+        );
+        assert!(
+            tab_status_dot(AgentState::Idle, false, TabStatusMode::Attention, tick, &p).is_some()
+        );
+        assert!(
+            tab_status_dot(AgentState::Working, false, TabStatusMode::Attention, tick, &p).is_none()
+        );
+        assert!(
+            tab_status_dot(AgentState::Idle, true, TabStatusMode::Attention, tick, &p).is_none()
+        );
+        assert!(
+            tab_status_dot(AgentState::Unknown, false, TabStatusMode::Attention, tick, &p)
+                .is_none()
+        );
 
         // All mode → everything except Unknown
-        assert!(tab_status_dot(AgentState::Blocked, false, TabStatusMode::All, &p).is_some());
-        assert!(tab_status_dot(AgentState::Working, false, TabStatusMode::All, &p).is_some());
-        assert!(tab_status_dot(AgentState::Idle, false, TabStatusMode::All, &p).is_some());
-        assert!(tab_status_dot(AgentState::Idle, true, TabStatusMode::All, &p).is_some());
-        assert!(tab_status_dot(AgentState::Unknown, false, TabStatusMode::All, &p).is_none());
+        assert!(tab_status_dot(AgentState::Blocked, false, TabStatusMode::All, tick, &p).is_some());
+        assert!(tab_status_dot(AgentState::Working, false, TabStatusMode::All, tick, &p).is_some());
+        assert!(tab_status_dot(AgentState::Idle, false, TabStatusMode::All, tick, &p).is_some());
+        assert!(tab_status_dot(AgentState::Idle, true, TabStatusMode::All, tick, &p).is_some());
+        assert!(tab_status_dot(AgentState::Unknown, false, TabStatusMode::All, tick, &p).is_none());
     }
 
     #[test]
@@ -1235,15 +1254,16 @@ mod tests {
 
     #[test]
     fn render_snapshot_glyphs_for_mixed_states() {
-        // Build chromes manually with explicit dots to avoid the workspace/terminal
-        // plumbing needed for full integration. This pins the render path: a
+        // Build chromes manually with the glyphs `agent_icon` produces (the same
+        // icons the sidebar/agents panel uses). This pins the render path: a
         // TabChrome with a given dot.glyph produces that glyph in the buffer at
         // the expected column with the expected fg color.
         let p = crate::app::state::Palette::catppuccin();
+        let working_glyph = super::spinner_frame(0);
         let chromes = vec![
             TabChrome {
                 status: Some(TabStatusDot {
-                    glyph: "●",
+                    glyph: "◉",
                     style: Style::default().fg(p.red),
                 }),
                 name: "a".into(),
@@ -1251,7 +1271,7 @@ mod tests {
             },
             TabChrome {
                 status: Some(TabStatusDot {
-                    glyph: "●",
+                    glyph: working_glyph,
                     style: Style::default().fg(p.yellow),
                 }),
                 name: "b".into(),
@@ -1267,7 +1287,7 @@ mod tests {
             },
             TabChrome {
                 status: Some(TabStatusDot {
-                    glyph: "○",
+                    glyph: "✓",
                     style: Style::default().fg(p.green),
                 }),
                 name: "d".into(),
@@ -1290,7 +1310,12 @@ mod tests {
 
         let buffer = render_to_buffer(&app, area);
 
-        let expected = [(p.red, "●"), (p.yellow, "●"), (p.teal, "●"), (p.green, "○")];
+        let expected = [
+            (p.red, "◉"),
+            (p.yellow, working_glyph),
+            (p.teal, "●"),
+            (p.green, "✓"),
+        ];
         for (idx, (color, glyph)) in expected.iter().enumerate() {
             let rect = view.tab_hit_areas[idx];
             // Leading space + dot → dot is at rect.x + 1.
