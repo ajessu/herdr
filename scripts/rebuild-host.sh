@@ -60,11 +60,16 @@ git merge --ff-only "$REMOTE/$BRANCH"
 commit=$(git rev-parse --short HEAD)
 echo "==> building $REPO @ $commit ($BRANCH)"
 
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+
 docker run --rm \
     -v "$REPO":/src \
     -w /src \
     -e ZIG_VERSION="$ZIG_VERSION" \
     -e TARGET="$TARGET" \
+    -e HOST_UID="$HOST_UID" \
+    -e HOST_GID="$HOST_GID" \
     "$RUST_IMAGE" \
     bash -euo pipefail -c '
         apt-get update >/dev/null
@@ -82,17 +87,18 @@ docker run --rm \
         zig version
         rustup target add "${TARGET}"
         cd /src
-        # Let cargo's build.rs rerun-if-changed handle vendor/libghostty-vt
-        # rebuilds — same workflow as `just build`. Upstream CI wipes zig
-        # caches between jobs for determinism, but we reuse target/ across
-        # runs and that wipe breaks incremental builds (build.rs fingerprint
-        # is unchanged so cargo skips it, then linking fails on missing
-        # libghostty-vt).
+        # Let cargo build.rs rerun-if-changed handle vendor/libghostty-vt;
+        # do not wipe zig caches between runs (that breaks incremental
+        # builds when target/ is reused).
         export LIBGHOSTTY_VT_OPTIMIZE=ReleaseFast
         export LIBGHOSTTY_VT_SIMD=true
         mkdir -p /src/.local/zig-cache
         export ZIG_GLOBAL_CACHE_DIR=/src/.local/zig-cache
         cargo build --release --locked --target "${TARGET}"
+        # Match build outputs to host ownership so the next run can reuse
+        # them without sudo chown. Container runs as root; without this,
+        # target/ and .local/ are root-owned on the host.
+        chown -R "${HOST_UID}:${HOST_GID}" /src/target /src/.local /src/vendor/libghostty-vt/zig-out /src/vendor/libghostty-vt/.zig-cache 2>/dev/null || true
     '
 
 BIN="$REPO/target/$TARGET/release/herdr"
