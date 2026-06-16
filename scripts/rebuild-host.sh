@@ -82,7 +82,12 @@ docker run --rm \
         zig version
         rustup target add "${TARGET}"
         cd /src
-        rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+        # Let cargo's build.rs rerun-if-changed handle vendor/libghostty-vt
+        # rebuilds — same workflow as `just build`. Upstream CI wipes zig
+        # caches between jobs for determinism, but we reuse target/ across
+        # runs and that wipe breaks incremental builds (build.rs fingerprint
+        # is unchanged so cargo skips it, then linking fails on missing
+        # libghostty-vt).
         export LIBGHOSTTY_VT_OPTIMIZE=ReleaseFast
         export LIBGHOSTTY_VT_SIMD=true
         mkdir -p /src/.local/zig-cache
