@@ -87,9 +87,15 @@ docker run --rm \
         zig version
         rustup target add "${TARGET}"
         cd /src
-        # Let cargo build.rs rerun-if-changed handle vendor/libghostty-vt;
-        # do not wipe zig caches between runs (that breaks incremental
-        # builds when target/ is reused).
+        # build.rs rerun-if-changed watches inputs only, never outputs.
+        # If vendor/libghostty-vt/zig-out is missing (e.g. wiped by a prior
+        # broken run), cargo will skip build.rs based on its cached
+        # fingerprint, link will fail with `cannot find -lghostty-vt`.
+        # Force a rerun by touching build.rs when zig-out is absent.
+        if [ ! -d vendor/libghostty-vt/zig-out/lib ]; then
+            echo "zig-out missing — forcing build.rs rerun"
+            touch build.rs
+        fi
         export LIBGHOSTTY_VT_OPTIMIZE=ReleaseFast
         export LIBGHOSTTY_VT_SIMD=true
         mkdir -p /src/.local/zig-cache
