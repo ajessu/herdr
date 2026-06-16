@@ -3630,8 +3630,12 @@ impl HeadlessServer {
         let server_event_tx = self.server_event_tx.clone();
         let cancel_clone = cancellation.clone();
 
+        // Report the address the listener actually bound to, not the requested
+        // one, so an ephemeral port (e.g. `--bind 127.0.0.1:0`) yields a usable
+        // URL instead of `:0`.
+        let actual_addr = listener.local_addr().unwrap_or(bind_addr);
         let scheme = "http";
-        let url = format!("{scheme}://{bind_addr}");
+        let url = format!("{scheme}://{actual_addr}");
 
         tokio::spawn(async move {
             if let Err(err) = crate::web::serve_web_server(

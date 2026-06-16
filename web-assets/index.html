@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>herdr</title>
+  <link rel="stylesheet" href="/assets/xterm/xterm.css">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <div id="login">
+    <div class="login-card">
+      <h1>herdr</h1>
+      <form id="login-form">
+        <input type="password" id="token-input" placeholder="Enter token" autocomplete="off" autofocus>
+        <button type="submit">Connect</button>
+      </form>
+      <div id="login-error" class="error" hidden></div>
+    </div>
+  </div>
+  <div id="terminal" hidden></div>
+  <script src="/assets/xterm/xterm.min.js"></script>
+  <script src="/assets/xterm/addon-fit.min.js"></script>
+  <script src="/assets/xterm/addon-webgl.min.js"></script>
+  <script src="/assets/xterm/addon-web-links.min.js"></script>
+  <script src="/assets/auth.js"></script>
+  <script src="/assets/terminal.js"></script>
+  <script src="/assets/input.js"></script>
+  <script src="/assets/resize.js"></script>
+</body>
+</html>

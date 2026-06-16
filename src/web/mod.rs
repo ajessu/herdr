@@ -2,6 +2,7 @@
 //!
 //! Conditionally compiled behind `#[cfg(feature = "web")]`.
 
+mod assets;
 mod auth;
 mod bridge;
 mod messages;
@@ -128,6 +129,8 @@ pub async fn serve_web_server(
     };
 
     let app = Router::new()
+        .route("/", get(assets::serve_index))
+        .route("/assets/{*path}", get(assets::serve_asset))
         .route("/auth", post(handle_auth))
         .route("/ws", get(ws::ws_handler))
         .route("/healthz", get(handle_healthz))
