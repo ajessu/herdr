@@ -347,6 +347,10 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PluginPaneOpen(_) => "plugin.pane.open",
         Method::PluginPaneFocus(_) => "plugin.pane.focus",
         Method::PluginPaneClose(_) => "plugin.pane.close",
+        #[cfg(feature = "web")]
+        Method::WebStart(_) => "web.start",
+        #[cfg(feature = "web")]
+        Method::WebStatus(_) => "web.status",
     }
 }
 

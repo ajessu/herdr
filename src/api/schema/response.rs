@@ -224,6 +224,20 @@ pub enum ResponseResult {
         status: crate::config::ConfigReloadStatus,
         diagnostics: Vec<String>,
     },
+    #[cfg(feature = "web")]
+    WebStarted {
+        url: String,
+        token: String,
+    },
+    #[cfg(feature = "web")]
+    WebAlreadyRunning {
+        url: String,
+    },
+    #[cfg(feature = "web")]
+    WebStatus {
+        running: bool,
+        url: Option<String>,
+    },
     Ok {},
 }
 

@@ -1,5 +1,8 @@
 use std::io;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 
 use interprocess::local_socket::traits::{Listener as _, Stream as _};
 use tokio::sync::mpsc;
@@ -11,15 +14,14 @@ use crate::server::client_transport::{self, ServerEvent};
 /// Accepts pending thin-client connections and starts their handshake readers.
 pub(crate) fn accept_pending_client_connections(
     listener: &LocalListener,
-    next_client_id: &mut u64,
+    next_client_id: &Arc<AtomicU64>,
     should_quit: &Arc<AtomicBool>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
 ) -> io::Result<()> {
     loop {
         match listener.accept() {
             Ok(stream) => {
-                let client_id = *next_client_id;
-                *next_client_id = next_client_id.saturating_add(1);
+                let client_id = next_client_id.fetch_add(1, Ordering::Relaxed);
 
                 if let Err(err) = stream.set_nonblocking(true) {
                     warn!(err = %err, "failed to set client stream nonblocking");

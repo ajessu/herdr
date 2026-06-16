@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -70,6 +70,13 @@ use crate::protocol::RenderEncoding;
 use crate::server::client_transport::ClientWriter;
 #[cfg(test)]
 use std::fs;
+
+#[cfg(feature = "web")]
+struct WebServerState {
+    url: String,
+    #[allow(dead_code)]
+    cancellation: tokio_util::sync::CancellationToken,
+}
 
 fn sound_notify_message(sound: crate::sound::Sound) -> &'static str {
     match sound {
@@ -200,8 +207,7 @@ pub struct HeadlessServer {
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
-    #[cfg(unix)]
-    next_client_id: u64,
+    next_client_id: Arc<AtomicU64>,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
     foreground_client_id: Option<u64>,
     /// Server-owned keybindings, restored when foreground clients use server mode.
@@ -230,6 +236,8 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    #[cfg(feature = "web")]
+    web_state: Option<WebServerState>,
 }
 
 fn apply_terminal_attach_scroll(
@@ -310,9 +318,9 @@ fn spawn_windows_client_accept_thread(
     listener: LocalListener,
     should_quit: Arc<AtomicBool>,
     server_event_tx: mpsc::Sender<ServerEvent>,
+    next_client_id: Arc<AtomicU64>,
 ) {
     std::thread::spawn(move || {
-        let mut next_client_id = 1_u64;
         while !should_quit.load(Ordering::Acquire) {
             let stream = match listener.accept() {
                 Ok(stream) => stream,
@@ -326,8 +334,7 @@ fn spawn_windows_client_accept_thread(
                 }
             };
 
-            let client_id = next_client_id;
-            next_client_id = next_client_id.saturating_add(1);
+            let client_id = next_client_id.fetch_add(1, Ordering::Relaxed);
 
             if let Err(err) = stream.set_nonblocking(true) {
                 warn!(err = %err, "failed to set client stream nonblocking");
@@ -376,11 +383,17 @@ impl HeadlessServer {
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
         let should_quit = Arc::new(AtomicBool::new(false));
+        let next_client_id = Arc::new(AtomicU64::new(1));
 
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
         #[cfg(windows)]
-        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
+        spawn_windows_client_accept_thread(
+            listener,
+            should_quit.clone(),
+            server_event_tx.clone(),
+            next_client_id.clone(),
+        );
 
         let server_keybindings = app_keybindings(&app);
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
@@ -399,8 +412,7 @@ impl HeadlessServer {
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
-            #[cfg(unix)]
-            next_client_id: 1,
+            next_client_id,
             foreground_client_id: None,
             server_keybindings,
             server_config_diagnostic,
@@ -415,6 +427,8 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            #[cfg(feature = "web")]
+            web_state: None,
         })
     }
 
@@ -1264,7 +1278,7 @@ impl HeadlessServer {
         }
         accept_pending_client_connections(
             &self.client_listener,
-            &mut self.next_client_id,
+            &self.next_client_id,
             &self.should_quit,
             &self.server_event_tx,
         )
@@ -2558,6 +2572,18 @@ impl HeadlessServer {
                 let _ = msg.respond_to.send(response);
                 return true;
             }
+            #[cfg(feature = "web")]
+            api::schema::Method::WebStart(params) => {
+                let response = self.handle_web_start_api(msg.request.id.clone(), params.clone());
+                let _ = msg.respond_to.send(response);
+                return false;
+            }
+            #[cfg(feature = "web")]
+            api::schema::Method::WebStatus(_) => {
+                let response = self.handle_web_status_api(msg.request.id.clone());
+                let _ = msg.respond_to.send(response);
+                return false;
+            }
             _ => {}
         }
 
@@ -3526,6 +3552,126 @@ impl HeadlessServer {
         }
         Ok(())
     }
+
+    #[cfg(feature = "web")]
+    fn handle_web_start_api(
+        &mut self,
+        request_id: String,
+        params: api::schema::WebStartParams,
+    ) -> String {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        const DEFAULT_BIND: SocketAddr =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7681);
+        const DEFAULT_SESSION_TTL_SECS: u64 = 86400;
+        const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1800;
+
+        if let Some(ref ws) = self.web_state {
+            return serde_json::to_string(&api::schema::SuccessResponse {
+                id: request_id,
+                result: api::schema::ResponseResult::WebAlreadyRunning {
+                    url: ws.url.clone(),
+                },
+            })
+            .unwrap_or_default();
+        }
+
+        let bind_addr: SocketAddr = match params.bind_addr.as_deref() {
+            Some(s) => match s.parse() {
+                Ok(addr) => addr,
+                Err(err) => {
+                    return serde_json::to_string(&api::schema::ErrorResponse {
+                        id: request_id,
+                        error: api::schema::ErrorBody {
+                            code: "invalid_bind_addr".into(),
+                            message: format!("invalid bind_addr {s:?}: {err}"),
+                        },
+                    })
+                    .unwrap_or_default();
+                }
+            },
+            None => DEFAULT_BIND,
+        };
+
+        let token = params.token.unwrap_or_else(crate::web::generate_token);
+
+        let session_ttl =
+            Duration::from_secs(params.session_ttl_secs.unwrap_or(DEFAULT_SESSION_TTL_SECS));
+        let idle_timeout = Duration::from_secs(
+            params
+                .idle_timeout_secs
+                .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
+        );
+
+        let config = crate::web::WebServerConfig {
+            bind_addr,
+            token: token.clone(),
+            tls: None,
+            session_ttl,
+            idle_timeout,
+        };
+
+        let listener = match crate::web::bind_web_server(&config) {
+            Ok(listener) => listener,
+            Err(err) => {
+                return serde_json::to_string(&api::schema::ErrorResponse {
+                    id: request_id,
+                    error: api::schema::ErrorBody {
+                        code: "web_bind_failed".into(),
+                        message: err.to_string(),
+                    },
+                })
+                .unwrap_or_default();
+            }
+        };
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let next_client_id = self.next_client_id.clone();
+        let server_event_tx = self.server_event_tx.clone();
+        let cancel_clone = cancellation.clone();
+
+        let scheme = "http";
+        let url = format!("{scheme}://{bind_addr}");
+
+        tokio::spawn(async move {
+            if let Err(err) = crate::web::serve_web_server(
+                listener,
+                config,
+                server_event_tx,
+                next_client_id,
+                cancel_clone,
+            )
+            .await
+            {
+                error!("web server failed: {err}");
+            }
+        });
+
+        self.web_state = Some(WebServerState {
+            url: url.clone(),
+            cancellation,
+        });
+
+        serde_json::to_string(&api::schema::SuccessResponse {
+            id: request_id,
+            result: api::schema::ResponseResult::WebStarted { url, token },
+        })
+        .unwrap_or_default()
+    }
+
+    #[cfg(feature = "web")]
+    fn handle_web_status_api(&self, request_id: String) -> String {
+        let (running, url) = match &self.web_state {
+            Some(ws) => (true, Some(ws.url.clone())),
+            None => (false, None),
+        };
+
+        serde_json::to_string(&api::schema::SuccessResponse {
+            id: request_id,
+            result: api::schema::ResponseResult::WebStatus { running, url },
+        })
+        .unwrap_or_default()
+    }
 }
 
 impl Drop for HeadlessServer {
@@ -3892,10 +4038,16 @@ mod tests {
             .set_nonblocking(ListenerNonblockingMode::Accept)
             .expect("set listener nonblocking");
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
+        let next_client_id = Arc::new(AtomicU64::new(1));
         #[cfg(windows)]
         let should_quit = Arc::new(AtomicBool::new(false));
         #[cfg(windows)]
-        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
+        spawn_windows_client_accept_thread(
+            listener,
+            should_quit.clone(),
+            server_event_tx.clone(),
+            next_client_id.clone(),
+        );
         let server_keybindings = app_keybindings(&app);
 
         HeadlessServer {
@@ -3909,8 +4061,7 @@ mod tests {
             client_socket_path: socket_path,
             client_socket_identity,
             clients: HashMap::new(),
-            #[cfg(unix)]
-            next_client_id: 1,
+            next_client_id,
             foreground_client_id: None,
             server_keybindings,
             server_config_diagnostic: None,
@@ -3928,6 +4079,8 @@ mod tests {
             should_quit,
             server_event_rx,
             server_event_tx,
+            #[cfg(feature = "web")]
+            web_state: None,
         }
     }
 
