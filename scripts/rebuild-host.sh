@@ -114,16 +114,8 @@ cp "$BIN" "$INSTALL"
 
 # The running herdr server is a long-lived process. Replacing the binary on
 # disk does NOT restart it — the running session and any active panes keep
-# running on whatever binary they were started from. Ask whether to pick up
-# the new binary now.
+# running on whatever binary they were started from.
 echo
 echo "The running herdr server is still on the previous binary."
-echo "  [h]andoff    herdr update --handoff (live swap, panes survive)"
-echo "  [s]top       herdr server stop (kills panes; restart with: herdr)"
-echo "  [N]o         skip (default; restart later when convenient)"
-read -r -p "Restart now? " choice
-case "${choice:-n}" in
-    h|H|handoff) herdr update --handoff ;;
-    s|S|stop)    herdr server stop && echo "stopped — start again with: herdr" ;;
-    *)           echo "skipped — restart later with: herdr update --handoff" ;;
-esac
+echo "restart with: herdr update --handoff   (live swap, panes survive)"
+echo "          or: herdr server stop && herdr   (clean restart, kills panes)"
