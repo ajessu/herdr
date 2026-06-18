@@ -15,6 +15,7 @@ use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 mod aggregate;
+pub mod floating;
 mod git;
 mod tab;
 
@@ -22,6 +23,9 @@ mod tab;
 use self::git::git_ahead_behind;
 pub(crate) use self::tab::MovedPane;
 pub use self::{
+    floating::{
+        BorderEdge, FloatingGeom, FloatingLayer, FloatingPane, FocusTarget, PaneLayer, ToggleResult,
+    },
     git::{
         derive_label_from_cwd, git_branch, git_space_metadata, git_status_cache_key,
         GitSpaceMetadata, GitStatusCacheEntry,
