@@ -43,6 +43,11 @@ tower-http = { version = "0.6", features = ["cors"], optional = true }
 [features]
 web = ["axum", "axum-extra", "tower-http", "rust-embed", "subtle", "getrandom"]
 
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+http = "1"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Wdk_System_Threading",
