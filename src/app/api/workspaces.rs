@@ -159,7 +159,7 @@ impl App {
             .map(|ws| {
                 ws.tabs
                     .iter()
-                    .flat_map(|tab| tab.layout.pane_ids())
+                    .flat_map(|tab| tab.all_pane_ids())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();

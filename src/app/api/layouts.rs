@@ -242,7 +242,7 @@ impl App {
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             zoomed: tab.zoomed,
-            focused_pane_id: self.public_pane_id(ws_idx, tab.layout.focused())?,
+            focused_pane_id: self.public_pane_id(ws_idx, tab.focused_pane_id())?,
             root: self.layout_node_description(ws_idx, tab_idx, tab.layout.root())?,
         })
     }
@@ -308,7 +308,7 @@ impl App {
             let ws = self.state.workspaces.get(ws_idx)?;
             let tab = ws.tabs.get(tab_idx)?;
             tab.cwd_for_pane(
-                tab.layout.focused(),
+                tab.focused_pane_id(),
                 &self.state.terminals,
                 &self.terminal_runtimes,
             )

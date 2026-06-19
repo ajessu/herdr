@@ -1,6 +1,4 @@
-// Step-1 of the floating-panes feature lands the pure-data model ahead of its
-// consumers (Tab/Workspace integration in step-2, input/render in steps 3-5).
-// Until those call sites exist, several public items have no in-crate caller.
+// Some methods will gain callers in steps 3-5 (input/render).
 #![allow(dead_code)]
 
 use ratatui::layout::Rect;

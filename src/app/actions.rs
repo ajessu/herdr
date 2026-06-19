@@ -315,7 +315,20 @@ impl AppState {
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
         {
-            tab.layout.focus_pane(pane_id);
+            match tab.pane_layer(pane_id) {
+                Some(crate::workspace::PaneLayer::Floating) => {
+                    tab.floating.show();
+                    tab.floating.focus_pane(pane_id);
+                    tab.floating.bring_to_front(pane_id);
+                }
+                Some(crate::workspace::PaneLayer::Tiled) => {
+                    tab.layout.focus_pane(pane_id);
+                    tab.floating.unfocus();
+                }
+                None => {
+                    return false;
+                }
+            }
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
             return true;
@@ -1353,7 +1366,7 @@ impl AppState {
             .get(ws_idx)
             .into_iter()
             .flat_map(|ws| &ws.tabs)
-            .flat_map(|tab| tab.layout.pane_ids())
+            .flat_map(|tab| tab.all_pane_ids())
             .collect()
     }
 
@@ -1375,7 +1388,7 @@ impl AppState {
         self.workspaces
             .get(ws_idx)
             .and_then(|ws| ws.tabs.get(tab_idx))
-            .map(|tab| tab.layout.pane_ids())
+            .map(|tab| tab.all_pane_ids())
             .unwrap_or_default()
     }
 
@@ -1824,18 +1837,18 @@ impl AppState {
 
     fn close_focused_pane_would_close_workspace(&self, ws_idx: usize) -> bool {
         self.workspaces.get(ws_idx).is_some_and(|ws| {
-            let pane_count = ws
+            let total = ws
                 .active_tab()
-                .map(|tab| tab.layout.pane_count())
+                .map(|tab| tab.total_pane_count())
                 .unwrap_or(0);
-            pane_count <= 1 && ws.tabs.len() <= 1
+            total <= 1 && ws.tabs.len() <= 1
         })
     }
 
     pub(crate) fn close_pane_would_close_workspace(&self, ws_idx: usize, pane_id: PaneId) -> bool {
         self.workspaces.get(ws_idx).is_some_and(|ws| {
             ws.find_tab_index_for_pane(pane_id).is_some_and(|tab_idx| {
-                ws.tabs[tab_idx].layout.pane_count() <= 1 && ws.tabs.len() <= 1
+                ws.tabs[tab_idx].total_pane_count() <= 1 && ws.tabs.len() <= 1
             })
         })
     }
@@ -3842,6 +3855,25 @@ mod tests {
         state.last_pane();
 
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(right));
+    }
+
+    #[test]
+    fn close_pane_would_close_workspace_accounts_for_floating_panes() {
+        // Exercises the real AppState::close_pane_would_close_workspace (the line
+        // this commit switched from layout.pane_count() to total_pane_count()).
+        // A lone tiled root plus a floating pane must NOT be treated as a
+        // single-pane workspace; once the floating pane is gone, closing the root
+        // would close the workspace.
+        let mut state = app_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let float_id = state.workspaces[0].test_add_floating_pane();
+        state.ensure_test_terminals();
+
+        assert!(!state.close_pane_would_close_workspace(0, root));
+        assert!(!state.close_pane_would_close_workspace(0, float_id));
+
+        assert!(!state.workspaces[0].remove_pane(float_id));
+        assert!(state.close_pane_would_close_workspace(0, root));
     }
 
     #[test]

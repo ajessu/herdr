@@ -190,7 +190,7 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let workspace = self.workspace_info(ws_idx);
         let tab = ws.tabs.get(tab_idx)?;
-        let pane_id = tab.layout.focused();
+        let pane_id = tab.focused_pane_id();
         let focused_pane = self.pane_info(ws_idx, pane_id);
         Some(self.plugin_context_from_parts(
             ws_idx,

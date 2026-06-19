@@ -202,7 +202,7 @@ impl App {
             .workspaces
             .get(ws_idx)
             .and_then(|ws| ws.tabs.get(tab_idx))
-            .map(|tab| tab.layout.pane_ids())
+            .map(|tab| tab.all_pane_ids())
             .unwrap_or_default();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &target.tab_id);

@@ -619,16 +619,17 @@ fn confirm_close_overlay_text(app: &AppState) -> (String, String) {
         })
         .unwrap_or_default();
     let closes_group = group_member_indices.len() > 1;
-    let pane_count = if closes_group {
+    let pane_count: usize = if closes_group {
         group_member_indices
             .iter()
             .filter_map(|idx| app.workspaces.get(*idx))
-            .map(|ws| ws.layout.pane_count())
+            .flat_map(|ws| &ws.tabs)
+            .map(|tab| tab.total_pane_count())
             .sum()
     } else {
         app.workspaces
             .get(app.selected)
-            .map(|ws| ws.layout.pane_count())
+            .map(|ws| ws.tabs.iter().map(|tab| tab.total_pane_count()).sum())
             .unwrap_or(0)
     };
 

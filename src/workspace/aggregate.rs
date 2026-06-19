@@ -37,8 +37,7 @@ impl Tab {
         tab_idx: usize,
         tab_label: &str,
     ) -> Vec<PaneDetail> {
-        self.layout
-            .pane_ids()
+        self.all_pane_ids()
             .iter()
             .filter_map(|id| {
                 let pane = self.panes.get(id)?;
