@@ -12,7 +12,7 @@ use crate::protocol::RenderEncoding;
 use crate::server::client_transport::{ClientWriter, ServerEvent};
 
 use super::messages::{BridgeMessage, ClientControl};
-use super::origin::validate_origin;
+use super::origin::{validate_origin, OriginDecision};
 use super::{bridge, AppState};
 
 const WS_CHANNEL_SIZE: usize = 64;
@@ -20,25 +20,93 @@ const MAX_TEXT_FRAME: usize = 64 * 1024;
 /// Matches `client_transport::MAX_INPUT_PAYLOAD` for parity with native clients.
 const MAX_INPUT_PAYLOAD: usize = 1024 * 1024;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WsGate {
+    Accept,
+    Reject401,
+    Reject403,
+}
+
+pub(crate) fn ws_gate_decision(
+    trust_proxy: bool,
+    session_valid: bool,
+    origin: &OriginDecision,
+) -> WsGate {
+    match origin {
+        OriginDecision::Accept => {}
+        OriginDecision::Reject { .. } => return WsGate::Reject403,
+    }
+
+    if trust_proxy {
+        return WsGate::Accept;
+    }
+
+    if session_valid {
+        WsGate::Accept
+    } else {
+        WsGate::Reject401
+    }
+}
+
 pub(crate) async fn ws_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let session_valid = extract_session_cookie(&headers)
-        .is_some_and(|session_id| state.auth.validate_session(&session_id));
+    let session_valid = if state.trust_proxy {
+        false
+    } else {
+        extract_session_cookie(&headers)
+            .is_some_and(|session_id| state.auth.validate_session(&session_id))
+    };
 
-    if !session_valid {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let allow_same_origin = !state.trust_proxy;
+    let origin_decision = validate_origin(&headers, &state.public_origins, allow_same_origin);
+
+    let gate = ws_gate_decision(state.trust_proxy, session_valid, &origin_decision);
+
+    match gate {
+        WsGate::Accept => {}
+        WsGate::Reject401 => {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        WsGate::Reject403 => {
+            if let OriginDecision::Reject { reason, raw } = &origin_decision {
+                warn!(
+                    reason = ?reason,
+                    raw_origin = ?raw,
+                    allowed = ?state.public_origins.as_slice(),
+                    "websocket origin rejected"
+                );
+            }
+            return StatusCode::FORBIDDEN.into_response();
+        }
     }
 
-    if !validate_origin(&headers) {
-        return StatusCode::FORBIDDEN.into_response();
+    let active = state.active_connections.load(Ordering::Relaxed);
+    if active >= state.max_connections {
+        warn!(
+            active,
+            cap = state.max_connections,
+            "connection cap reached, rejecting upgrade"
+        );
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+
+    state.active_connections.fetch_add(1, Ordering::Relaxed);
+    let conn_guard = ConnectionGuard(state.active_connections.clone());
 
     ws.max_message_size(1024 * 1024)
-        .on_upgrade(move |socket| handle_websocket(socket, state))
+        .on_upgrade(move |socket| handle_websocket(socket, state, conn_guard))
         .into_response()
+}
+
+struct ConnectionGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
@@ -52,7 +120,7 @@ fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-async fn handle_websocket(mut socket: WebSocket, state: AppState) {
+async fn handle_websocket(mut socket: WebSocket, state: AppState, _conn_guard: ConnectionGuard) {
     let (cols, rows) = match wait_for_hello(&mut socket).await {
         Some(dims) => dims,
         None => {
@@ -240,5 +308,83 @@ async fn handle_text_message(
         ClientControl::Hello { .. } => {
             // Duplicate hello after connection established — ignore.
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::origin::{OriginDecision, OriginReject};
+
+    #[test]
+    fn gate_standalone_valid_session_valid_origin() {
+        assert_eq!(
+            ws_gate_decision(false, true, &OriginDecision::Accept),
+            WsGate::Accept
+        );
+    }
+
+    #[test]
+    fn gate_standalone_invalid_session_valid_origin() {
+        assert_eq!(
+            ws_gate_decision(false, false, &OriginDecision::Accept),
+            WsGate::Reject401
+        );
+    }
+
+    #[test]
+    fn gate_standalone_valid_session_invalid_origin() {
+        let reject = OriginDecision::Reject {
+            reason: OriginReject::NotAllowed,
+            raw: Some("http://evil.com".into()),
+        };
+        assert_eq!(ws_gate_decision(false, true, &reject), WsGate::Reject403);
+    }
+
+    #[test]
+    fn gate_standalone_invalid_session_invalid_origin() {
+        let reject = OriginDecision::Reject {
+            reason: OriginReject::NotAllowed,
+            raw: Some("http://evil.com".into()),
+        };
+        assert_eq!(ws_gate_decision(false, false, &reject), WsGate::Reject403);
+    }
+
+    #[test]
+    fn gate_trust_proxy_valid_origin() {
+        assert_eq!(
+            ws_gate_decision(true, false, &OriginDecision::Accept),
+            WsGate::Accept
+        );
+    }
+
+    #[test]
+    fn gate_trust_proxy_invalid_origin() {
+        let reject = OriginDecision::Reject {
+            reason: OriginReject::NotAllowed,
+            raw: Some("http://evil.com".into()),
+        };
+        assert_eq!(ws_gate_decision(true, false, &reject), WsGate::Reject403);
+    }
+
+    #[test]
+    fn gate_trust_proxy_ignores_session() {
+        assert_eq!(
+            ws_gate_decision(true, true, &OriginDecision::Accept),
+            WsGate::Accept
+        );
+        assert_eq!(
+            ws_gate_decision(true, false, &OriginDecision::Accept),
+            WsGate::Accept
+        );
+    }
+
+    #[test]
+    fn gate_trust_proxy_never_401() {
+        let reject = OriginDecision::Reject {
+            reason: OriginReject::Missing,
+            raw: None,
+        };
+        assert_eq!(ws_gate_decision(true, false, &reject), WsGate::Reject403);
     }
 }

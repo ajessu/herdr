@@ -22,6 +22,8 @@ pub(super) fn run_web_command(args: &[String]) -> std::io::Result<i32> {
         token: opts.token.clone(),
         session_ttl_secs: None,
         idle_timeout_secs: None,
+        trust_proxy: opts.trust_proxy,
+        public_origins: opts.public_origins.clone(),
     };
 
     let response = match send_request(&Request {
@@ -56,26 +58,47 @@ pub(super) fn run_web_command(args: &[String]) -> std::io::Result<i32> {
         .and_then(|v| v.as_str())
         .unwrap_or(&fallback_url);
 
-    // WebAlreadyRunning carries no token: the server only reveals the token
-    // once, when the web server first starts. Printing a placeholder token
-    // would mislead the user into thinking they can log in with it, so report
-    // the already-running state explicitly instead.
+    let response_mode = result
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("standalone");
+
     if result.get("type").and_then(|v| v.as_str()) == Some("web_already_running") {
+        let running_mode = response_mode;
+        let requested_mode = if opts.trust_proxy {
+            "trust-proxy"
+        } else {
+            "standalone"
+        };
         println!("herdr web: already running at {url}");
-        println!("the auth token was printed when the web server first started");
+        if running_mode != requested_mode {
+            eprintln!(
+                "WARNING: server is running in {running_mode} mode but {requested_mode} was requested; \
+                 the requested mode/flags were NOT applied. Restart the web server to change modes."
+            );
+        } else {
+            println!("the auth token was printed when the web server first started");
+        }
         if !opts.no_open {
             open_browser(url);
         }
         return Ok(0);
     }
 
-    let token = result
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or("(unknown)");
-
-    println!("herdr web: {url}");
-    println!("token: {token}");
+    if response_mode == "trust-proxy" {
+        println!("herdr web: {url}");
+        println!("mode: trusted-gateway");
+        eprintln!(
+            "WARNING: trust-proxy mode — herdr does NOT authenticate clients; the upstream gateway must."
+        );
+    } else {
+        let token = result
+            .get("token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)");
+        println!("herdr web: {url}");
+        println!("token: {token}");
+    }
 
     if !opts.no_open {
         open_browser(url);
@@ -92,6 +115,8 @@ struct WebOpts {
     tls_cert: Option<String>,
     tls_key: Option<String>,
     session: Option<String>,
+    trust_proxy: bool,
+    public_origins: Vec<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<WebOpts, i32> {
@@ -101,6 +126,8 @@ fn parse_args(args: &[String]) -> Result<WebOpts, i32> {
     let mut tls_cert = None;
     let mut tls_key = None;
     let mut session = None;
+    let mut trust_proxy = false;
+    let mut public_origins = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
@@ -117,6 +144,15 @@ fn parse_args(args: &[String]) -> Result<WebOpts, i32> {
             }
             "--no-open" => {
                 no_open = true;
+                i += 1;
+            }
+            "--trust-proxy" => {
+                trust_proxy = true;
+                i += 1;
+            }
+            "--public-origin" => {
+                i += 1;
+                public_origins.push(arg_value(args, i, "--public-origin")?);
                 i += 1;
             }
             "--tls-cert" => {
@@ -153,6 +189,8 @@ fn parse_args(args: &[String]) -> Result<WebOpts, i32> {
         tls_cert,
         tls_key,
         session,
+        trust_proxy,
+        public_origins,
     })
 }
 
@@ -172,12 +210,14 @@ fn print_help() {
     eprintln!("usage: herdr web [OPTIONS]");
     eprintln!();
     eprintln!("options:");
-    eprintln!("  --bind <ADDR>       bind address [default: 127.0.0.1:7681]");
-    eprintln!("  --token <TOKEN>     use specific auth token (default: auto-generate)");
-    eprintln!("  --no-open           don't open browser automatically");
-    eprintln!("  --tls-cert <PATH>   TLS certificate file");
-    eprintln!("  --tls-key <PATH>    TLS private key file");
-    eprintln!("  --session <NAME>    target session name");
+    eprintln!("  --bind <ADDR>            bind address [default: 127.0.0.1:7681]");
+    eprintln!("  --token <TOKEN>          use specific auth token (default: auto-generate)");
+    eprintln!("  --no-open                don't open browser automatically");
+    eprintln!("  --trust-proxy            delegate user auth to upstream gateway (no login form)");
+    eprintln!("  --public-origin <ORIGIN> accept this exact Origin on /ws upgrade (repeatable)");
+    eprintln!("  --tls-cert <PATH>        TLS certificate file");
+    eprintln!("  --tls-key <PATH>         TLS private key file");
+    eprintln!("  --session <NAME>         target session name");
 }
 
 fn open_browser(url: &str) {
@@ -214,6 +254,8 @@ mod tests {
         assert_eq!(opts.tls_cert, None);
         assert_eq!(opts.tls_key, None);
         assert_eq!(opts.session, None);
+        assert!(!opts.trust_proxy);
+        assert!(opts.public_origins.is_empty());
     }
 
     #[test]
@@ -245,9 +287,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_trust_proxy() {
+        let opts = parse_args(&args(&["--trust-proxy"])).unwrap();
+        assert!(opts.trust_proxy);
+    }
+
+    #[test]
+    fn parses_public_origin_repeated() {
+        let opts = parse_args(&args(&[
+            "--public-origin",
+            "https://a.example.com",
+            "--public-origin",
+            "https://b.example.com",
+        ]))
+        .unwrap();
+        assert_eq!(opts.public_origins.len(), 2);
+        assert_eq!(opts.public_origins[0], "https://a.example.com");
+        assert_eq!(opts.public_origins[1], "https://b.example.com");
+    }
+
+    #[test]
     fn missing_value_after_flag_errors() {
         assert_eq!(parse_args(&args(&["--bind"])).unwrap_err(), 2);
         assert_eq!(parse_args(&args(&["--token"])).unwrap_err(), 2);
+        assert_eq!(parse_args(&args(&["--public-origin"])).unwrap_err(), 2);
     }
 
     #[test]

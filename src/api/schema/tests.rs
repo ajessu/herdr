@@ -855,3 +855,93 @@ fn plugin_pane_open_request_round_trips() {
     let restored: Request = serde_json::from_value(json).unwrap();
     assert_eq!(restored, request);
 }
+
+#[cfg(feature = "web")]
+#[test]
+fn web_mode_serializes_to_kebab_case() {
+    let standalone = serde_json::to_value(WebMode::Standalone).unwrap();
+    assert_eq!(standalone, "standalone");
+
+    let trust_proxy = serde_json::to_value(WebMode::TrustProxy).unwrap();
+    assert_eq!(trust_proxy, "trust-proxy");
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn web_mode_deserializes_from_kebab_case() {
+    let standalone: WebMode = serde_json::from_value("standalone".into()).unwrap();
+    assert_eq!(standalone, WebMode::Standalone);
+
+    let trust_proxy: WebMode = serde_json::from_value("trust-proxy".into()).unwrap();
+    assert_eq!(trust_proxy, WebMode::TrustProxy);
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn web_start_params_missing_new_fields_deserializes_to_defaults() {
+    let json = r#"{"bind_addr":"127.0.0.1:7681","token":"abc"}"#;
+    let params: WebStartParams = serde_json::from_str(json).unwrap();
+    assert!(!params.trust_proxy);
+    assert!(params.public_origins.is_empty());
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn web_start_params_with_new_fields_round_trips() {
+    let params = WebStartParams {
+        bind_addr: Some("127.0.0.1:0".into()),
+        token: None,
+        session_ttl_secs: None,
+        idle_timeout_secs: None,
+        trust_proxy: true,
+        public_origins: vec!["https://test.example.com".into()],
+    };
+    let json = serde_json::to_string(&params).unwrap();
+    let restored: WebStartParams = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, params);
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn web_start_params_omits_defaults_when_serialized() {
+    let params = WebStartParams {
+        bind_addr: Some("127.0.0.1:0".into()),
+        token: None,
+        session_ttl_secs: None,
+        idle_timeout_secs: None,
+        trust_proxy: false,
+        public_origins: vec![],
+    };
+    let json = serde_json::to_string(&params).unwrap();
+    assert!(!json.contains("trust_proxy"));
+    assert!(!json.contains("public_origins"));
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn web_started_response_without_mode_defaults_to_standalone() {
+    let json = r#"{"type":"web_started","url":"http://127.0.0.1:7681","token":"abc123"}"#;
+    let result: ResponseResult = serde_json::from_str(json).unwrap();
+    match result {
+        ResponseResult::WebStarted { mode, token, url } => {
+            assert_eq!(mode, WebMode::Standalone);
+            assert_eq!(token.as_deref(), Some("abc123"));
+            assert_eq!(url, "http://127.0.0.1:7681");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn web_already_running_response_without_mode_defaults_to_standalone() {
+    let json = r#"{"type":"web_already_running","url":"http://127.0.0.1:7681"}"#;
+    let result: ResponseResult = serde_json::from_str(json).unwrap();
+    match result {
+        ResponseResult::WebAlreadyRunning { mode, url } => {
+            assert_eq!(mode, WebMode::Standalone);
+            assert_eq!(url, "http://127.0.0.1:7681");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}

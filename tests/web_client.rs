@@ -413,6 +413,134 @@ fn strip_ansi(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Trust-proxy helpers
+// ---------------------------------------------------------------------------
+
+struct TrustProxyTestEnv {
+    base: PathBuf,
+    spawned: SpawnedHerdr,
+    #[allow(dead_code)]
+    api_socket: PathBuf,
+    web_url: String,
+}
+
+fn setup_trust_proxy_env(public_origins: &[&str]) -> TrustProxyTestEnv {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    let created = send_request(
+        &api_socket,
+        &format!(
+            r#"{{"id":"ws_create","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(
+        created["result"]["type"], "workspace_created",
+        "workspace create failed: {created}"
+    );
+
+    let origins_json: Vec<String> = public_origins
+        .iter()
+        .map(|o| format!("\"{o}\""))
+        .collect();
+    let origins_array = format!("[{}]", origins_json.join(","));
+
+    let web_start = send_request(
+        &api_socket,
+        &format!(
+            r#"{{"id":"web_start","method":"web.start","params":{{"bind_addr":"127.0.0.1:0","trust_proxy":true,"public_origins":{origins_array}}}}}"#,
+        ),
+    );
+    let web_url = web_start["result"]["url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("web.start trust-proxy failed: {web_start}"))
+        .to_string();
+
+    TrustProxyTestEnv {
+        base,
+        spawned,
+        api_socket,
+        web_url,
+    }
+}
+
+async fn raw_http_get(web_url: &str, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let uri: http::Uri = web_url.parse().unwrap();
+    let host = uri.authority().unwrap().to_string();
+
+    let mut stream = TcpStream::connect(&host).await.unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    response
+}
+
+async fn raw_http_post(web_url: &str, path: &str, body: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let uri: http::Uri = web_url.parse().unwrap();
+    let host = uri.authority().unwrap().to_string();
+
+    let mut stream = TcpStream::connect(&host).await.unwrap();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    response
+}
+
+async fn try_ws_upgrade(
+    web_url: &str,
+    origin: &str,
+    cookie: Option<&str>,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tungstenite::http::Response<Option<Vec<u8>>>,
+    ),
+    tungstenite::Error,
+> {
+    let uri: Uri = web_url.parse().unwrap();
+    let host = uri.authority().unwrap().to_string();
+    let ws_url = format!("ws://{host}/ws");
+
+    let mut builder = tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Host", &host)
+        .header("Origin", origin)
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        );
+
+    if let Some(c) = cookie {
+        builder = builder.header("Cookie", format!("herdr_session={c}"));
+    }
+
+    let request = builder.body(()).unwrap();
+    tokio_tungstenite::connect_async(request).await
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -641,6 +769,275 @@ async fn web_reconnect_triggers_full_redraw() {
     assert!(
         wait_for_any_binary(&mut ws2, Duration::from_secs(5)).await,
         "reconnected client should receive full redraw"
+    );
+
+    cleanup_spawned_herdr(env.spawned, env.base);
+}
+
+// ---------------------------------------------------------------------------
+// Trust-proxy mode tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn trust_proxy_config_json_returns_mode() {
+    let _lock = test_lock();
+    let uri_str = "https://test-origin.example.com";
+    let env = setup_trust_proxy_env(&[uri_str]);
+
+    let response = raw_http_get(&env.web_url, "/config.json").await;
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "config.json should return 200: {response}"
+    );
+    assert!(
+        response.contains("no-store"),
+        "should have Cache-Control: no-store"
+    );
+
+    let body_start = response.find("\r\n\r\n").unwrap() + 4;
+    let body = &response[body_start..];
+    let parsed: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+    assert_eq!(parsed, serde_json::json!({"mode": "trust-proxy"}));
+
+    cleanup_spawned_herdr(env.spawned, env.base);
+}
+
+#[tokio::test]
+async fn trust_proxy_post_auth_returns_404() {
+    let _lock = test_lock();
+    let env = setup_trust_proxy_env(&["https://test-origin.example.com"]);
+
+    let response = raw_http_post(&env.web_url, "/auth", r#"{"token":"anything"}"#).await;
+    assert!(
+        response.starts_with("HTTP/1.1 404"),
+        "POST /auth in trust-proxy should return 404: {response}"
+    );
+
+    cleanup_spawned_herdr(env.spawned, env.base);
+}
+
+#[tokio::test]
+async fn trust_proxy_ws_allowlisted_origin_succeeds() {
+    let _lock = test_lock();
+    let origin = "https://test-origin.example.com";
+    let env = setup_trust_proxy_env(&[origin]);
+
+    let result = try_ws_upgrade(&env.web_url, origin, None).await;
+    assert!(result.is_ok(), "allowlisted origin should upgrade to 101");
+
+    let (_ws, response) = result.unwrap();
+    let has_set_cookie = response
+        .headers()
+        .get("set-cookie")
+        .is_some();
+    assert!(
+        !has_set_cookie,
+        "trust-proxy upgrade response must not have Set-Cookie"
+    );
+
+    cleanup_spawned_herdr(env.spawned, env.base);
+}
+
+#[tokio::test]
+async fn trust_proxy_ws_non_allowlisted_origin_rejected() {
+    let _lock = test_lock();
+    let env = setup_trust_proxy_env(&["https://test-origin.example.com"]);
+
+    let result = try_ws_upgrade(&env.web_url, "https://evil.example.com", None).await;
+    assert!(
+        result.is_err(),
+        "non-allowlisted origin should be rejected (403)"
+    );
+
+    cleanup_spawned_herdr(env.spawned, env.base);
+}
+
+#[tokio::test]
+async fn trust_proxy_ws_same_origin_loopback_not_allowlisted_rejected() {
+    let _lock = test_lock();
+    let env = setup_trust_proxy_env(&["https://test-origin.example.com"]);
+
+    let uri: Uri = env.web_url.parse().unwrap();
+    let host = uri.authority().unwrap().to_string();
+    let same_origin = format!("http://{host}");
+
+    let result = try_ws_upgrade(&env.web_url, &same_origin, None).await;
+    assert!(
+        result.is_err(),
+        "same-origin loopback NOT allowlisted should be rejected in trust-proxy (keystone test)"
+    );
+
+    cleanup_spawned_herdr(env.spawned, env.base);
+}
+
+#[tokio::test]
+async fn trust_proxy_requires_public_origin() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    let created = send_request(
+        &api_socket,
+        &format!(
+            r#"{{"id":"ws_create","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(created["result"]["type"], "workspace_created");
+
+    let web_start = send_request(
+        &api_socket,
+        r#"{"id":"web_start","method":"web.start","params":{"bind_addr":"127.0.0.1:0","trust_proxy":true,"public_origins":[]}}"#,
+    );
+    let error_code = web_start["error"]["code"].as_str().unwrap_or("");
+    assert_eq!(
+        error_code, "trust_proxy_requires_public_origin",
+        "trust-proxy without origins should fail: {web_start}"
+    );
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[tokio::test]
+async fn standalone_config_json_returns_standalone() {
+    let _lock = test_lock();
+    let env = setup_web_env();
+
+    let response = raw_http_get(&env.web_url, "/config.json").await;
+    assert!(response.starts_with("HTTP/1.1 200"));
+
+    let body_start = response.find("\r\n\r\n").unwrap() + 4;
+    let body = &response[body_start..];
+    let parsed: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+    assert_eq!(parsed, serde_json::json!({"mode": "standalone"}));
+
+    cleanup_spawned_herdr(env.spawned, env.base);
+}
+
+#[tokio::test]
+async fn standalone_with_public_origin_allows_non_same_origin() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    let created = send_request(
+        &api_socket,
+        &format!(
+            r#"{{"id":"ws_create","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(created["result"]["type"], "workspace_created");
+
+    let token = "test_token_standalone_origin";
+    let web_start = send_request(
+        &api_socket,
+        &format!(
+            r#"{{"id":"web_start","method":"web.start","params":{{"bind_addr":"127.0.0.1:0","token":"{token}","public_origins":["https://allowed.example.com"]}}}}"#,
+        ),
+    );
+    let web_url = web_start["result"]["url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("web.start failed: {web_start}"))
+        .to_string();
+
+    let session = authenticate(&web_url, token).await;
+
+    let result =
+        try_ws_upgrade(&web_url, "https://allowed.example.com", Some(&session)).await;
+    assert!(
+        result.is_ok(),
+        "standalone with allowlisted origin + valid session should succeed"
+    );
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[tokio::test]
+async fn default_port_normalization() {
+    let _lock = test_lock();
+    let env = setup_trust_proxy_env(&["https://host.example.com"]);
+
+    let result = try_ws_upgrade(&env.web_url, "https://host.example.com:443", None).await;
+    assert!(
+        result.is_ok(),
+        "https://host:443 should match https://host (default port normalization)"
+    );
+
+    cleanup_spawned_herdr(env.spawned, env.base);
+}
+
+#[tokio::test]
+async fn mixed_scheme_public_origins_rejected() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    let created = send_request(
+        &api_socket,
+        &format!(
+            r#"{{"id":"ws_create","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(created["result"]["type"], "workspace_created");
+
+    let web_start = send_request(
+        &api_socket,
+        r#"{"id":"web_start","method":"web.start","params":{"bind_addr":"127.0.0.1:0","public_origins":["http://a.com","https://b.com"]}}"#,
+    );
+    let error_code = web_start["error"]["code"].as_str().unwrap_or("");
+    assert_eq!(
+        error_code, "mixed_scheme_public_origins",
+        "mixed scheme origins should fail: {web_start}"
+    );
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[tokio::test]
+async fn connection_cap_rejects_excess() {
+    let _lock = test_lock();
+    let origin = "https://cap-test.example.com";
+    let env = setup_trust_proxy_env(&[origin]);
+
+    let mut connections = Vec::new();
+    for _ in 0..16 {
+        let result = try_ws_upgrade(&env.web_url, origin, None).await;
+        match result {
+            Ok((ws, _)) => connections.push(ws),
+            Err(_) => break,
+        }
+    }
+
+    let excess = try_ws_upgrade(&env.web_url, origin, None).await;
+    assert!(
+        excess.is_err(),
+        "17th connection should be rejected (cap=16)"
+    );
+
+    drop(connections.pop());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let after_close = try_ws_upgrade(&env.web_url, origin, None).await;
+    assert!(
+        after_close.is_ok(),
+        "after a slot is freed, upgrade should succeed again"
     );
 
     cleanup_spawned_herdr(env.spawned, env.base);

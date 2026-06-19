@@ -74,6 +74,7 @@ use std::fs;
 #[cfg(feature = "web")]
 struct WebServerState {
     url: String,
+    mode: api::schema::WebMode,
     #[allow(dead_code)]
     cancellation: tokio_util::sync::CancellationToken,
 }
@@ -3573,11 +3574,25 @@ impl HeadlessServer {
         const DEFAULT_SESSION_TTL_SECS: u64 = 86400;
         const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1800;
 
+        let requested_mode = if params.trust_proxy {
+            api::schema::WebMode::TrustProxy
+        } else {
+            api::schema::WebMode::Standalone
+        };
+
         if let Some(ref ws) = self.web_state {
+            if ws.mode != requested_mode {
+                warn!(
+                    running_mode = ?ws.mode,
+                    requested_mode = ?requested_mode,
+                    "web server already running in a different mode; requested mode/flags NOT applied"
+                );
+            }
             return serde_json::to_string(&api::schema::SuccessResponse {
                 id: request_id,
                 result: api::schema::ResponseResult::WebAlreadyRunning {
                     url: ws.url.clone(),
+                    mode: ws.mode,
                 },
             })
             .unwrap_or_default();
@@ -3600,6 +3615,34 @@ impl HeadlessServer {
             None => DEFAULT_BIND,
         };
 
+        let public_origins: Vec<crate::web::Origin> = params
+            .public_origins
+            .iter()
+            .filter_map(|s| crate::web::origin::normalize_origin(s))
+            .collect();
+
+        if let Err(err) =
+            crate::web::validate_web_config(params.trust_proxy, &public_origins, &params.public_origins)
+        {
+            let code = match &err {
+                crate::web::WebConfigError::TrustProxyRequiresPublicOrigin => {
+                    "trust_proxy_requires_public_origin"
+                }
+                crate::web::WebConfigError::InvalidPublicOrigin(_) => "invalid_public_origin",
+                crate::web::WebConfigError::MixedSchemePublicOrigins => {
+                    "mixed_scheme_public_origins"
+                }
+            };
+            return serde_json::to_string(&api::schema::ErrorResponse {
+                id: request_id,
+                error: api::schema::ErrorBody {
+                    code: code.into(),
+                    message: err.to_string(),
+                },
+            })
+            .unwrap_or_default();
+        }
+
         let token = params.token.unwrap_or_else(crate::web::generate_token);
 
         let session_ttl =
@@ -3616,6 +3659,8 @@ impl HeadlessServer {
             tls: None,
             session_ttl,
             idle_timeout,
+            trust_proxy: params.trust_proxy,
+            public_origins,
         };
 
         let listener = match crate::web::bind_web_server(&config) {
@@ -3637,9 +3682,6 @@ impl HeadlessServer {
         let server_event_tx = self.server_event_tx.clone();
         let cancel_clone = cancellation.clone();
 
-        // Report the address the listener actually bound to, not the requested
-        // one, so an ephemeral port (e.g. `--bind 127.0.0.1:0`) yields a usable
-        // URL instead of `:0`.
         let actual_addr = listener.local_addr().unwrap_or(bind_addr);
         let scheme = "http";
         let url = format!("{scheme}://{actual_addr}");
@@ -3660,12 +3702,23 @@ impl HeadlessServer {
 
         self.web_state = Some(WebServerState {
             url: url.clone(),
+            mode: requested_mode,
             cancellation,
         });
 
+        let token_field = if params.trust_proxy {
+            None
+        } else {
+            Some(token)
+        };
+
         serde_json::to_string(&api::schema::SuccessResponse {
             id: request_id,
-            result: api::schema::ResponseResult::WebStarted { url, token },
+            result: api::schema::ResponseResult::WebStarted {
+                url,
+                token: token_field,
+                mode: requested_mode,
+            },
         })
         .unwrap_or_default()
     }

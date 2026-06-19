@@ -24,7 +24,7 @@ pub use tabs::*;
 pub use workspaces::*;
 pub use worktrees::*;
 
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 

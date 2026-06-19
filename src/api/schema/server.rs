@@ -29,6 +29,10 @@ pub struct WebStartParams {
     pub session_ttl_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "crate::api::schema::is_false")]
+    pub trust_proxy: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_origins: Vec<String>,
 }
 
 #[cfg(feature = "web")]
