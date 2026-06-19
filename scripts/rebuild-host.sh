@@ -29,7 +29,7 @@ usage() {
 usage: rebuild-host.sh <upstream|fork>
 
   upstream  fast-forward $UPSTREAM_REPO (master) from origin/master, build
-  fork      fast-forward $FORK_REPO     (main)   from ajessu/main,   build
+  fork      fast-forward $FORK_REPO     (main)   from origin/main,   build
 
 Output: $INSTALL
 Build artifacts go to <repo>/target/ (cargo) and <repo>/.local/zig-cache/.
@@ -41,7 +41,7 @@ EOF
 
 case "$1" in
     upstream) REPO="$UPSTREAM_REPO" REMOTE=origin BRANCH=master ;;
-    fork)     REPO="$FORK_REPO"     REMOTE=ajessu BRANCH=main ;;
+    fork)     REPO="$FORK_REPO"     REMOTE=origin BRANCH=main ;;
     *) usage ;;
 esac
 
