@@ -597,10 +597,15 @@ pub(crate) enum NavigateAction {
     SwapPaneRight,
     SplitVertical,
     SplitHorizontal,
+    SplitAuto,
     ClosePane,
     EditScrollback,
     CopyMode,
     Zoom,
+    MoveTabLeft,
+    MoveTabRight,
+    ResizeGrow,
+    ResizeShrink,
     EnterResizeMode,
     ToggleSidebar,
     CyclePaneNext,
@@ -706,8 +711,13 @@ fn action_for_key(
         (&kb.cycle_pane_previous, NavigateAction::CyclePanePrevious),
         (&kb.split_vertical, NavigateAction::SplitVertical),
         (&kb.split_horizontal, NavigateAction::SplitHorizontal),
+        (&kb.split_auto, NavigateAction::SplitAuto),
         (&kb.close_pane, NavigateAction::ClosePane),
         (&kb.zoom, NavigateAction::Zoom),
+        (&kb.move_tab_left, NavigateAction::MoveTabLeft),
+        (&kb.move_tab_right, NavigateAction::MoveTabRight),
+        (&kb.resize_grow, NavigateAction::ResizeGrow),
+        (&kb.resize_shrink, NavigateAction::ResizeShrink),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
         (&kb.reload_config, NavigateAction::ReloadConfig),
@@ -901,6 +911,25 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::SplitHorizontal => {
             state.split_pane(terminal_runtimes, Direction::Vertical);
             leave_navigate_mode(state);
+        }
+        NavigateAction::SplitAuto => {
+            let direction = state.auto_split_direction();
+            state.split_pane(terminal_runtimes, direction);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::MoveTabLeft => {
+            state.move_active_tab_left();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::MoveTabRight => {
+            state.move_active_tab_right();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ResizeGrow => {
+            state.resize_focused_pane(true);
+        }
+        NavigateAction::ResizeShrink => {
+            state.resize_focused_pane(false);
         }
         NavigateAction::ClosePane => {
             if !state.close_pane() {
@@ -2264,5 +2293,49 @@ last_pane = "prefix+tab"
 
         assert!(state.detach_requested);
         assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn alt_n_direct_maps_to_split_auto() {
+        let state = state_with_workspaces(&["test"]);
+        let key = TerminalKey::from(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::ALT,
+        ));
+        let action = terminal_direct_navigation_action(&state, key);
+        assert_eq!(action, Some(NavigateAction::SplitAuto));
+    }
+
+    #[test]
+    fn alt_eq_direct_maps_to_resize_grow() {
+        let state = state_with_workspaces(&["test"]);
+        let key = TerminalKey::from(KeyEvent::new(
+            KeyCode::Char('='),
+            KeyModifiers::ALT,
+        ));
+        let action = terminal_direct_navigation_action(&state, key);
+        assert_eq!(action, Some(NavigateAction::ResizeGrow));
+    }
+
+    #[test]
+    fn alt_i_direct_maps_to_move_tab_left() {
+        let state = state_with_workspaces(&["test"]);
+        let key = TerminalKey::from(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::ALT,
+        ));
+        let action = terminal_direct_navigation_action(&state, key);
+        assert_eq!(action, Some(NavigateAction::MoveTabLeft));
+    }
+
+    #[test]
+    fn alt_keys_not_reachable_via_prefix_dispatch() {
+        let state = state_with_workspaces(&["test"]);
+        let key = TerminalKey::from(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::ALT,
+        ));
+        let action = action_for_key(&state, key, BindingDispatch::Prefix);
+        assert_eq!(action, None);
     }
 }

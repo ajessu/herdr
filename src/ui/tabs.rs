@@ -1259,7 +1259,7 @@ mod tests {
         // TabChrome with a given dot.glyph produces that glyph in the buffer at
         // the expected column with the expected fg color.
         let p = crate::app::state::Palette::catppuccin();
-        let working_glyph = super::spinner_frame(0);
+        let working_glyph = crate::ui::spinner_frame(0);
         let chromes = vec![
             TabChrome {
                 status: Some(TabStatusDot {

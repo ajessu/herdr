@@ -124,17 +124,22 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.next_tab), "next tab"),
         help_entry(indexed_label(&kb.switch_tab), "switch tab 1-9"),
         help_entry(keybind_label(&kb.close_tab), "close tab"),
+        help_entry(keybind_label(&kb.move_tab_left), "move tab left"),
+        help_entry(keybind_label(&kb.move_tab_right), "move tab right"),
     ];
     groups.push(("workspaces / tabs", workspace_tab));
 
     let panes = vec![
         help_entry(keybind_label(&kb.split_vertical), "split vertical"),
         help_entry(keybind_label(&kb.split_horizontal), "split horizontal"),
+        help_entry(keybind_label(&kb.split_auto), "new pane (auto split)"),
         help_entry(keybind_label(&kb.close_pane), "close pane"),
         help_entry(keybind_label(&kb.rename_pane), "rename pane"),
         help_entry(keybind_label(&kb.edit_scrollback), "edit scrollback"),
         help_entry(keybind_label(&kb.copy_mode), "copy mode"),
         help_entry(keybind_label(&kb.zoom), "zoom pane"),
+        help_entry(keybind_label(&kb.resize_grow), "grow pane"),
+        help_entry(keybind_label(&kb.resize_shrink), "shrink pane"),
         help_entry(keybind_label(&kb.resize_mode), "resize mode"),
         help_entry(keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
         help_entry(keybind_label(&kb.focus_pane_left), "focus pane left"),
@@ -296,4 +301,36 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         ])),
         stack.footer.unwrap_or_default(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::AppState;
+
+    #[test]
+    fn keybind_help_includes_alt_labels() {
+        let state = AppState::test_new();
+        let groups = keybind_help_groups(&state);
+        let all_labels: Vec<&str> = groups
+            .iter()
+            .flat_map(|(_, entries)| entries.iter().map(|(key, _)| key.as_str()))
+            .collect();
+        assert!(
+            all_labels.iter().any(|l| l.contains("alt+h")),
+            "expected 'alt+h' in help labels: {all_labels:?}"
+        );
+        assert!(
+            all_labels.iter().any(|l| l.contains("alt+n")),
+            "expected 'alt+n' in help labels: {all_labels:?}"
+        );
+        assert!(
+            all_labels.iter().any(|l| l.contains("alt+=")),
+            "expected 'alt+=' in help labels: {all_labels:?}"
+        );
+        assert!(
+            all_labels.iter().any(|l| l.contains("alt+-")),
+            "expected 'alt+-' in help labels: {all_labels:?}"
+        );
+    }
 }
