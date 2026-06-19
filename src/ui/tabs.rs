@@ -125,8 +125,14 @@ pub(crate) fn build_tab_chromes(
     let mut dot_count = 0usize;
 
     for tab_idx in 0..ws.tabs.len() {
-        let (chrome, source) =
-            build_tab_chrome(ws, tab_idx, terminals, show_tab_status, spinner_tick, palette);
+        let (chrome, source) = build_tab_chrome(
+            ws,
+            tab_idx,
+            terminals,
+            show_tab_status,
+            spinner_tick,
+            palette,
+        );
         if chrome.status.is_some() {
             dot_count += 1;
         }
@@ -1037,25 +1043,44 @@ mod tests {
         assert!(tab_status_dot(AgentState::Unknown, false, TabStatusMode::Off, tick, &p).is_none());
 
         // Attention mode → only Blocked and Idle+unseen
-        assert!(
-            tab_status_dot(AgentState::Blocked, false, TabStatusMode::Attention, tick, &p).is_some()
-        );
-        assert!(
-            tab_status_dot(AgentState::Blocked, true, TabStatusMode::Attention, tick, &p).is_some()
-        );
+        assert!(tab_status_dot(
+            AgentState::Blocked,
+            false,
+            TabStatusMode::Attention,
+            tick,
+            &p
+        )
+        .is_some());
+        assert!(tab_status_dot(
+            AgentState::Blocked,
+            true,
+            TabStatusMode::Attention,
+            tick,
+            &p
+        )
+        .is_some());
         assert!(
             tab_status_dot(AgentState::Idle, false, TabStatusMode::Attention, tick, &p).is_some()
         );
-        assert!(
-            tab_status_dot(AgentState::Working, false, TabStatusMode::Attention, tick, &p).is_none()
-        );
+        assert!(tab_status_dot(
+            AgentState::Working,
+            false,
+            TabStatusMode::Attention,
+            tick,
+            &p
+        )
+        .is_none());
         assert!(
             tab_status_dot(AgentState::Idle, true, TabStatusMode::Attention, tick, &p).is_none()
         );
-        assert!(
-            tab_status_dot(AgentState::Unknown, false, TabStatusMode::Attention, tick, &p)
-                .is_none()
-        );
+        assert!(tab_status_dot(
+            AgentState::Unknown,
+            false,
+            TabStatusMode::Attention,
+            tick,
+            &p
+        )
+        .is_none());
 
         // All mode → everything except Unknown
         assert!(tab_status_dot(AgentState::Blocked, false, TabStatusMode::All, tick, &p).is_some());
@@ -1171,7 +1196,9 @@ mod tests {
 
     #[test]
     fn width_increases_by_two_when_mode_switches_off_to_all() {
-        let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
+        // Names long enough that neither mode clamps to MIN_TAB_WIDTH, so the
+        // 2-column status-dot slot is observable in the resulting tab width.
+        let ws = make_ws_with_tabs(&["alpha", "bravo", "delta"]);
         let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 80, 1);
 
@@ -1259,7 +1286,7 @@ mod tests {
         // TabChrome with a given dot.glyph produces that glyph in the buffer at
         // the expected column with the expected fg color.
         let p = crate::app::state::Palette::catppuccin();
-        let working_glyph = super::spinner_frame(0);
+        let working_glyph = crate::ui::spinner_frame(0);
         let chromes = vec![
             TabChrome {
                 status: Some(TabStatusDot {
