@@ -472,16 +472,216 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
 // Mouse handling
 // ---------------------------------------------------------------------------
 
-// Note: split_pane needs runtime (event_tx for PTY spawn), so it lives on App
+// Note: split_pane and floating pane methods need runtime (event_tx for PTY
+// spawn), so they live on App.
 impl AppState {
+    pub(crate) fn toggle_floating(
+        &mut self,
+        terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let (is_visible, is_focused) = {
+            let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
+                return;
+            };
+            (tab.floating.is_visible(), tab.floating.is_focused())
+        };
+
+        if is_visible && !is_focused {
+            let Some(tab) = self
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.active_tab_mut())
+            else {
+                return;
+            };
+            if tab.floating.focused_pane_id().is_none() {
+                if let Some(top) = tab.floating.pane_ids().last() {
+                    tab.floating.focus_pane(top);
+                }
+            }
+            tab.floating.show();
+            self.mark_session_dirty();
+            self.mode = Mode::Terminal;
+            return;
+        }
+
+        let result = {
+            let Some(tab) = self
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.active_tab_mut())
+            else {
+                return;
+            };
+            tab.floating.toggle_visible()
+        };
+
+        use crate::workspace::ToggleResult;
+        match result {
+            ToggleResult::Shown => {
+                self.mark_session_dirty();
+                self.mode = Mode::Terminal;
+            }
+            ToggleResult::NeedSpawn => {
+                self.new_floating_pane(terminal_runtimes);
+            }
+            ToggleResult::Hidden => {
+                self.mark_session_dirty();
+                self.mode = Mode::Terminal;
+            }
+        }
+    }
+
+    pub(crate) fn new_floating_pane(
+        &mut self,
+        terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let bounds = self.view.terminal_area;
+        if bounds.width < 20 || bounds.height < 5 {
+            return;
+        }
+
+        let follow_cwd = self
+            .active
+            .and_then(|i| self.workspaces.get(i))
+            .and_then(|ws| {
+                let tab = ws.active_tab()?;
+                tab.cwd_for_pane(tab.focused_pane_id(), &self.terminals, terminal_runtimes)
+            });
+        let cwd = Some(super::creation::resolve_new_terminal_cwd(
+            &self.new_terminal_cwd,
+            follow_cwd,
+        ));
+
+        let (rows, cols) = {
+            let height = bounds.height / 2;
+            let width = bounds.width / 2;
+            (height.max(4), width.max(10))
+        };
+
+        let previous_focus = self.current_pane_focus_target();
+        if let Some(ws_idx) = self.active {
+            let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+                return;
+            };
+            if let Ok(new_pane) = ws.spawn_floating_pane(
+                bounds,
+                rows,
+                cols,
+                cwd,
+                self.pane_scrollback_limit_bytes,
+                self.host_terminal_theme,
+                crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
+                Vec::new(),
+            ) {
+                let new_id = new_pane.pane_id;
+                terminal_runtimes.insert(new_pane.terminal.id.clone(), new_pane.runtime);
+                self.remove_alias_shadowed_by_new_pane(new_id);
+                self.terminals
+                    .insert(new_pane.terminal.id.clone(), new_pane.terminal);
+                self.record_pane_focus_change(previous_focus, ws_idx, new_id);
+                self.mark_session_dirty();
+                self.mode = Mode::Terminal;
+            }
+        }
+    }
+
+    pub(crate) fn close_floating_pane(&mut self) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
+            return;
+        };
+        if !tab.floating.is_focused() {
+            return;
+        }
+        let Some(pane_id) = tab.floating.focused_pane_id() else {
+            return;
+        };
+        let previous_focus = self.current_pane_focus_target();
+        let ws = &mut self.workspaces[ws_idx];
+        ws.remove_pane(pane_id);
+        if let Some(new_focused) = ws.focused_pane_id() {
+            self.record_pane_focus_change(previous_focus, ws_idx, new_focused);
+        }
+        self.mark_session_dirty();
+        self.mode = Mode::Terminal;
+    }
+
+    pub(crate) fn move_floating(&mut self, dx: i16, dy: i16) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.active_tab_mut())
+        else {
+            return;
+        };
+        if !tab.floating.is_focused() {
+            return;
+        }
+        let bounds = self.view.terminal_area;
+        tab.floating.move_focused(dx, dy, bounds);
+        self.mark_session_dirty();
+    }
+
+    pub(crate) fn resize_floating(&mut self, dw: i16, dh: i16) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.active_tab_mut())
+        else {
+            return;
+        };
+        if !tab.floating.is_focused() {
+            return;
+        }
+        let bounds = self.view.terminal_area;
+        tab.floating.resize_focused(dw, dh, bounds);
+        self.mark_session_dirty();
+    }
+
+    pub(crate) fn cycle_floating_focus(&mut self, reverse: bool) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.active_tab_mut())
+        else {
+            return;
+        };
+        if !tab.floating.is_focused() {
+            return;
+        }
+        tab.floating.cycle_focus(reverse);
+        self.mark_session_dirty();
+    }
+
     pub(crate) fn split_pane(
         &mut self,
         terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
         direction: Direction,
     ) {
-        // Actual PTY spawning happens in Workspace::split_focused
-        // which needs events channel — this is called from navigate_key
-        // where we don't have async context, so the workspace handles it
+        if let Some(tab) = self
+            .active
+            .and_then(|i| self.workspaces.get(i))
+            .and_then(|ws| ws.active_tab())
+        {
+            if tab.focused_target().is_floating() {
+                return;
+            }
+        }
         let (rows, cols) = self.estimate_pane_size();
         let new_rows = (rows / 2).max(4);
         let new_cols = (cols / 2).max(10);

@@ -312,6 +312,17 @@ pub struct Keybinds {
     pub resize_shrink: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
+    pub toggle_floating: ActionKeybinds,
+    pub new_floating_pane: ActionKeybinds,
+    pub close_floating_pane: ActionKeybinds,
+    pub move_floating_left: ActionKeybinds,
+    pub move_floating_down: ActionKeybinds,
+    pub move_floating_up: ActionKeybinds,
+    pub move_floating_right: ActionKeybinds,
+    pub resize_floating_grow: ActionKeybinds,
+    pub resize_floating_shrink: ActionKeybinds,
+    pub cycle_floating_next: ActionKeybinds,
+    pub cycle_floating_previous: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -504,6 +515,35 @@ impl Config {
             resize_shrink: action!("keys.resize_shrink", &self.keys.resize_shrink),
             resize_mode: action!("keys.resize_mode", &self.keys.resize_mode),
             toggle_sidebar: action!("keys.toggle_sidebar", &self.keys.toggle_sidebar),
+            toggle_floating: action!("keys.toggle_floating", &self.keys.toggle_floating),
+            new_floating_pane: action!("keys.new_floating_pane", &self.keys.new_floating_pane),
+            close_floating_pane: action!(
+                "keys.close_floating_pane",
+                &self.keys.close_floating_pane
+            ),
+            move_floating_left: action!("keys.move_floating_left", &self.keys.move_floating_left),
+            move_floating_down: action!("keys.move_floating_down", &self.keys.move_floating_down),
+            move_floating_up: action!("keys.move_floating_up", &self.keys.move_floating_up),
+            move_floating_right: action!(
+                "keys.move_floating_right",
+                &self.keys.move_floating_right
+            ),
+            resize_floating_grow: action!(
+                "keys.resize_floating_grow",
+                &self.keys.resize_floating_grow
+            ),
+            resize_floating_shrink: action!(
+                "keys.resize_floating_shrink",
+                &self.keys.resize_floating_shrink
+            ),
+            cycle_floating_next: action!(
+                "keys.cycle_floating_next",
+                &self.keys.cycle_floating_next
+            ),
+            cycle_floating_previous: action!(
+                "keys.cycle_floating_previous",
+                &self.keys.cycle_floating_previous
+            ),
             custom_commands: Vec::new(),
         };
 
@@ -1584,6 +1624,7 @@ navigate_workspace_up = ["esc", "alt+esc", "enter", "1", "tab", "shift+tab", "le
             r#"
 [keys]
 navigate_workspace_down = ["n", "f"]
+toggle_floating = ""
 
 [[keys.command]]
 key = "prefix+f"

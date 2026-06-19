@@ -618,6 +618,17 @@ pub(crate) enum NavigateAction {
     OpenNotificationTarget,
     Detach,
     OpenNavigator,
+    ToggleFloating,
+    NewFloatingPane,
+    CloseFloatingPane,
+    MoveFloatingLeft,
+    MoveFloatingDown,
+    MoveFloatingUp,
+    MoveFloatingRight,
+    ResizeFloatingGrow,
+    ResizeFloatingShrink,
+    CycleFloatingFocusNext,
+    CycleFloatingFocusPrevious,
 }
 
 fn indexed_navigation_action(
@@ -729,6 +740,26 @@ fn action_for_key(
         ),
         (&kb.detach, NavigateAction::Detach),
         (&kb.goto, NavigateAction::OpenNavigator),
+        (&kb.toggle_floating, NavigateAction::ToggleFloating),
+        (&kb.new_floating_pane, NavigateAction::NewFloatingPane),
+        (&kb.close_floating_pane, NavigateAction::CloseFloatingPane),
+        (&kb.move_floating_left, NavigateAction::MoveFloatingLeft),
+        (&kb.move_floating_down, NavigateAction::MoveFloatingDown),
+        (&kb.move_floating_up, NavigateAction::MoveFloatingUp),
+        (&kb.move_floating_right, NavigateAction::MoveFloatingRight),
+        (&kb.resize_floating_grow, NavigateAction::ResizeFloatingGrow),
+        (
+            &kb.resize_floating_shrink,
+            NavigateAction::ResizeFloatingShrink,
+        ),
+        (
+            &kb.cycle_floating_next,
+            NavigateAction::CycleFloatingFocusNext,
+        ),
+        (
+            &kb.cycle_floating_previous,
+            NavigateAction::CycleFloatingFocusPrevious,
+        ),
     ] {
         if action_matches(bindings, key, dispatch) {
             return Some(action);
@@ -982,6 +1013,50 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::OpenNavigator => state.open_navigator_from(terminal_runtimes),
+        NavigateAction::ToggleFloating => {
+            state.toggle_floating(terminal_runtimes);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::NewFloatingPane => {
+            state.new_floating_pane(terminal_runtimes);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::CloseFloatingPane => {
+            state.close_floating_pane();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::MoveFloatingLeft => {
+            state.move_floating(-2, 0);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::MoveFloatingDown => {
+            state.move_floating(0, 2);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::MoveFloatingUp => {
+            state.move_floating(0, -2);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::MoveFloatingRight => {
+            state.move_floating(2, 0);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ResizeFloatingGrow => {
+            state.resize_floating(2, 1);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ResizeFloatingShrink => {
+            state.resize_floating(-2, -1);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::CycleFloatingFocusNext => {
+            state.cycle_floating_focus(false);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::CycleFloatingFocusPrevious => {
+            state.cycle_floating_focus(true);
+            leave_navigate_mode(state);
+        }
     }
 
     finish_action_context(state, context, previous_mode);

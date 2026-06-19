@@ -1566,6 +1566,9 @@ impl AppState {
         let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
             return;
         };
+        if tab.focused_target().is_floating() {
+            return;
+        }
         let panes = if tab.zoomed {
             tab.layout.panes(self.view.terminal_area)
         } else {
@@ -1586,6 +1589,9 @@ impl AppState {
         let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
             return false;
         };
+        if tab.focused_target().is_floating() {
+            return false;
+        }
         let panes = if tab.zoomed {
             tab.layout.panes(self.view.terminal_area)
         } else {
@@ -1615,6 +1621,15 @@ impl AppState {
     }
 
     pub fn resize_pane(&mut self, direction: NavDirection) -> bool {
+        if let Some(tab) = self
+            .active
+            .and_then(|i| self.workspaces.get(i))
+            .and_then(|ws| ws.active_tab())
+        {
+            if tab.focused_target().is_floating() {
+                return false;
+            }
+        }
         let Some(first) = self.view.pane_infos.first() else {
             return false;
         };
@@ -1700,11 +1715,29 @@ impl AppState {
         let Some(ws_idx) = self.active else {
             return;
         };
-        let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
-            return;
+        let (is_floating, ids, focused) = {
+            let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
+                return;
+            };
+            (
+                tab.focused_target().is_floating(),
+                tab.layout.pane_ids(),
+                tab.layout.focused(),
+            )
         };
-        let ids = tab.layout.pane_ids();
-        if let Some(pos) = ids.iter().position(|id| *id == tab.layout.focused()) {
+        if is_floating {
+            let Some(tab) = self
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.active_tab_mut())
+            else {
+                return;
+            };
+            tab.floating.cycle_focus(reverse);
+            self.mark_session_dirty();
+            return;
+        }
+        if let Some(pos) = ids.iter().position(|id| *id == focused) {
             let target = if reverse {
                 ids[(pos + ids.len() - 1) % ids.len()]
             } else {
@@ -1718,7 +1751,7 @@ impl AppState {
         let Some(target) = self.previous_pane_focus.clone() else {
             return;
         };
-        let Some((ws_idx, tab_idx)) = self.pane_focus_target_indices(&target) else {
+        let Some((ws_idx, _tab_idx)) = self.pane_focus_target_indices(&target) else {
             self.previous_pane_focus = None;
             return;
         };
@@ -1728,16 +1761,8 @@ impl AppState {
             return;
         }
 
-        self.switch_workspace_tab(ws_idx, tab_idx);
-        if let Some(tab) = self
-            .workspaces
-            .get_mut(ws_idx)
-            .and_then(|ws| ws.tabs.get_mut(tab_idx))
-        {
-            tab.layout.focus_pane(target.pane_id);
-            self.previous_pane_focus = current;
-            self.mark_session_dirty();
-        }
+        self.focus_pane_in_workspace(ws_idx, target.pane_id);
+        self.previous_pane_focus = current;
     }
 
     pub(crate) fn apply_pane_zoom(
@@ -1798,6 +1823,11 @@ impl AppState {
         let Some(ws_idx) = self.active else {
             return;
         };
+        if let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) {
+            if tab.focused_target().is_floating() {
+                return;
+            }
+        }
         let Some(pane_id) = self
             .workspaces
             .get(ws_idx)

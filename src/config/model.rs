@@ -427,6 +427,28 @@ pub struct KeysConfig {
     pub resize_mode: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
+    /// Toggle the floating pane layer. Default: "prefix+f"
+    pub toggle_floating: BindingConfig,
+    /// Create a new floating pane. Default: "prefix+shift+f"
+    pub new_floating_pane: BindingConfig,
+    /// Close the focused floating pane. Unset by default.
+    pub close_floating_pane: BindingConfig,
+    /// Move the focused floating pane left. Unset by default.
+    pub move_floating_left: BindingConfig,
+    /// Move the focused floating pane down. Unset by default.
+    pub move_floating_down: BindingConfig,
+    /// Move the focused floating pane up. Unset by default.
+    pub move_floating_up: BindingConfig,
+    /// Move the focused floating pane right. Unset by default.
+    pub move_floating_right: BindingConfig,
+    /// Grow the focused floating pane. Unset by default.
+    pub resize_floating_grow: BindingConfig,
+    /// Shrink the focused floating pane. Unset by default.
+    pub resize_floating_shrink: BindingConfig,
+    /// Cycle focus to the next floating pane. Unset by default.
+    pub cycle_floating_next: BindingConfig,
+    /// Cycle focus to the previous floating pane. Unset by default.
+    pub cycle_floating_previous: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -644,6 +666,17 @@ impl Default for KeysConfig {
             resize_shrink: BindingConfig::one("alt+-"),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
+            toggle_floating: BindingConfig::one("prefix+f"),
+            new_floating_pane: BindingConfig::one("prefix+shift+f"),
+            close_floating_pane: BindingConfig::empty(),
+            move_floating_left: BindingConfig::empty(),
+            move_floating_down: BindingConfig::empty(),
+            move_floating_up: BindingConfig::empty(),
+            move_floating_right: BindingConfig::empty(),
+            resize_floating_grow: BindingConfig::empty(),
+            resize_floating_shrink: BindingConfig::empty(),
+            cycle_floating_next: BindingConfig::empty(),
+            cycle_floating_previous: BindingConfig::empty(),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
         }

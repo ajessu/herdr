@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use ratatui::layout::Direction;
+use ratatui::layout::{Direction, Rect};
 use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
@@ -671,6 +671,57 @@ impl Workspace {
             )?;
         self.register_new_pane_with_number(new_pane.pane_id, pane_number);
         Ok(new_pane)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_floating_pane(
+        &mut self,
+        bounds: Rect,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
+    ) -> std::io::Result<crate::workspace::tab::NewPane> {
+        let pane_number = self.next_public_pane_number;
+        let tab_number = self
+            .active_tab()
+            .map(|tab| tab.number)
+            .expect("workspace must always have at least one tab");
+        let launch_env = self.launch_env_for_new_pane(tab_number, pane_number, extra_env);
+        let tab = self
+            .active_tab_mut()
+            .expect("workspace must always have at least one tab");
+        let pane_id = PaneId::alloc();
+        let geom = tab.floating.next_geom(bounds);
+        let actual_cwd =
+            cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
+        let runtime = TerminalRuntime::spawn(
+            pane_id,
+            rows,
+            cols,
+            actual_cwd.clone(),
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            &launch_env,
+            tab.events.clone(),
+            tab.render_notify.clone(),
+            tab.render_dirty.clone(),
+        )?;
+        let terminal_id = TerminalId::alloc();
+        let terminal = TerminalState::new(terminal_id.clone(), actual_cwd);
+        tab.panes.insert(pane_id, PaneState::new(terminal_id));
+        tab.floating.add_pane(pane_id, geom);
+        tab.floating.show();
+        self.register_new_pane_with_number(pane_id, pane_number);
+        Ok(crate::workspace::tab::NewPane {
+            pane_id,
+            terminal,
+            runtime,
+        })
     }
 
     pub fn split_pane(

@@ -153,6 +153,12 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         ),
         help_entry(keybind_label(&kb.last_pane), "last pane"),
         help_entry(keybind_label(&kb.break_pane_to_tab), "break pane to tab"),
+        help_entry(keybind_label(&kb.toggle_floating), "toggle floating"),
+        help_entry(keybind_label(&kb.new_floating_pane), "new floating pane"),
+        help_entry(
+            keybind_label(&kb.close_floating_pane),
+            "close floating pane",
+        ),
     ];
     groups.push(("panes", panes));
 
