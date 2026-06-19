@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added default Alt+key shortcuts for common pane and tab actions, inspired by Zellij's ergonomics. Alt+h/j/k/l focus panes directionally, Alt+n auto-splits (side-by-side for wide panes, stacked otherwise), Alt+x closes a pane, Alt+z toggles zoom, Alt+=/- resize by 5%, and Alt+i/o move the current tab left/right. These work in terminal mode without entering prefix mode and coexist with the existing prefix bindings. All Alt shortcuts are user-configurable and removable.
 - Added configurable agent status dots on tab bar labels with `[ui] show_tab_status`. Three modes: `"off"` (default, no dots), `"attention"` (dots for blocked and done tabs only), and `"all"` (dots for all known agent states). Dot colors match the sidebar's existing state palette. Enabled modes reserve a constant-width slot per tab to prevent layout jitter on state transitions.
 
 ## [0.7.0] - 2026-06-15
