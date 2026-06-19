@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 mod dialogs;
+mod hint_bar;
 mod keybind_help;
 mod menus;
 mod mobile;
@@ -191,12 +192,23 @@ fn compute_view_internal(
         Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
 
     let has_tabs = app.active.and_then(|i| app.workspaces.get(i)).is_some();
-    let (tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
+    let hint_enabled = app.hint_bar != crate::config::HintBarStyle::Off;
+    let want_hint_row = hint_enabled && has_tabs && main_area.height >= 3;
+
+    let (tab_bar_rect, terminal_area, hint_bar_rect) = if want_hint_row {
+        let [tab, term, hint] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(main_area);
+        (tab, term, hint)
+    } else if has_tabs && main_area.height > 1 {
         let [tab_bar_rect, terminal_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
-        (tab_bar_rect, terminal_area)
+        (tab_bar_rect, terminal_area, Rect::default())
     } else {
-        (Rect::default(), main_area)
+        (Rect::default(), main_area, Rect::default())
     };
 
     if !app.sidebar_collapsed {
@@ -288,6 +300,7 @@ fn compute_view_internal(
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
         terminal_area,
+        hint_bar_rect,
         mobile_header_rect: Rect::default(),
         mobile_menu_hit_area: Rect::default(),
         toast_hit_area,
@@ -359,6 +372,7 @@ fn compute_mobile_view(
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
         terminal_area,
+        hint_bar_rect: Rect::default(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
         toast_hit_area,
@@ -395,9 +409,14 @@ pub fn render_with_runtime_registry(
     }
     render_panes(app, terminal_runtimes, frame, terminal_area);
 
+    if app.view.layout != ViewLayout::Mobile {
+        hint_bar::render_hint_bar(app, frame, app.view.hint_bar_rect);
+    }
+
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
 
+    let hint_active = hint_bar::hint_bar_active(app);
     match app.mode {
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
@@ -405,10 +424,26 @@ pub fn render_with_runtime_registry(
         Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
             render_mobile_panel(app, terminal_runtimes, frame, frame.area())
         }
-        Mode::Navigate => render_navigate_overlay(app, frame, terminal_area),
-        Mode::Prefix => render_prefix_overlay(app, frame, terminal_area),
-        Mode::Copy => render_copy_mode_overlay(app, frame, terminal_area),
-        Mode::Resize => render_resize_overlay(app, frame, terminal_area),
+        Mode::Navigate => {
+            if !hint_active {
+                render_navigate_overlay(app, frame, terminal_area);
+            }
+        }
+        Mode::Prefix => {
+            if !hint_active {
+                render_prefix_overlay(app, frame, terminal_area);
+            }
+        }
+        Mode::Copy => {
+            if !hint_active {
+                render_copy_mode_overlay(app, frame, terminal_area);
+            }
+        }
+        Mode::Resize => {
+            if !hint_active {
+                render_resize_overlay(app, frame, terminal_area);
+            }
+        }
         Mode::ConfirmClose => render_confirm_close_overlay(app, frame, terminal_area),
         Mode::ContextMenu => {
             render_context_menu(app, frame);

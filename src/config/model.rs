@@ -99,6 +99,15 @@ pub enum TabStatusMode {
     All,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HintBarStyle {
+    #[default]
+    Full,
+    Compact,
+    Off,
+}
+
 impl AgentPanelScopeConfig {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -456,6 +465,8 @@ pub struct UiConfig {
     pub accent: String,
     /// Show agent status dots on tab bar labels.
     pub show_tab_status: TabStatusMode,
+    /// Bottom hint bar showing mode-contextual keyboard shortcuts.
+    pub hint_bar: HintBarStyle,
     /// Optional visual toast notifications for background workspace events.
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
@@ -640,6 +651,7 @@ impl Default for UiConfig {
             agent_panel_scope: AgentPanelScopeConfig::All,
             accent: "cyan".into(),
             show_tab_status: TabStatusMode::Off,
+            hint_bar: HintBarStyle::Full,
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
         }

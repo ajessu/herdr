@@ -739,6 +739,7 @@ pub struct ViewState {
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
     pub terminal_area: Rect,
+    pub hint_bar_rect: Rect,
     pub mobile_header_rect: Rect,
     pub mobile_menu_hit_area: Rect,
     pub toast_hit_area: Rect,
@@ -1354,6 +1355,7 @@ pub struct AppState {
     pub prompt_new_tab_name: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub show_tab_status: crate::config::TabStatusMode,
+    pub hint_bar: crate::config::HintBarStyle,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1662,6 +1664,7 @@ impl AppState {
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
+                hint_bar_rect: Rect::default(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
@@ -1704,6 +1707,7 @@ impl AppState {
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             show_tab_status: crate::config::TabStatusMode::Off,
+            hint_bar: crate::config::HintBarStyle::Off,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,

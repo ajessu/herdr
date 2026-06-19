@@ -265,6 +265,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # all = dots for all known agent states (blocked, working, done, idle)
 # show_tab_status = "off"
 
+# Bottom hint bar showing mode-contextual keyboard shortcuts.
+# full = show all relevant hints for the current mode (default)
+# compact = show at most 4 highest-priority hints with short labels
+# off = no hint bar, legacy mode overlays remain active
+# hint_bar = "full"
+
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications
