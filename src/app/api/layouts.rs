@@ -271,6 +271,9 @@ impl App {
                 first: Box::new(self.layout_node_description(ws_idx, tab_idx, first)?),
                 second: Box::new(self.layout_node_description(ws_idx, tab_idx, second)?),
             }),
+            // TODO(step-5): map to a real LayoutNode::Stack arm. None here makes
+            // the whole tab un-exportable, so this must not survive past step-5.
+            Node::Stack { .. } => None,
         }
     }
 

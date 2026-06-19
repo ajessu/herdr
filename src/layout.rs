@@ -38,6 +38,15 @@ pub struct PaneInfo {
     /// exclude a stable hidden gutter when this is `None`.
     pub scrollbar_rect: Option<Rect>,
     pub is_focused: bool,
+    pub stack: Option<StackMember>,
+}
+
+/// Metadata for a pane that lives inside a `Node::Stack`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackMember {
+    pub collapsed: bool,
+    pub position: usize,
+    pub count: usize,
 }
 
 /// Info about a split boundary, used for mouse drag resize.
@@ -72,6 +81,10 @@ pub enum Node {
         ratio: f32,
         first: Box<Node>,
         second: Box<Node>,
+    },
+    Stack {
+        panes: Vec<PaneId>,
+        expanded: usize,
     },
 }
 
@@ -396,12 +409,42 @@ fn range_center_distance(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> 
     a_center.abs_diff(b_center)
 }
 
+// --- Stack geometry ---
+
+/// Compute rects for each member of a stack occupying `area`.
+/// Non-expanded members get 1 row each; the expanded member gets the remainder.
+/// Total function: saturating arithmetic, never panics on any input.
+fn stack_rects(area: Rect, members: usize, expanded: usize) -> Vec<Rect> {
+    if members == 0 {
+        return Vec::new();
+    }
+    let expanded = expanded.min(members.saturating_sub(1));
+    let collapsed_rows = u16::try_from(members - 1).unwrap_or(u16::MAX);
+    let expanded_height = area.height.saturating_sub(collapsed_rows);
+
+    let mut rects = Vec::with_capacity(members);
+    let mut y = area.y;
+    for i in 0..members {
+        if i == expanded {
+            let h = expanded_height.min(area.y.saturating_add(area.height).saturating_sub(y));
+            rects.push(Rect::new(area.x, y, area.width, h));
+            y = y.saturating_add(h);
+        } else {
+            let h = 1u16.min(area.y.saturating_add(area.height).saturating_sub(y));
+            rects.push(Rect::new(area.x, y, area.width, h));
+            y = y.saturating_add(h);
+        }
+    }
+    rects
+}
+
 // --- Tree operations ---
 
 fn count_panes(node: &Node) -> usize {
     match node {
         Node::Pane(_) => 1,
         Node::Split { first, second, .. } => count_panes(first) + count_panes(second),
+        Node::Stack { panes, .. } => panes.len(),
     }
 }
 
@@ -411,10 +454,10 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
             result.push(PaneInfo {
                 id: *id,
                 rect: area,
-                // inner_rect is set during render when we know if borders are shown
                 inner_rect: area,
                 scrollbar_rect: None,
                 is_focused: *id == focus,
+                stack: None,
             });
         }
         Node::Split {
@@ -426,6 +469,25 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
             let (a, b) = split_rect(area, *direction, *ratio);
             collect_panes(first, a, focus, result);
             collect_panes(second, b, focus, result);
+        }
+        Node::Stack { panes, expanded } => {
+            let rects = stack_rects(area, panes.len(), *expanded);
+            let count = panes.len();
+            for (i, id) in panes.iter().enumerate() {
+                let rect = rects.get(i).copied().unwrap_or(Rect::default());
+                result.push(PaneInfo {
+                    id: *id,
+                    rect,
+                    inner_rect: rect,
+                    scrollbar_rect: None,
+                    is_focused: *id == focus,
+                    stack: Some(StackMember {
+                        collapsed: i != *expanded,
+                        position: i,
+                        count,
+                    }),
+                });
+            }
         }
     }
 }
@@ -466,13 +528,14 @@ fn collect_ids(node: &Node, ids: &mut Vec<PaneId>) {
             collect_ids(first, ids);
             collect_ids(second, ids);
         }
+        Node::Stack { panes, .. } => ids.extend(panes),
     }
 }
 
 fn split_ratios(node: &Node) -> Vec<(Vec<bool>, f32)> {
     fn collect(node: &Node, path: &mut Vec<bool>, out: &mut Vec<(Vec<bool>, f32)>) {
         match node {
-            Node::Pane(_) => {}
+            Node::Pane(_) | Node::Stack { .. } => {}
             Node::Split {
                 ratio,
                 first,
@@ -508,6 +571,15 @@ fn swap_pane_ids(node: &mut Node, first: PaneId, second: PaneId) {
             swap_pane_ids(first_child, first, second);
             swap_pane_ids(second_child, first, second);
         }
+        Node::Stack { panes, .. } => {
+            for id in panes.iter_mut() {
+                if *id == first {
+                    *id = second;
+                } else if *id == second {
+                    *id = first;
+                }
+            }
+        }
     }
 }
 
@@ -537,6 +609,7 @@ fn split_at(
             first: Box::new(split_at(*first, target, direction, new_id, split_ratio)),
             second: Box::new(split_at(*second, target, direction, new_id, split_ratio)),
         },
+        Node::Stack { .. } => node,
     }
 }
 
@@ -568,6 +641,30 @@ fn remove_pane(node: Node, target: PaneId) -> Option<Node> {
             }),
             (None, None) => None,
         },
+        Node::Stack {
+            mut panes,
+            expanded,
+        } => {
+            let Some(pos) = panes.iter().position(|id| *id == target) else {
+                return Some(Node::Stack { panes, expanded });
+            };
+            panes.remove(pos);
+            if panes.is_empty() {
+                return None;
+            }
+            if panes.len() == 1 {
+                return Some(Node::Pane(panes[0]));
+            }
+            let new_expanded = if pos < panes.len() {
+                pos
+            } else {
+                panes.len() - 1
+            };
+            Some(Node::Stack {
+                panes,
+                expanded: new_expanded,
+            })
+        }
     }
 }
 
@@ -678,7 +775,7 @@ mod tests {
     fn split_snapshot(layout: &TileLayout) -> Vec<(Direction, f32)> {
         fn collect(node: &Node, out: &mut Vec<(Direction, f32)>) {
             match node {
-                Node::Pane(_) => {}
+                Node::Pane(_) | Node::Stack { .. } => {}
                 Node::Split {
                     direction,
                     ratio,
@@ -920,6 +1017,7 @@ mod tests {
             inner_rect: Rect::new(10, 10, 10, 10),
             scrollbar_rect: None,
             is_focused: true,
+            stack: None,
         };
         let small_overlap_first = PaneInfo {
             id: pane(2),
@@ -927,6 +1025,7 @@ mod tests {
             inner_rect: Rect::new(0, 10, 10, 2),
             scrollbar_rect: None,
             is_focused: false,
+            stack: None,
         };
         let larger_overlap_second = PaneInfo {
             id: pane(3),
@@ -934,6 +1033,7 @@ mod tests {
             inner_rect: Rect::new(0, 10, 10, 8),
             scrollbar_rect: None,
             is_focused: false,
+            stack: None,
         };
         let panes = vec![focused.clone(), small_overlap_first, larger_overlap_second];
 
@@ -941,5 +1041,277 @@ mod tests {
             find_in_direction(&focused, NavDirection::Left, &panes),
             Some(pane(3))
         );
+    }
+
+    // --- Characterization tests: lock pre-stack split-layout geometry ---
+
+    #[test]
+    fn characterization_sample_layout_pane_rects() {
+        let layout = sample_layout();
+        let rects = pane_rects(&layout);
+        assert_eq!(rects.len(), 4);
+        assert_eq!(rects[0], (pane(1), Rect::new(0, 0, 30, 40)));
+        assert_eq!(rects[1], (pane(2), Rect::new(30, 0, 70, 24)));
+        assert_eq!(rects[2], (pane(3), Rect::new(30, 24, 28, 16)));
+        assert_eq!(rects[3], (pane(4), Rect::new(58, 24, 42, 16)));
+    }
+
+    #[test]
+    fn characterization_sample_layout_navigation() {
+        let layout = sample_layout();
+        let panes = layout.panes(Rect::new(0, 0, 100, 40));
+        let focused = panes.iter().find(|p| p.id == pane(2)).unwrap();
+
+        assert_eq!(
+            find_in_direction(focused, NavDirection::Left, &panes),
+            Some(pane(1))
+        );
+        // pane(4) has more horizontal overlap with pane(2) than pane(3)
+        assert_eq!(
+            find_in_direction(focused, NavDirection::Down, &panes),
+            Some(pane(4))
+        );
+        assert_eq!(find_in_direction(focused, NavDirection::Up, &panes), None);
+
+        let p3 = panes.iter().find(|p| p.id == pane(3)).unwrap();
+        assert_eq!(
+            find_in_direction(p3, NavDirection::Right, &panes),
+            Some(pane(4))
+        );
+        assert_eq!(
+            find_in_direction(p3, NavDirection::Up, &panes),
+            Some(pane(2))
+        );
+        assert_eq!(
+            find_in_direction(p3, NavDirection::Left, &panes),
+            Some(pane(1))
+        );
+    }
+
+    #[test]
+    fn characterization_vertical_split_rects() {
+        let layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Pane(pane(2))),
+            },
+            pane(1),
+        );
+        let rects = pane_rects(&layout);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0], (pane(1), Rect::new(0, 0, 100, 20)));
+        assert_eq!(rects[1], (pane(2), Rect::new(0, 20, 100, 20)));
+    }
+
+    #[test]
+    fn characterization_horizontal_split_rects() {
+        let layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Pane(pane(2))),
+            },
+            pane(1),
+        );
+        let rects = pane_rects(&layout);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0], (pane(1), Rect::new(0, 0, 50, 40)));
+        assert_eq!(rects[1], (pane(2), Rect::new(50, 0, 50, 40)));
+    }
+
+    // --- stack_rects unit tests ---
+
+    #[test]
+    fn stack_rects_four_members_expanded_at_each_index() {
+        let area = Rect::new(0, 0, 80, 24);
+        for exp in 0..4 {
+            let rects = stack_rects(area, 4, exp);
+            assert_eq!(rects.len(), 4);
+            let mut y = 0u16;
+            for (i, r) in rects.iter().enumerate() {
+                assert_eq!(r.x, 0);
+                assert_eq!(r.width, 80);
+                assert_eq!(r.y, y);
+                if i == exp {
+                    assert_eq!(r.height, 21); // 24 - 3 collapsed rows
+                } else {
+                    assert_eq!(r.height, 1);
+                }
+                y += r.height;
+            }
+            assert_eq!(y, 24);
+        }
+    }
+
+    #[test]
+    fn stack_rects_degenerate_area_smaller_than_members() {
+        let area = Rect::new(5, 10, 80, 3);
+        let rects = stack_rects(area, 5, 2);
+        assert_eq!(rects.len(), 5);
+        for r in &rects {
+            assert_eq!(r.x, 5);
+            assert_eq!(r.width, 80);
+            assert!(r.y >= 10);
+            assert!(r.y + r.height <= 13);
+        }
+    }
+
+    #[test]
+    fn stack_rects_zero_members() {
+        let rects = stack_rects(Rect::new(0, 0, 80, 24), 0, 0);
+        assert!(rects.is_empty());
+    }
+
+    #[test]
+    fn stack_rects_expanded_out_of_range_clamped() {
+        let rects = stack_rects(Rect::new(0, 0, 80, 24), 3, 99);
+        assert_eq!(rects.len(), 3);
+        assert_eq!(rects[2].height, 22); // expanded at clamped index 2
+        assert_eq!(rects[0].height, 1);
+        assert_eq!(rects[1].height, 1);
+    }
+
+    #[test]
+    fn stack_rects_two_members() {
+        let area = Rect::new(0, 0, 80, 10);
+        let rects = stack_rects(area, 2, 0);
+        assert_eq!(rects[0], Rect::new(0, 0, 80, 9));
+        assert_eq!(rects[1], Rect::new(0, 9, 80, 1));
+
+        let rects = stack_rects(area, 2, 1);
+        assert_eq!(rects[0], Rect::new(0, 0, 80, 1));
+        assert_eq!(rects[1], Rect::new(0, 1, 80, 9));
+    }
+
+    // --- collect_panes Stack tests ---
+
+    #[test]
+    fn collect_panes_stack_emits_correct_pane_infos() {
+        let layout = TileLayout::from_saved(
+            Node::Stack {
+                panes: vec![pane(1), pane(2), pane(3)],
+                expanded: 1,
+            },
+            pane(2),
+        );
+        let infos = layout.panes(Rect::new(0, 0, 80, 24));
+        assert_eq!(infos.len(), 3);
+
+        assert_eq!(infos[0].id, pane(1));
+        assert_eq!(infos[0].rect, Rect::new(0, 0, 80, 1));
+        assert_eq!(infos[0].is_focused, false);
+        assert_eq!(
+            infos[0].stack,
+            Some(StackMember {
+                collapsed: true,
+                position: 0,
+                count: 3
+            })
+        );
+
+        assert_eq!(infos[1].id, pane(2));
+        assert_eq!(infos[1].rect, Rect::new(0, 1, 80, 22));
+        assert_eq!(infos[1].is_focused, true);
+        assert_eq!(
+            infos[1].stack,
+            Some(StackMember {
+                collapsed: false,
+                position: 1,
+                count: 3
+            })
+        );
+
+        assert_eq!(infos[2].id, pane(3));
+        assert_eq!(infos[2].rect, Rect::new(0, 23, 80, 1));
+        assert_eq!(infos[2].is_focused, false);
+        assert_eq!(
+            infos[2].stack,
+            Some(StackMember {
+                collapsed: true,
+                position: 2,
+                count: 3
+            })
+        );
+    }
+
+    #[test]
+    fn swap_pane_ids_in_stack_preserves_order_and_length() {
+        // step-2's expanded/focus reconciliation depends on swap being in-place
+        // with no Vec reorder; lock that precondition here.
+        let mut layout = TileLayout::from_saved(
+            Node::Stack {
+                panes: vec![pane(1), pane(2), pane(3)],
+                expanded: 1,
+            },
+            pane(2),
+        );
+        assert!(layout.swap_panes(pane(1), pane(3)));
+        match layout.root() {
+            Node::Stack { panes, expanded } => {
+                assert_eq!(*panes, vec![pane(3), pane(2), pane(1)]);
+                assert_eq!(*expanded, 1);
+            }
+            _ => panic!("expected Stack"),
+        }
+    }
+
+    #[test]
+    fn count_and_ids_include_stack_members() {
+        let layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Stack {
+                    panes: vec![pane(2), pane(3), pane(4)],
+                    expanded: 0,
+                }),
+            },
+            pane(1),
+        );
+        assert_eq!(layout.pane_count(), 4);
+        assert_eq!(layout.pane_ids(), vec![pane(1), pane(2), pane(3), pane(4)]);
+    }
+
+    #[test]
+    fn remove_pane_from_stack_promotes_and_collapses() {
+        let root = Node::Stack {
+            panes: vec![pane(1), pane(2), pane(3)],
+            expanded: 1,
+        };
+        let result = remove_pane(root, pane(2)).unwrap();
+        match &result {
+            Node::Stack { panes, expanded } => {
+                assert_eq!(*panes, vec![pane(1), pane(3)]);
+                assert_eq!(*expanded, 1); // promotes below (index 1 after removal)
+            }
+            _ => panic!("expected Stack"),
+        }
+
+        // Removing another collapses to Pane
+        let result = remove_pane(result, pane(1)).unwrap();
+        match result {
+            Node::Pane(id) => assert_eq!(id, pane(3)),
+            _ => panic!("expected Pane"),
+        }
+    }
+
+    #[test]
+    fn remove_last_member_from_stack_promotes_above() {
+        let root = Node::Stack {
+            panes: vec![pane(1), pane(2), pane(3)],
+            expanded: 2,
+        };
+        let result = remove_pane(root, pane(3)).unwrap();
+        match result {
+            Node::Stack { panes, expanded } => {
+                assert_eq!(panes, vec![pane(1), pane(2)]);
+                assert_eq!(expanded, 1); // now-last member
+            }
+            _ => panic!("expected Stack"),
+        }
     }
 }

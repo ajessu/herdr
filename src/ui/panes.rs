@@ -189,6 +189,7 @@ pub(super) fn compute_pane_infos(
             inner_rect,
             scrollbar_rect,
             is_focused: true,
+            stack: None,
         }];
     }
 

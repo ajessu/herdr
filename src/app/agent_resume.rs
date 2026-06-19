@@ -620,6 +620,7 @@ mod tests {
             inner_rect: ratatui::layout::Rect::new(1, 1, 98, 28),
             scrollbar_rect: None,
             is_focused: true,
+            stack: None,
         }];
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
         app.state.workspaces = vec![workspace];
@@ -736,6 +737,7 @@ mod tests {
             inner_rect: ratatui::layout::Rect::new(1, 1, 98, 28),
             scrollbar_rect: None,
             is_focused: true,
+            stack: None,
         }];
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
         app.state.workspaces = vec![workspace];

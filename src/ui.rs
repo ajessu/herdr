@@ -1052,6 +1052,7 @@ mod tests {
             inner_rect: Rect::new(1, 1, 9, 6),
             scrollbar_rect: Some(Rect::new(10, 1, 1, 6)),
             is_focused: true,
+            stack: None,
         };
 
         assert_eq!(pane_scrollbar_rect(&info), Some(Rect::new(10, 1, 1, 6)));

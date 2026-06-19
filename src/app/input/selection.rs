@@ -190,6 +190,7 @@ mod autoscroll_tests {
             inner_rect: Rect::new(0, 0, 80, 24),
             scrollbar_rect: None,
             is_focused: true,
+            stack: None,
         });
         (state, pane_id)
     }
@@ -208,6 +209,7 @@ mod autoscroll_tests {
             inner_rect: Rect::new(0, 5, 80, 24),
             scrollbar_rect: None,
             is_focused: true,
+            stack: None,
         });
         // Anchor at (5, 10), drag to different cell above pane
         let mut sel = crate::selection::Selection::anchor(pane_id, 5, 10, None);

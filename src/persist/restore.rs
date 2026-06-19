@@ -152,6 +152,7 @@ fn collect_snapshot_ids_inner(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
             collect_snapshot_ids_inner(first, ids);
             collect_snapshot_ids_inner(second, ids);
         }
+        LayoutSnapshot::Stack { panes, .. } => ids.extend(panes),
     }
 }
 
@@ -181,6 +182,7 @@ fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
             collect_layout_snapshot_pane_ids(first, ids);
             collect_layout_snapshot_pane_ids(second, ids);
         }
+        LayoutSnapshot::Stack { panes, .. } => ids.extend(panes),
     }
 }
 
@@ -827,6 +829,20 @@ pub(super) fn prune_restored_node(node: Node, surviving: &HashSet<PaneId>) -> Op
                 (None, None) => None,
             }
         }
+        Node::Stack {
+            mut panes,
+            expanded,
+        } => {
+            panes.retain(|id| surviving.contains(id));
+            if panes.is_empty() {
+                None
+            } else if panes.len() == 1 {
+                Some(Node::Pane(panes[0]))
+            } else {
+                let expanded = expanded.min(panes.len() - 1);
+                Some(Node::Stack { panes, expanded })
+            }
+        }
     }
 }
 
@@ -876,6 +892,28 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
                 second: Box::new(second_node),
             }
         }
+        LayoutSnapshot::Stack { panes, expanded } => {
+            let new_panes: Vec<PaneId> = panes
+                .iter()
+                .map(|old_id| {
+                    let new_id = PaneId::alloc();
+                    id_map.insert(*old_id, new_id);
+                    new_id
+                })
+                .collect();
+            if new_panes.is_empty() {
+                let fallback = PaneId::alloc();
+                return Node::Pane(fallback);
+            }
+            if new_panes.len() == 1 {
+                return Node::Pane(new_panes[0]);
+            }
+            let expanded = (*expanded).min(new_panes.len() - 1);
+            Node::Stack {
+                panes: new_panes,
+                expanded,
+            }
+        }
     }
 }
 
@@ -892,6 +930,7 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
             collect_ids_inner(first, ids);
             collect_ids_inner(second, ids);
         }
+        Node::Stack { panes, .. } => ids.extend(panes),
     }
 }
 
