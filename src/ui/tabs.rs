@@ -1229,11 +1229,13 @@ mod tests {
 
     #[test]
     fn width_increases_by_two_when_mode_switches_off_to_all() {
-        // Names long enough that neither mode clamps to MIN_TAB_WIDTH, so the
-        // 2-column status-dot slot is observable in the resulting tab width.
-        let ws = make_ws_with_tabs(&["alpha", "bravo", "delta"]);
+        // Names long enough that both modes clear MIN_TAB_WIDTH, so the status
+        // slot's two columns are observable in the laid-out width. (Short names
+        // sit under the floor in both modes — see
+        // short_tab_width_stays_at_floor_across_modes.)
+        let ws = make_ws_with_tabs(&["alpha-one", "beta-two", "gamma-three"]);
         let chromes = chromes_from_ws(&ws);
-        let area = Rect::new(0, 0, 80, 1);
+        let area = Rect::new(0, 0, 120, 1);
 
         let view_off = compute_tab_bar_view(
             chromes.clone(),
@@ -1259,6 +1261,45 @@ mod tests {
                 view_all.tab_hit_areas[i].width,
                 view_off.tab_hit_areas[i].width + 2,
                 "tab {i} width should increase by 2"
+            );
+        }
+    }
+
+    #[test]
+    fn short_tab_width_stays_at_floor_across_modes() {
+        // Short names fit within MIN_TAB_WIDTH in both modes, so the status slot
+        // is absorbed by the floor and the laid-out width does not change.
+        let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
+        let chromes = chromes_from_ws(&ws);
+        let area = Rect::new(0, 0, 80, 1);
+
+        let view_off = compute_tab_bar_view(
+            chromes.clone(),
+            ws.active_tab,
+            TabStatusMode::Off,
+            area,
+            0,
+            true,
+            false,
+        );
+        let view_all = compute_tab_bar_view(
+            chromes,
+            ws.active_tab,
+            TabStatusMode::All,
+            area,
+            0,
+            true,
+            false,
+        );
+
+        for i in 0..3 {
+            assert_eq!(
+                view_off.tab_hit_areas[i].width, MIN_TAB_WIDTH,
+                "tab {i} should sit at the floor in Off mode"
+            );
+            assert_eq!(
+                view_all.tab_hit_areas[i].width, MIN_TAB_WIDTH,
+                "tab {i} should stay at the floor in All mode"
             );
         }
     }
