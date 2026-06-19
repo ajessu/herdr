@@ -107,7 +107,7 @@ docker run --rm \
         export LIBGHOSTTY_VT_SIMD=true
         mkdir -p /src/.local/zig-cache
         export ZIG_GLOBAL_CACHE_DIR=/src/.local/zig-cache
-        cargo build --release --locked --target "${TARGET}"
+        cargo build --release --locked --target "${TARGET}" --features web
         # Match build outputs to host ownership so the next run can reuse
         # them without sudo chown. Container runs as root; without this,
         # target/ and .local/ are root-owned on the host.
