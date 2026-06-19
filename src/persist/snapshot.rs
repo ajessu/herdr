@@ -8,8 +8,8 @@ use crate::layout::Node;
 use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
-/// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+/// Current snapshot format version. Bumped 3→4 for Node::Stack support.
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]

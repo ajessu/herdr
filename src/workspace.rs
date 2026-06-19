@@ -1289,6 +1289,28 @@ impl Workspace {
         pane_id
     }
 
+    pub(crate) fn test_stack_focused(&mut self) -> bool {
+        let tab = self.active_tab_mut().expect("workspace must have tab");
+        tab.layout.stack_focused()
+    }
+
+    pub(crate) fn test_unstack_focused(&mut self, direction: Direction, ratio: f32) -> bool {
+        let tab = self.active_tab_mut().expect("workspace must have tab");
+        tab.layout.unstack_focused(direction, ratio)
+    }
+
+    pub(crate) fn test_fold_new_pane(&mut self, area: ratatui::layout::Rect) -> bool {
+        let tab = self.active_tab_mut().expect("workspace must have tab");
+        let old_focus = tab.layout.focused();
+        let new_id = tab.layout.split_focused(Direction::Vertical);
+        tab.panes
+            .insert(new_id, PaneState::new(TerminalId::alloc()));
+        self.register_new_pane(new_id);
+        let tab = self.active_tab_mut().unwrap();
+        tab.layout
+            .fold_new_pane_into_focused_stack(new_id, old_focus, area)
+    }
+
     pub(crate) fn test_add_tab(&mut self, name: Option<&str>) -> usize {
         let (events, _) = mpsc::channel(64);
         let render_notify = Arc::new(Notify::new());
@@ -1506,6 +1528,57 @@ impl Workspace {
             self.next_public_pane_number,
             max_pane_number
         );
+
+        // Stack-specific invariants
+        for (tab_idx, tab) in self.tabs.iter().enumerate() {
+            validate_stack_invariants(
+                tab.layout.root(),
+                tab.layout.focused(),
+                &self.id,
+                tab_idx,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+fn validate_stack_invariants(
+    node: &crate::layout::Node,
+    focus: PaneId,
+    ws_id: &str,
+    tab_idx: usize,
+) {
+    match node {
+        crate::layout::Node::Pane(_) => {}
+        crate::layout::Node::Split { first, second, .. } => {
+            validate_stack_invariants(first, focus, ws_id, tab_idx);
+            validate_stack_invariants(second, focus, ws_id, tab_idx);
+        }
+        crate::layout::Node::Stack { panes, expanded } => {
+            assert!(
+                panes.len() >= 2,
+                "workspace {} tab {} has stack with {} members (min 2)",
+                ws_id,
+                tab_idx,
+                panes.len()
+            );
+            assert!(
+                *expanded < panes.len(),
+                "workspace {} tab {} has stack expanded {} out of range for {} members",
+                ws_id,
+                tab_idx,
+                expanded,
+                panes.len()
+            );
+            if panes.contains(&focus) {
+                let focus_pos = panes.iter().position(|p| *p == focus).unwrap();
+                assert_eq!(
+                    *expanded, focus_pos,
+                    "workspace {} tab {} stack expanded ({}) != focused member position ({})",
+                    ws_id, tab_idx, expanded, focus_pos
+                );
+            }
+        }
     }
 }
 
@@ -1901,6 +1974,95 @@ mod tests {
         // Number is unregistered by the caller for moves; do it here to keep the
         // invariant check (public map == live panes) honest.
         ws.unregister_moved_pane(float_id);
+        ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn invariants_hold_after_stack_focused() {
+        let mut ws = Workspace::test_new("stack-test");
+        ws.test_split(Direction::Vertical);
+        ws.assert_invariants_for_test();
+
+        assert!(ws.test_stack_focused());
+        ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn invariants_hold_after_unstack_focused() {
+        let mut ws = Workspace::test_new("unstack-test");
+        ws.test_split(Direction::Vertical);
+        assert!(ws.test_stack_focused());
+        ws.assert_invariants_for_test();
+
+        assert!(ws.test_unstack_focused(Direction::Vertical, 0.5));
+        ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn invariants_hold_after_close_expanded_in_stack() {
+        let mut ws = Workspace::test_new("close-stack-test");
+        let second = ws.test_split(Direction::Vertical);
+        ws.test_split(Direction::Vertical);
+        // Focus on second, stack with its sibling
+        ws.active_tab_mut().unwrap().layout.focus_pane(second);
+        assert!(ws.test_stack_focused());
+        ws.assert_invariants_for_test();
+
+        // Close the focused (expanded) member
+        ws.close_focused();
+        ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn invariants_hold_after_fold_new_pane_into_stack() {
+        let mut ws = Workspace::test_new("fold-test");
+        ws.test_split(Direction::Vertical);
+        assert!(ws.test_stack_focused());
+        ws.assert_invariants_for_test();
+
+        let area = ratatui::layout::Rect::new(0, 0, 80, 40);
+        let folded = ws.test_fold_new_pane(area);
+        ws.assert_invariants_for_test();
+        assert!(folded);
+    }
+
+    #[test]
+    fn invariants_hold_after_focus_changes_in_stack() {
+        let mut ws = Workspace::test_new("focus-test");
+        ws.test_split(Direction::Vertical);
+        ws.test_split(Direction::Vertical);
+        // Stack the focused pane (third) with its sibling
+        assert!(ws.test_stack_focused());
+        ws.assert_invariants_for_test();
+
+        let ids = ws.active_tab().unwrap().layout.pane_ids().clone();
+        for id in &ids {
+            ws.active_tab_mut().unwrap().layout.focus_pane(*id);
+            ws.assert_invariants_for_test();
+        }
+    }
+
+    #[test]
+    fn adversarial_identity_survives_stack_ops() {
+        let mut ws = Workspace::test_adversarial_identity_state();
+        ws.assert_invariants_for_test();
+
+        // Split on the active tab to create a second pane, then stack
+        ws.test_split(Direction::Vertical);
+        ws.assert_invariants_for_test();
+
+        assert!(ws.test_stack_focused());
+        ws.assert_invariants_for_test();
+
+        assert!(ws.test_unstack_focused(Direction::Vertical, 0.5));
+        ws.assert_invariants_for_test();
+
+        // Re-stack for further ops
+        assert!(ws.test_stack_focused());
+        ws.assert_invariants_for_test();
+
+        // Close focused in the stack
+        ws.close_focused();
         ws.assert_invariants_for_test();
     }
 }
