@@ -402,6 +402,8 @@ pub struct KeysConfig {
     pub split_horizontal: BindingConfig,
     /// Close the focused pane. Default: "prefix+x"
     pub close_pane: BindingConfig,
+    /// Break the focused pane out into a new tab. Default: "prefix+!"
+    pub break_pane_to_tab: BindingConfig,
     /// Toggle zoom for the focused pane. Default: "prefix+z"
     #[serde(alias = "fullscreen")]
     pub zoom: BindingConfig,
@@ -617,6 +619,7 @@ impl Default for KeysConfig {
             split_vertical: BindingConfig::one("prefix+v"),
             split_horizontal: BindingConfig::one("prefix+minus"),
             close_pane: BindingConfig::one("prefix+x"),
+            break_pane_to_tab: BindingConfig::one("prefix+!"),
             zoom: BindingConfig::one("prefix+z"),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
@@ -1302,5 +1305,24 @@ show_tab_status = "all"
 show_tab_status = "blocked"
 "#;
         assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn break_pane_to_tab_default_and_override() {
+        let default_config = Config::default();
+        assert_eq!(
+            default_config.keys.break_pane_to_tab,
+            BindingConfig::one("prefix+!")
+        );
+
+        let toml = r#"
+[keys]
+break_pane_to_tab = "prefix+b"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.keys.break_pane_to_tab,
+            BindingConfig::one("prefix+b")
+        );
     }
 }

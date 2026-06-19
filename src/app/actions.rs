@@ -1834,6 +1834,24 @@ impl AppState {
         false
     }
 
+    pub fn request_break_focused_pane_to_tab(&mut self) {
+        let Some(ws_idx) = self.active else { return };
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return;
+        };
+        let Some(pane_id) = ws.focused_pane_id() else {
+            return;
+        };
+        // Best-effort guard: skip the request when the pane is already alone in
+        // its tab. The request is drained a frame later, so this is advisory;
+        // `take_pane_for_move` still handles a since-emptied tab gracefully.
+        if ws.active_tab().map(|t| t.layout.pane_count()).unwrap_or(0) <= 1 {
+            tracing::debug!(?pane_id, "break_pane_to_tab: no-op, single-pane tab");
+            return;
+        }
+        self.request_break_pane_to_tab = Some(pane_id);
+    }
+
     /// Close the active tab. Returns true when the close was deferred to confirmation.
     pub fn close_tab(&mut self) -> bool {
         if self.active.is_some_and(|ws_idx| {

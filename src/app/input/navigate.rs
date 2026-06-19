@@ -598,6 +598,7 @@ pub(crate) enum NavigateAction {
     SplitVertical,
     SplitHorizontal,
     ClosePane,
+    BreakPaneToTab,
     EditScrollback,
     CopyMode,
     Zoom,
@@ -707,6 +708,7 @@ fn action_for_key(
         (&kb.split_vertical, NavigateAction::SplitVertical),
         (&kb.split_horizontal, NavigateAction::SplitHorizontal),
         (&kb.close_pane, NavigateAction::ClosePane),
+        (&kb.break_pane_to_tab, NavigateAction::BreakPaneToTab),
         (&kb.zoom, NavigateAction::Zoom),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
@@ -906,6 +908,10 @@ pub(super) fn execute_navigate_action_in_context(
             if !state.close_pane() {
                 leave_navigate_mode(state);
             }
+        }
+        NavigateAction::BreakPaneToTab => {
+            state.request_break_focused_pane_to_tab();
+            leave_navigate_mode(state);
         }
         NavigateAction::EditScrollback => {}
         NavigateAction::CopyMode => state.enter_copy_mode(terminal_runtimes),

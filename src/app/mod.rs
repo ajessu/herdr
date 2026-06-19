@@ -437,6 +437,7 @@ impl App {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_break_pane_to_tab: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -811,6 +812,11 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 self.create_tab();
+                needs_render = true;
+            }
+
+            if let Some(pane_id) = self.state.request_break_pane_to_tab.take() {
+                self.break_pane_to_new_tab(pane_id);
                 needs_render = true;
             }
 
@@ -4257,5 +4263,54 @@ last_pane = "prefix+tab"
             &input[events[1].start..events[1].start + events[1].len],
             b"a"
         );
+    }
+
+    #[test]
+    fn break_pane_to_new_tab_moves_pane_and_follows_focus() {
+        let mut app = test_app();
+        let mut ws = Workspace::test_new("test");
+        let source = ws.tabs[0].root_pane;
+        let moved = ws.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+
+        app.break_pane_to_new_tab(moved);
+
+        let ws = &app.state.workspaces[0];
+        assert_eq!(ws.tabs.len(), 2, "a new tab should be created");
+        assert!(
+            ws.tabs[0].terminal_id(source).is_some(),
+            "source pane stays in the original tab"
+        );
+        assert!(
+            ws.tabs[1].terminal_id(moved).is_some(),
+            "moved pane keeps its PaneId in the new tab"
+        );
+        assert_eq!(ws.active_tab, 1, "focus follows the moved pane to its tab");
+        assert_eq!(ws.focused_pane_id(), Some(moved));
+        assert_eq!(app.state.active, Some(0), "workspace is unchanged");
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn break_pane_to_new_tab_stale_pane_id_is_safe_noop() {
+        let mut app = test_app();
+        let ws = Workspace::test_new("test");
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+
+        // A PaneId that was never registered in this workspace.
+        app.break_pane_to_new_tab(crate::layout::PaneId::alloc());
+
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            1,
+            "stale pane id must not create a tab"
+        );
+        app.state.assert_invariants_for_test();
     }
 }

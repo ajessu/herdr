@@ -4,6 +4,7 @@
 
 ### Added
 - Added configurable agent status dots on tab bar labels with `[ui] show_tab_status`. Three modes: `"off"` (default, no dots), `"attention"` (dots for blocked and done tabs only), and `"all"` (dots for all known agent states). Dot colors match the sidebar's existing state palette. Enabled modes reserve a constant-width slot per tab to prevent layout jitter on state transitions.
+- Added a `break_pane_to_tab` keybinding (default `prefix+!`) that breaks the focused pane out into a new tab in the same workspace, keeping its terminal process and focus. Single-pane tabs are left unchanged.
 
 ## [0.7.0] - 2026-06-15
 

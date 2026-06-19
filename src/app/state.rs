@@ -1275,6 +1275,7 @@ pub struct AppState {
     pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
+    pub request_break_pane_to_tab: Option<PaneId>,
     pub request_new_linked_worktree: Option<usize>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
@@ -1621,6 +1622,7 @@ impl AppState {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_break_pane_to_tab: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -2238,5 +2240,32 @@ mod tests {
                 "Collapse"
             ]
         );
+    }
+
+    #[test]
+    fn break_pane_to_tab_single_pane_is_noop() {
+        let mut state = AppState::test_new();
+        let ws = crate::workspace::Workspace::test_new("test");
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+
+        state.request_break_focused_pane_to_tab();
+
+        assert_eq!(state.request_break_pane_to_tab, None);
+        assert_eq!(state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn break_pane_to_tab_sets_request_for_multi_pane_tab() {
+        let mut state = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        ws.test_split(ratatui::layout::Direction::Horizontal);
+        let focused = ws.focused_pane_id().unwrap();
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+
+        state.request_break_focused_pane_to_tab();
+
+        assert_eq!(state.request_break_pane_to_tab, Some(focused));
     }
 }

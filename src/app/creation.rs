@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use tracing::error;
+use tracing::{error, info, warn};
 
 use super::{
     api_helpers::{pane_agent_status, tab_attention_priority},
     App, Mode,
 };
-use crate::{config::NewTerminalCwdConfig, workspace::Workspace};
+use crate::{config::NewTerminalCwdConfig, layout::PaneId, workspace::Workspace};
 
 pub(crate) fn resolve_new_terminal_cwd(
     policy: &NewTerminalCwdConfig,
@@ -93,6 +93,36 @@ impl App {
                 error!(err = %e, "failed to create tab");
             }
         }
+    }
+
+    pub(crate) fn break_pane_to_new_tab(&mut self, pane_id: PaneId) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let previous_focus = self.state.current_pane_focus_target();
+        let Some(taken) = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.take_pane_for_move(pane_id))
+        else {
+            warn!(?pane_id, "break_pane_to_new_tab: pane could not be moved");
+            return;
+        };
+        let moved_pane_id = taken.moved.pane_id;
+        let new_tab_idx = self.state.workspaces[ws_idx].create_tab_from_existing_pane(
+            taken.moved,
+            None,
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+        );
+        self.state.switch_workspace_tab(ws_idx, new_tab_idx);
+        self.state
+            .record_pane_focus_change(previous_focus, ws_idx, moved_pane_id);
+        info!(?pane_id, new_tab_idx, "broke pane to new tab");
+        self.state.mark_session_dirty();
+        self.schedule_session_save();
     }
 
     pub(super) fn create_tab_with_options(

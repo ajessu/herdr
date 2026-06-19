@@ -540,6 +540,13 @@ impl HeadlessServer {
                 crate::render_prof::event("full_render_cause.deferred_new_tab");
             }
 
+            if let Some(pane_id) = self.app.state.request_break_pane_to_tab.take() {
+                self.app.break_pane_to_new_tab(pane_id);
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_break_pane_to_tab");
+            }
+
             if let Some(ws_idx) = self.app.state.request_new_linked_worktree.take() {
                 self.app.open_new_linked_worktree_dialog(ws_idx);
                 needs_render = true;
