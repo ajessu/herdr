@@ -134,7 +134,7 @@ navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
 ```
 
-The default keymap is prefix-first and avoids direct shortcuts that can steal input from shells, editors, tmux, or terminal apps. Common defaults include:
+The default keymap uses prefix bindings and includes Alt shortcuts for common pane and tab actions. Actions with both a prefix and an Alt binding use TOML arrays:
 
 ```toml
 [keys]
@@ -158,10 +158,10 @@ switch_tab = "prefix+1..9"
 rename_tab = "prefix+shift+t"
 close_tab = "prefix+shift+x"
 copy_mode = "prefix+["
-focus_pane_left = "prefix+h"
-focus_pane_down = "prefix+j"
-focus_pane_up = "prefix+k"
-focus_pane_right = "prefix+l"
+focus_pane_left = ["prefix+h", "alt+h"]
+focus_pane_down = ["prefix+j", "alt+j"]
+focus_pane_up = ["prefix+k", "alt+k"]
+focus_pane_right = ["prefix+l", "alt+l"]
 swap_pane_left = "prefix+shift+h"
 swap_pane_down = "prefix+shift+j"
 swap_pane_up = "prefix+shift+k"
@@ -171,12 +171,21 @@ cycle_pane_previous = "prefix+shift+tab"
 last_pane = ""
 split_vertical = "prefix+v"
 split_horizontal = "prefix+minus"
-close_pane = "prefix+x"
+split_auto = "alt+n"
+close_pane = ["prefix+x", "alt+x"]
 break_pane_to_tab = "prefix+!"
-zoom = "prefix+z"
+zoom = ["prefix+z", "alt+z"]
 resize_mode = "prefix+r"
+resize_grow = "alt+="
+resize_shrink = "alt+-"
+move_tab_left = "alt+i"
+move_tab_right = "alt+o"
 toggle_sidebar = "prefix+b"
 ```
+
+Actions with both prefix and Alt bindings export as arrays (e.g. `focus_pane_left = ["prefix+h", "alt+h"]`). Setting a single string removes the Alt binding: `focus_pane_left = "prefix+h"`. Actions that are Alt-only (`split_auto`, `resize_grow`, `resize_shrink`, `move_tab_left`, `move_tab_right`) use a single string with the `alt+` modifier.
+
+Old configs still parse, but the upgrade behavior differs by action. The six dual-bound actions (`focus_pane_left/down/up/right`, `close_pane`, `zoom`) pick up their new Alt defaults automatically when the field is absent — so upgrading gives you `Alt+x` (close pane) and the rest unless you explicitly set those fields to a single string. The five new Alt-only actions are unbound when absent. See [Alt shortcuts](/docs/keyboard/#alt-shortcuts) for the full binding table and limitations.
 
 Optional actions are unset by default. Bind them with `prefix+` for prefix-mode behavior, or with an explicit modified chord when you intentionally want a direct shortcut:
 

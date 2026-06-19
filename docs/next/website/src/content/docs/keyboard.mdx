@@ -23,7 +23,7 @@ Press `prefix+?` at any time to see every active binding.
 | --- | --- |
 | New tab | `prefix+c` |
 | Split right / down | `prefix+v` / `prefix+minus` |
-| Move between panes | `prefix+h/j/k/l` |
+| Move between panes | `prefix+h/j/k/l` or `Alt+h/j/k/l` |
 | Workspace navigation | `prefix+w` |
 | Detach, leave everything running | `prefix+q` |
 
@@ -35,9 +35,11 @@ Panes:
 
 | Action | Key |
 | --- | --- |
-| Zoom the focused pane | `prefix+z` |
-| Close pane | `prefix+x` |
+| New pane (auto direction) | `Alt+n` |
+| Zoom the focused pane | `prefix+z` or `Alt+z` |
+| Close pane | `prefix+x` or `Alt+x` |
 | Break pane to new tab | `prefix+!` |
+| Grow / shrink pane | `Alt+=` / `Alt+-` |
 | Swap panes | `prefix+shift+h/j/k/l` |
 | Resize mode | `prefix+r` |
 | Copy mode | `prefix+[` |
@@ -47,6 +49,7 @@ Tabs:
 | Action | Key |
 | --- | --- |
 | Next / previous tab | `prefix+n` / `prefix+p` |
+| Move tab left / right | `Alt+i` / `Alt+o` |
 | Jump to tab 1–9 | `prefix+1..9` |
 | Rename tab | `prefix+shift+t` |
 | Close tab | `prefix+shift+x` |
@@ -75,6 +78,52 @@ Every binding is configurable, including the prefix itself:
 [keys]
 prefix = "ctrl+a"
 ```
+
+## Alt shortcuts
+
+Herdr ships default `Alt+key` shortcuts that work without entering prefix mode, inspired by Zellij's ergonomics. These are active in terminal mode alongside the existing prefix bindings.
+
+| Shortcut | Action |
+| --- | --- |
+| `Alt+h` / `Alt+j` / `Alt+k` / `Alt+l` | Focus pane left / down / up / right |
+| `Alt+n` | New pane (auto-split: side-by-side for wide panes, stacked otherwise) |
+| `Alt+x` | Close focused pane |
+| `Alt+z` | Toggle zoom on focused pane |
+| `Alt+=` / `Alt+-` | Grow / shrink focused pane by 5% |
+| `Alt+i` / `Alt+o` | Move current tab left / right |
+
+All existing `prefix+*` bindings continue to work. The Alt shortcuts are an additional layer, not a replacement.
+
+:::caution[Alt+x is destructive]
+`Alt+x` closes the focused pane and terminates its process immediately with no confirmation and no undo. The key is intercepted silently — the pane app never receives it. If you need `Alt+x` inside a terminal app (vim, emacs, readline), remove the Alt binding:
+
+```toml
+[keys]
+close_pane = "prefix+x"
+```
+:::
+
+### Known limitations
+
+**Unconditional silent interception.** When a default Alt binding matches in terminal mode, the key never reaches the focused pane. This bites editor users: `Alt+n`, `Alt+i`, and `Alt+o` collide with vim's new-line, insert, and open-line commands, and `Alt+x` is emacs's `M-x`. A pane app expecting any of these will not receive it. The only remedy is removing the Alt binding from your config. The keystroke is also swallowed even when the action is a no-op (for example `Alt+i`/`Alt+o` with a single tab, or `Alt+=`/`Alt+-` in a single-pane tab).
+
+**Terminal-mode-only.** Alt shortcuts fire only in terminal mode (the normal state when typing in a pane). They do not fire in any other mode — Navigate, Prefix, Resize, copy mode, or while a dialog is open.
+
+**Outer multiplexer consumption.** If Herdr runs inside tmux, screen, or another multiplexer, that outer layer may consume the Alt key before Herdr sees it. In that case, use the prefix bindings instead.
+
+### Diagnosing "my Alt key does nothing"
+
+If an Alt shortcut is not working:
+
+1. **Check your terminal.** Some terminals (especially on macOS) treat Option as a compose key that produces special characters instead of sending Alt. Enable "Use Option as Meta" or equivalent in your terminal settings.
+
+2. **Check for an outer multiplexer.** A tmux or screen session above Herdr will consume the Alt key. Use prefix bindings instead, or configure the outer multiplexer to pass Alt through.
+
+3. **Check your config.** If you overrode the action with a single string (e.g. `focus_pane_left = "prefix+h"`), the Alt binding is removed. Use an array to keep both: `focus_pane_left = ["prefix+h", "alt+h"]`. On upgrade, the six dual-bound actions (`focus_pane_left/down/up/right`, `close_pane`, `zoom`) gain their Alt default automatically wherever you did not set the field — only an explicit single string opts you out. If you customized any of them as a single string and want the Alt binding, switch to the array form.
+
+4. **Alt-only actions require a modifier.** The new actions (`split_auto`, `move_tab_left`, `move_tab_right`, `resize_grow`, `resize_shrink`) have no prefix companion. Binding them to a bare printable key like `split_auto = "n"` is rejected by the unmodified-printable guard, which surfaces a startup diagnostic warning. They must use a modifier such as `alt+n`.
+
+5. **Enable debug logging.** Set `HERDR_LOG=herdr=debug` and grep the log for `intercepted terminal direct keybinding before forwarding to pane` when you press the Alt chord. If the line appears, Herdr saw the key and acted on it; if it does not, the key was consumed before Herdr saw it (terminal, OS, or outer multiplexer).
 
 ## Going prefix-free
 
