@@ -43,7 +43,7 @@ impl TabChrome {
         status_w.saturating_add(name_w).saturating_add(mod_w)
     }
 
-    pub fn into_spans(&self, mode: TabStatusMode, rect_width: u16) -> Vec<Span<'_>> {
+    pub fn to_spans(&self, mode: TabStatusMode, rect_width: u16) -> Vec<Span<'_>> {
         let mut spans: Vec<Span> = Vec::with_capacity(6);
 
         // Leading space
@@ -571,7 +571,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         };
 
         let spans = if let Some(chrome) = app.view.tab_chrome.get(idx) {
-            chrome.into_spans(app.view.tab_status_mode, rect.width)
+            chrome.to_spans(app.view.tab_status_mode, rect.width)
         } else {
             vec![Span::raw(" ".repeat(rect.width as usize))]
         };
@@ -1151,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn into_spans_ordering_and_padding() {
+    fn to_spans_ordering_and_padding() {
         // With status slot (mode=All), with dot
         let c = TabChrome {
             status: Some(TabStatusDot {
@@ -1161,7 +1161,7 @@ mod tests {
             name: "test".into(),
             zoomed: true,
         };
-        let spans = c.into_spans(TabStatusMode::All, 15);
+        let spans = c.to_spans(TabStatusMode::All, 15);
         assert_eq!(spans[0].content.as_ref(), " ");
         assert_eq!(spans[1].content.as_ref(), "●");
         assert_eq!(spans[2].content.as_ref(), " ");
@@ -1175,7 +1175,7 @@ mod tests {
             name: "abc".into(),
             zoomed: false,
         };
-        let spans = c.into_spans(TabStatusMode::All, 10);
+        let spans = c.to_spans(TabStatusMode::All, 10);
         assert_eq!(spans[0].content.as_ref(), " ");
         assert_eq!(spans[1].content.as_ref(), "  ");
         assert!(spans[1].style.fg.is_none(), "empty slot must not set fg");
@@ -1188,7 +1188,7 @@ mod tests {
             name: "xyz".into(),
             zoomed: false,
         };
-        let spans = c.into_spans(TabStatusMode::Off, 8);
+        let spans = c.to_spans(TabStatusMode::Off, 8);
         assert_eq!(spans[0].content.as_ref(), " ");
         assert_eq!(spans[1].content.as_ref(), "xyz");
         assert_eq!(spans[2].content.len(), 4);
