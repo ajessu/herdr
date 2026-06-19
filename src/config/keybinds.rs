@@ -305,6 +305,11 @@ pub struct Keybinds {
     pub close_pane: ActionKeybinds,
     pub break_pane_to_tab: ActionKeybinds,
     pub zoom: ActionKeybinds,
+    pub split_auto: ActionKeybinds,
+    pub move_tab_left: ActionKeybinds,
+    pub move_tab_right: ActionKeybinds,
+    pub resize_grow: ActionKeybinds,
+    pub resize_shrink: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
@@ -492,6 +497,11 @@ impl Config {
             close_pane: action!("keys.close_pane", &self.keys.close_pane),
             break_pane_to_tab: action!("keys.break_pane_to_tab", &self.keys.break_pane_to_tab),
             zoom: action!("keys.zoom", &self.keys.zoom),
+            split_auto: action!("keys.split_auto", &self.keys.split_auto),
+            move_tab_left: action!("keys.move_tab_left", &self.keys.move_tab_left),
+            move_tab_right: action!("keys.move_tab_right", &self.keys.move_tab_right),
+            resize_grow: action!("keys.resize_grow", &self.keys.resize_grow),
+            resize_shrink: action!("keys.resize_shrink", &self.keys.resize_shrink),
             resize_mode: action!("keys.resize_mode", &self.keys.resize_mode),
             toggle_sidebar: action!("keys.toggle_sidebar", &self.keys.toggle_sidebar),
             custom_commands: Vec::new(),
@@ -1811,6 +1821,150 @@ description = "say hello"
         assert_eq!(
             keybinds.custom_commands[0].description,
             Some("say hello".to_string())
+        );
+    }
+
+    #[test]
+    fn default_config_binds_alt_keys() {
+        let config = Config::default();
+        let kb = config.keybinds();
+        let triggers = binding_triggers(&kb.focus_pane_left);
+        assert!(triggers.contains(&BindingTrigger::Prefix((
+            KeyCode::Char('h'),
+            KeyModifiers::empty()
+        ))));
+        assert!(triggers.contains(&BindingTrigger::Direct((
+            KeyCode::Char('h'),
+            KeyModifiers::ALT
+        ))));
+    }
+
+    #[test]
+    fn resize_mode_unchanged() {
+        let config = Config::default();
+        let kb = config.keybinds();
+        let triggers = binding_triggers(&kb.resize_mode);
+        assert_eq!(
+            triggers,
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('r'),
+                KeyModifiers::empty()
+            ))]
+        );
+    }
+
+    #[test]
+    fn split_auto_default_binds_alt_n() {
+        let config = Config::default();
+        let kb = config.keybinds();
+        let triggers = binding_triggers(&kb.split_auto);
+        assert_eq!(
+            triggers,
+            vec![BindingTrigger::Direct((
+                KeyCode::Char('n'),
+                KeyModifiers::ALT
+            ))]
+        );
+    }
+
+    #[test]
+    fn move_tab_defaults_bind_alt_i_o() {
+        let config = Config::default();
+        let kb = config.keybinds();
+        assert_eq!(
+            binding_triggers(&kb.move_tab_left),
+            vec![BindingTrigger::Direct((
+                KeyCode::Char('i'),
+                KeyModifiers::ALT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.move_tab_right),
+            vec![BindingTrigger::Direct((
+                KeyCode::Char('o'),
+                KeyModifiers::ALT
+            ))]
+        );
+    }
+
+    #[test]
+    fn resize_grow_shrink_bind_alt_eq_minus() {
+        let config = Config::default();
+        let kb = config.keybinds();
+        assert_eq!(
+            binding_triggers(&kb.resize_grow),
+            vec![BindingTrigger::Direct((
+                KeyCode::Char('='),
+                KeyModifiers::ALT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.resize_shrink),
+            vec![BindingTrigger::Direct((
+                KeyCode::Char('-'),
+                KeyModifiers::ALT
+            ))]
+        );
+    }
+
+    #[test]
+    fn single_string_user_config_still_parses() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+focus_pane_left = "prefix+h"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        let triggers = binding_triggers(&kb.focus_pane_left);
+        assert_eq!(
+            triggers,
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('h'),
+                KeyModifiers::empty()
+            ))]
+        );
+    }
+
+    #[test]
+    fn absent_new_action_field_is_unbound() {
+        let config: Config = toml::from_str("[keys]\n").unwrap();
+        let kb = config.keybinds();
+        assert!(kb.split_auto.bindings.is_empty());
+        assert!(kb.move_tab_left.bindings.is_empty());
+        assert!(kb.resize_grow.bindings.is_empty());
+    }
+
+    #[test]
+    fn keysconfig_toml_roundtrip_lossless() {
+        use crate::config::model::KeysConfig;
+        let original = KeysConfig::default();
+        let toml_str = toml::to_string(&original).unwrap();
+        let restored: KeysConfig = toml::from_str(&toml_str).unwrap();
+        let toml_str2 = toml::to_string(&restored).unwrap();
+        assert_eq!(toml_str, toml_str2);
+    }
+
+    #[test]
+    fn default_config_has_no_conflict_diagnostics() {
+        let config = Config::default();
+        let diagnostics = config.collect_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "Default config produced diagnostics: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn parse_alt_symbol_keys() {
+        assert_eq!(
+            parse_key_combo("alt+="),
+            Some((KeyCode::Char('='), KeyModifiers::ALT))
+        );
+        assert_eq!(
+            parse_key_combo("alt+-"),
+            Some((KeyCode::Char('-'), KeyModifiers::ALT))
         );
     }
 }

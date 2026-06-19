@@ -1,6 +1,7 @@
 //! Pure state mutations on AppState.
 //! These don't need channels, async, or PTY runtime.
 
+use ratatui::layout::Direction;
 use tracing::{info, warn};
 
 use crate::detect::{Agent, AgentState};
@@ -1614,22 +1615,86 @@ impl AppState {
         }
     }
 
-    pub fn resize_pane(&mut self, direction: NavDirection) {
-        if let Some(first) = self.view.pane_infos.first() {
-            let area = self
-                .view
-                .pane_infos
-                .iter()
-                .fold(first.rect, |acc, p| acc.union(p.rect));
-            if let Some(tab) = self
-                .active
-                .and_then(|i| self.workspaces.get_mut(i))
-                .and_then(|ws| ws.active_tab_mut())
-            {
-                tab.layout.resize_focused(direction, 0.05, area);
-                self.mark_session_dirty();
-            }
+    pub fn resize_pane(&mut self, direction: NavDirection) -> bool {
+        let Some(first) = self.view.pane_infos.first() else {
+            return false;
+        };
+        let area = self
+            .view
+            .pane_infos
+            .iter()
+            .fold(first.rect, |acc, p| acc.union(p.rect));
+        let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) else {
+            return false;
+        };
+        let Some(pane_id) = ws.focused_pane_id() else {
+            return false;
+        };
+        let Some(tab) = self
+            .active
+            .and_then(|i| self.workspaces.get_mut(i))
+            .and_then(|ws| ws.active_tab_mut())
+        else {
+            return false;
+        };
+        let changed = tab.layout.resize_pane(pane_id, direction, 0.05, area);
+        if changed {
+            self.mark_session_dirty();
         }
+        changed
+    }
+
+    pub fn resize_focused_pane(&mut self, grow: bool) {
+        let (h, v) = if grow {
+            (NavDirection::Right, NavDirection::Down)
+        } else {
+            (NavDirection::Left, NavDirection::Up)
+        };
+        if !self.resize_pane(h) {
+            self.resize_pane(v);
+        }
+    }
+
+    /// Returns `(width, height)` of the focused pane's rect.
+    pub fn focused_pane_rect(&self) -> Option<(u16, u16)> {
+        let ws = self.active.and_then(|i| self.workspaces.get(i))?;
+        let pane_id = ws.focused_pane_id()?;
+        let info = self.view.pane_infos.iter().find(|p| p.id == pane_id)?;
+        Some((info.rect.width, info.rect.height))
+    }
+
+    pub fn auto_split_direction(&self) -> Direction {
+        let (w, h) = self.focused_pane_rect().unwrap_or((0, 0));
+        if (w as f32) > (h as f32) * 1.5 {
+            Direction::Horizontal
+        } else {
+            Direction::Vertical
+        }
+    }
+
+    pub fn move_active_tab_left(&mut self) {
+        let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) else {
+            return;
+        };
+        if ws.tabs.len() < 2 || ws.active_tab == 0 {
+            return;
+        }
+        let source = ws.active_tab;
+        let insert = source - 1;
+        self.move_tab(source, insert);
+    }
+
+    pub fn move_active_tab_right(&mut self) {
+        let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) else {
+            return;
+        };
+        let n = ws.tabs.len();
+        if n < 2 || ws.active_tab + 1 >= n {
+            return;
+        }
+        let source = ws.active_tab;
+        let insert = source + 2;
+        self.move_tab(source, insert);
     }
 
     pub fn cycle_pane(&mut self, reverse: bool) {
@@ -5277,5 +5342,136 @@ mod tests {
         );
         assert!(state_priority(AgentState::Idle, false) > state_priority(AgentState::Idle, true));
         assert!(state_priority(AgentState::Idle, true) > state_priority(AgentState::Unknown, true));
+    }
+
+    #[test]
+    fn auto_split_wide_pane_is_horizontal() {
+        let mut state = app_with_workspaces(&["test"]);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 20));
+        assert_eq!(state.auto_split_direction(), Direction::Horizontal);
+    }
+
+    #[test]
+    fn auto_split_tall_pane_is_vertical() {
+        let mut state = app_with_workspaces(&["test"]);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 40, 60));
+        assert_eq!(state.auto_split_direction(), Direction::Vertical);
+    }
+
+    #[test]
+    fn auto_split_square_pane_is_vertical() {
+        let mut state = app_with_workspaces(&["test"]);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 50, 50));
+        assert_eq!(state.auto_split_direction(), Direction::Vertical);
+    }
+
+    #[test]
+    fn auto_split_no_focus_defaults_vertical() {
+        let state = AppState::test_new();
+        assert_eq!(state.auto_split_direction(), Direction::Vertical);
+    }
+
+    #[test]
+    fn focused_pane_rect_returns_width_height_order() {
+        let mut state = app_with_workspaces(&["test"]);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 120, 30));
+        let (w, h) = state.focused_pane_rect().unwrap();
+        assert!(
+            w > h,
+            "expected width > height for a 120x30 terminal, got ({w}, {h})"
+        );
+    }
+
+    #[test]
+    fn move_tab_right_mid_list_succeeds() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("b"));
+        state.workspaces[0].test_add_tab(Some("c"));
+        assert_eq!(state.workspaces[0].active_tab, 0);
+        state.move_active_tab_right();
+        assert_eq!(state.workspaces[0].active_tab, 1);
+    }
+
+    #[test]
+    fn move_tab_left_reorders() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("b"));
+        state.workspaces[0].test_add_tab(Some("c"));
+        state.workspaces[0].active_tab = 1;
+        state.move_active_tab_left();
+        assert_eq!(state.workspaces[0].active_tab, 0);
+    }
+
+    #[test]
+    fn move_tab_right_at_last_tab_is_noop() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("b"));
+        state.workspaces[0].active_tab = 1;
+        state.move_active_tab_right();
+        assert_eq!(state.workspaces[0].active_tab, 1);
+    }
+
+    #[test]
+    fn move_tab_left_at_first_tab_is_noop() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("b"));
+        assert_eq!(state.workspaces[0].active_tab, 0);
+        state.move_active_tab_left();
+        assert_eq!(state.workspaces[0].active_tab, 0);
+    }
+
+    #[test]
+    fn move_tab_single_tab_is_noop() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.move_active_tab_left();
+        state.move_active_tab_right();
+        assert_eq!(state.workspaces[0].active_tab, 0);
+    }
+
+    #[test]
+    fn resize_grow_side_by_side_changes_ratio() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_split(Direction::Horizontal);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 30));
+        let changed = state.resize_pane(NavDirection::Right);
+        assert!(changed, "resize should change ratio on side-by-side layout");
+    }
+
+    #[test]
+    fn resize_grow_stacked_layout_changes_ratio() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_split(Direction::Vertical);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 30));
+        // Horizontal-only resize would silently no-op on vertical-only layout.
+        // resize_focused_pane tries horizontal then vertical as fallback.
+        let h_only = state.resize_pane(NavDirection::Right);
+        assert!(
+            !h_only,
+            "horizontal resize should be a no-op on stacked layout"
+        );
+        let v = state.resize_pane(NavDirection::Down);
+        assert!(v, "vertical resize should succeed on stacked layout");
+    }
+
+    #[test]
+    fn resize_single_pane_is_noop() {
+        let mut state = app_with_workspaces(&["test"]);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 30));
+        state.resize_focused_pane(true);
+        state.resize_focused_pane(false);
+    }
+
+    #[test]
+    fn appstate_resize_pane_returns_change_bool() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_split(Direction::Horizontal);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 30));
+        let changed = state.resize_pane(NavDirection::Right);
+        assert!(changed);
+
+        let mut single = app_with_workspaces(&["s"]);
+        crate::ui::compute_view(&mut single, ratatui::layout::Rect::new(0, 0, 100, 30));
+        let not_changed = single.resize_pane(NavDirection::Right);
+        assert!(!not_changed);
     }
 }

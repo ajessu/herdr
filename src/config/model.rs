@@ -407,6 +407,21 @@ pub struct KeysConfig {
     /// Toggle zoom for the focused pane. Default: "prefix+z"
     #[serde(alias = "fullscreen")]
     pub zoom: BindingConfig,
+    /// Split pane automatically along its longer dimension. Default: "alt+n"
+    #[serde(default)]
+    pub split_auto: BindingConfig,
+    /// Move the active tab one position to the left. Default: "alt+i"
+    #[serde(default)]
+    pub move_tab_left: BindingConfig,
+    /// Move the active tab one position to the right. Default: "alt+o"
+    #[serde(default)]
+    pub move_tab_right: BindingConfig,
+    /// Grow the focused pane by one resize step. Default: "alt+="
+    #[serde(default)]
+    pub resize_grow: BindingConfig,
+    /// Shrink the focused pane by one resize step. Default: "alt+-"
+    #[serde(default)]
+    pub resize_shrink: BindingConfig,
     /// Enter resize mode. Default: "prefix+r"
     pub resize_mode: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
@@ -605,10 +620,10 @@ impl Default for KeysConfig {
             rename_pane: BindingConfig::one("prefix+shift+p"),
             edit_scrollback: BindingConfig::one("prefix+e"),
             copy_mode: BindingConfig::one("prefix+["),
-            focus_pane_left: BindingConfig::one("prefix+h"),
-            focus_pane_down: BindingConfig::one("prefix+j"),
-            focus_pane_up: BindingConfig::one("prefix+k"),
-            focus_pane_right: BindingConfig::one("prefix+l"),
+            focus_pane_left: BindingConfig::Many(vec!["prefix+h".into(), "alt+h".into()]),
+            focus_pane_down: BindingConfig::Many(vec!["prefix+j".into(), "alt+j".into()]),
+            focus_pane_up: BindingConfig::Many(vec!["prefix+k".into(), "alt+k".into()]),
+            focus_pane_right: BindingConfig::Many(vec!["prefix+l".into(), "alt+l".into()]),
             swap_pane_left: BindingConfig::one("prefix+shift+h"),
             swap_pane_down: BindingConfig::one("prefix+shift+j"),
             swap_pane_up: BindingConfig::one("prefix+shift+k"),
@@ -618,9 +633,14 @@ impl Default for KeysConfig {
             last_pane: BindingConfig::empty(),
             split_vertical: BindingConfig::one("prefix+v"),
             split_horizontal: BindingConfig::one("prefix+minus"),
-            close_pane: BindingConfig::one("prefix+x"),
+            close_pane: BindingConfig::Many(vec!["prefix+x".into(), "alt+x".into()]),
             break_pane_to_tab: BindingConfig::one("prefix+!"),
-            zoom: BindingConfig::one("prefix+z"),
+            zoom: BindingConfig::Many(vec!["prefix+z".into(), "alt+z".into()]),
+            split_auto: BindingConfig::one("alt+n"),
+            move_tab_left: BindingConfig::one("alt+i"),
+            move_tab_right: BindingConfig::one("alt+o"),
+            resize_grow: BindingConfig::one("alt+="),
+            resize_shrink: BindingConfig::one("alt+-"),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
             indexed: IndexedKeysConfig::default(),
