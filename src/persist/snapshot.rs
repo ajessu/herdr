@@ -1153,6 +1153,92 @@ mod tests {
     }
 
     #[test]
+    fn forward_guard_rejects_v5_snapshot() {
+        let json = serde_json::json!({
+            "version": SNAPSHOT_VERSION + 1,
+            "workspaces": [],
+            "active": null,
+            "selected": 0
+        })
+        .to_string();
+        match parse_snapshot(&json) {
+            Ok(_) => panic!("v5 snapshot should be rejected"),
+            Err(err) => assert!(err.contains("newer than supported")),
+        }
+    }
+
+    #[test]
+    fn backward_compat_v3_snapshot_loads_under_v4() {
+        let json = include_str!("../../tests/fixtures/session/current-herdr-session.json");
+        let snap = parse_snapshot(json).unwrap();
+        assert_eq!(snap.version, 3);
+        assert!(!snap.workspaces.is_empty());
+    }
+
+    #[test]
+    fn round_trip_stack_layout_snapshot() {
+        let layout = LayoutSnapshot::Split {
+            direction: DirectionSnapshot::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Stack {
+                panes: vec![10, 20, 30],
+                expanded: 1,
+            }),
+            second: Box::new(LayoutSnapshot::Pane(40)),
+        };
+        let json = serde_json::to_string(&layout).unwrap();
+        let restored: LayoutSnapshot = serde_json::from_str(&json).unwrap();
+
+        match restored {
+            LayoutSnapshot::Split { first, .. } => match *first {
+                LayoutSnapshot::Stack { panes, expanded } => {
+                    assert_eq!(panes, vec![10, 20, 30]);
+                    assert_eq!(expanded, 1);
+                }
+                _ => panic!("expected Stack"),
+            },
+            _ => panic!("expected Split"),
+        }
+    }
+
+    #[test]
+    fn round_trip_stack_capture_serialize_parse_restore() {
+        use crate::layout::{Node, PaneId};
+        use crate::persist::restore::restore_node_remapped;
+
+        let a = PaneId::from_raw(100);
+        let b = PaneId::from_raw(101);
+        let c = PaneId::from_raw(102);
+        let d = PaneId::from_raw(103);
+        let node = Node::Split {
+            direction: Direction::Horizontal,
+            ratio: 0.5,
+            first: Box::new(Node::Stack {
+                panes: vec![a, b, c],
+                expanded: 1,
+            }),
+            second: Box::new(Node::Pane(d)),
+        };
+
+        let snap = capture_node(&node);
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: LayoutSnapshot = serde_json::from_str(&json).unwrap();
+        let (restored, id_map) = restore_node_remapped(&parsed);
+
+        assert_eq!(id_map.len(), 4);
+        match &restored {
+            Node::Split { first, .. } => match first.as_ref() {
+                Node::Stack { panes, expanded } => {
+                    assert_eq!(panes.len(), 3);
+                    assert_eq!(*expanded, 1);
+                }
+                _ => panic!("expected Stack"),
+            },
+            _ => panic!("expected Split"),
+        }
+    }
+
+    #[test]
     fn active_tab_default_is_zero() {
         let json = r#"{"custom_name":"test","identity_cwd":"/tmp","tabs":[]}"#;
         let ws: WorkspaceSnapshot = serde_json::from_str(json).unwrap();

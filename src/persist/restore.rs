@@ -902,16 +902,29 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
                 })
                 .collect();
             if new_panes.is_empty() {
+                warn!("restore: empty stack in snapshot, collapsing to fallback pane");
                 let fallback = PaneId::alloc();
                 return Node::Pane(fallback);
             }
             if new_panes.len() == 1 {
+                warn!(
+                    pane = new_panes[0].raw(),
+                    "restore: 1-member stack in snapshot, collapsing to Pane"
+                );
                 return Node::Pane(new_panes[0]);
             }
-            let expanded = (*expanded).min(new_panes.len() - 1);
+            let clamped = (*expanded).min(new_panes.len() - 1);
+            if clamped != *expanded {
+                warn!(
+                    original = *expanded,
+                    clamped,
+                    stack_size = new_panes.len(),
+                    "restore: out-of-range expanded index clamped"
+                );
+            }
             Node::Stack {
                 panes: new_panes,
-                expanded,
+                expanded: clamped,
             }
         }
     }
@@ -1671,6 +1684,107 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let _ = runtime.try_send_bytes(bytes::Bytes::from_static(b"exit\n"));
+    }
+
+    #[test]
+    fn adversarial_restore_one_member_stack_collapses_to_pane() {
+        let snap = LayoutSnapshot::Stack {
+            panes: vec![42],
+            expanded: 0,
+        };
+        let mut id_map = HashMap::new();
+        let node = remap_inner(&snap, &mut id_map);
+
+        assert!(matches!(node, Node::Pane(_)));
+        assert_eq!(id_map.len(), 1);
+    }
+
+    #[test]
+    fn adversarial_restore_out_of_range_expanded_clamps() {
+        let snap = LayoutSnapshot::Stack {
+            panes: vec![10, 20, 30],
+            expanded: 99,
+        };
+        let mut id_map = HashMap::new();
+        let node = remap_inner(&snap, &mut id_map);
+
+        match node {
+            Node::Stack { panes, expanded } => {
+                assert_eq!(panes.len(), 3);
+                assert_eq!(expanded, 2);
+            }
+            _ => panic!("expected Stack"),
+        }
+    }
+
+    #[test]
+    fn adversarial_restore_empty_stack_collapses_to_fallback_pane() {
+        let snap = LayoutSnapshot::Stack {
+            panes: vec![],
+            expanded: 0,
+        };
+        let mut id_map = HashMap::new();
+        let node = remap_inner(&snap, &mut id_map);
+
+        assert!(matches!(node, Node::Pane(_)));
+    }
+
+    #[test]
+    fn prune_restored_stack_collapses_to_pane_when_one_member_survives() {
+        let a = PaneId::from_raw(50);
+        let b = PaneId::from_raw(51);
+        let c = PaneId::from_raw(52);
+        let node = Node::Stack {
+            panes: vec![a, b, c],
+            expanded: 1,
+        };
+        let surviving = std::collections::HashSet::from([b]);
+
+        let pruned = prune_restored_node(node, &surviving).unwrap();
+        assert!(matches!(pruned, Node::Pane(id) if id == b));
+    }
+
+    #[test]
+    fn prune_restored_stack_clamps_expanded_after_removal() {
+        let a = PaneId::from_raw(60);
+        let b = PaneId::from_raw(61);
+        let c = PaneId::from_raw(62);
+        let node = Node::Stack {
+            panes: vec![a, b, c],
+            expanded: 2,
+        };
+        let surviving = std::collections::HashSet::from([a, b]);
+
+        let pruned = prune_restored_node(node, &surviving).unwrap();
+        match pruned {
+            Node::Stack { panes, expanded } => {
+                assert_eq!(panes, vec![a, b]);
+                assert_eq!(expanded, 1);
+            }
+            _ => panic!("expected Stack"),
+        }
+    }
+
+    #[test]
+    fn restore_reconciles_focus_with_stack_expanded() {
+        use crate::layout::TileLayout;
+
+        let a = PaneId::from_raw(70);
+        let b = PaneId::from_raw(71);
+        let c = PaneId::from_raw(72);
+        let node = Node::Stack {
+            panes: vec![a, b, c],
+            expanded: 0,
+        };
+        let layout = TileLayout::from_saved(node, c);
+
+        match layout.root() {
+            Node::Stack { expanded, .. } => {
+                assert_eq!(*expanded, 2);
+            }
+            _ => panic!("expected Stack"),
+        }
+        assert_eq!(layout.focused(), c);
     }
 
     fn snapshot_with_saved_pane_history() -> (SessionSnapshot, SessionHistorySnapshot) {

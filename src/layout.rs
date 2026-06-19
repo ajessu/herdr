@@ -314,8 +314,10 @@ impl TileLayout {
         &self.root
     }
 
-    /// Reconstruct a layout from a saved tree.
-    pub fn from_saved(root: Node, focus: PaneId) -> Self {
+    /// Reconstruct a layout from a saved tree. Reconciles stack `expanded`
+    /// indices with the restored focus so the invariant holds immediately.
+    pub fn from_saved(mut root: Node, focus: PaneId) -> Self {
+        expand_member(&mut root, focus);
         Self { root, focus }
     }
 
