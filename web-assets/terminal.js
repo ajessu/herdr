@@ -5,6 +5,12 @@
   var ws = null;
   var fitAddon = null;
 
+  var reconnectAttempts = 0;
+  var reconnectTimer = null;
+  var maxAttempts = 6;
+  var baseDelay = 1000;
+  var maxDelay = 30000;
+
   function getSocket() {
     return ws;
   }
@@ -26,6 +32,42 @@
     }
   }
 
+  function computeBackoffDelay(attempt) {
+    var delay = Math.min(maxDelay, baseDelay * Math.pow(2, attempt));
+    return delay * (0.5 + Math.random() * 0.5);
+  }
+
+  function attemptReconnect() {
+    if (reconnectAttempts >= maxAttempts) {
+      term.write('\r\n\x1b[31mConnection lost — reload to retry.\x1b[0m\r\n');
+      return;
+    }
+
+    var attempt = reconnectAttempts;
+    reconnectAttempts++;
+    var delay = computeBackoffDelay(attempt);
+
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      fetch('/config.json', { credentials: 'same-origin' })
+        .then(function (resp) {
+          if (!resp.ok) throw new Error('config fetch failed');
+          return resp.json();
+        })
+        .then(function (config) {
+          if (!config || config.mode !== 'trust-proxy') {
+            window.herdrMode = 'standalone';
+            window.herdrShowLogin();
+            return;
+          }
+          connect();
+        })
+        .catch(function () {
+          attemptReconnect();
+        });
+    }, delay);
+  }
+
   function connect() {
     var opened = false;
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -34,6 +76,7 @@
 
     ws.onopen = function () {
       opened = true;
+      reconnectAttempts = 0;
       var hello = JSON.stringify({
         type: 'hello',
         cols: term.cols,
@@ -56,13 +99,12 @@
 
     ws.onclose = function (event) {
       if (event.code === 1000) return;
-      // The /ws upgrade is rejected before opening (401 for a missing/expired
-      // session cookie, 403 for an origin mismatch). Re-entering the token only
-      // fixes the 401 case, so log the close for the 403 case to be diagnosable
-      // rather than a silent login loop.
       if (!opened) {
-        console.warn('herdr: websocket closed before opening', event.code, event.reason);
-        window.herdrShowLogin();
+        if (window.herdrMode === 'trust-proxy') {
+          attemptReconnect();
+        } else {
+          window.herdrShowLogin();
+        }
         return;
       }
       term.write('\r\n\x1b[31mDisconnected (code ' + event.code + '). Refresh to reconnect.\x1b[0m\r\n');
@@ -70,6 +112,11 @@
   }
 
   window.herdrInitTerminal = function () {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    reconnectAttempts = 0;
     if (term) {
       connect();
       return;
@@ -90,11 +137,13 @@
 
     term.open(container);
 
-    try {
-      var webglAddon = new WebglAddon.WebglAddon();
-      webglAddon.onContextLoss(function () { webglAddon.dispose(); });
-      term.loadAddon(webglAddon);
-    } catch (e) {}
+    if (new URLSearchParams(location.search).get('renderer') === 'webgl') {
+      try {
+        var webglAddon = new WebglAddon.WebglAddon();
+        webglAddon.onContextLoss(function () { webglAddon.dispose(); });
+        term.loadAddon(webglAddon);
+      } catch (e) {}
+    }
 
     fitAddon.fit();
     connect();

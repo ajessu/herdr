@@ -7,6 +7,8 @@
   var tokenInput = document.getElementById('token-input');
   var errorEl = document.getElementById('login-error');
 
+  window.herdrMode = 'standalone';
+
   function showError(msg) {
     errorEl.textContent = msg;
     errorEl.hidden = false;
@@ -17,6 +19,28 @@
     terminalEl.hidden = false;
     window.herdrInitTerminal();
   }
+
+  function showLogin() {
+    loginEl.hidden = false;
+    terminalEl.hidden = true;
+  }
+
+  fetch('/config.json', { credentials: 'same-origin' })
+    .then(function (resp) {
+      if (!resp.ok) throw new Error('config fetch failed');
+      return resp.json();
+    })
+    .then(function (config) {
+      if (config && config.mode === 'trust-proxy') {
+        window.herdrMode = 'trust-proxy';
+        showTerminal();
+      } else {
+        showLogin();
+      }
+    })
+    .catch(function () {
+      showLogin();
+    });
 
   form.addEventListener('submit', function (e) {
     e.preventDefault();
