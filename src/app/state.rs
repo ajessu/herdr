@@ -1526,7 +1526,15 @@ impl AppState {
     }
 
     pub fn estimate_pane_size(&self) -> (u16, u16) {
-        if let Some(info) = self.view.pane_infos.first() {
+        // Skip collapsed stack members: their 1-row rect would yield a tiny
+        // estimate that undersizes a normal-split fallback pane. Use the first
+        // full-height (expanded or non-stacked) pane instead.
+        if let Some(info) = self
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| !info.stack.as_ref().is_some_and(|member| member.collapsed))
+        {
             (info.rect.height, info.rect.width)
         } else {
             (24, 80)
@@ -2138,6 +2146,54 @@ mod tests {
         state.workspaces = vec![ws];
 
         assert!(state.pane_exposes_host_cursor(0, pane_id));
+    }
+
+    #[test]
+    fn estimate_pane_size_skips_collapsed_stack_members() {
+        use crate::layout::StackMember;
+        use ratatui::layout::Rect;
+
+        let mut state = AppState::test_new();
+        let collapsed = |id: u32, rect: Rect| PaneInfo {
+            id: PaneId::from_raw(id),
+            rect,
+            inner_rect: rect,
+            scrollbar_rect: None,
+            is_focused: false,
+            stack: Some(StackMember {
+                collapsed: true,
+                position: 0,
+                count: 3,
+            }),
+        };
+        let expanded = PaneInfo {
+            id: PaneId::from_raw(2),
+            rect: Rect::new(0, 1, 80, 22),
+            inner_rect: Rect::new(0, 1, 80, 22),
+            scrollbar_rect: None,
+            is_focused: true,
+            stack: Some(StackMember {
+                collapsed: false,
+                position: 1,
+                count: 3,
+            }),
+        };
+
+        // First pane_info is a collapsed 1-row member; estimate must skip it and
+        // use the expanded member's full height instead of returning (1, 80).
+        state.view.pane_infos = vec![
+            collapsed(1, Rect::new(0, 0, 80, 1)),
+            expanded,
+            collapsed(3, Rect::new(0, 23, 80, 1)),
+        ];
+        assert_eq!(state.estimate_pane_size(), (22, 80));
+
+        // All collapsed (degenerate): fall back to the default.
+        state.view.pane_infos = vec![
+            collapsed(1, Rect::new(0, 0, 80, 1)),
+            collapsed(3, Rect::new(0, 1, 80, 1)),
+        ];
+        assert_eq!(state.estimate_pane_size(), (24, 80));
     }
 
     #[test]

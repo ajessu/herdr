@@ -730,6 +730,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clicking_collapsed_stack_member_focuses_and_expands_it() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        // 3-member stack, member 0 expanded → members 1 and 2 are collapsed.
+        let members = ws.test_set_stack(3, 0);
+
+        let terminal_area = Rect::new(26, 2, 80, 18);
+        let pane_infos = ws.tabs[0].layout.panes(terminal_area);
+        for info in &pane_infos {
+            ws.insert_test_runtime(
+                info.id,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                    info.inner_rect.width.max(1),
+                    info.inner_rect.height.max(1),
+                    b"",
+                ),
+            );
+        }
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos.clone();
+
+        // Collapsed member 2 occupies its own 1-row rect. Clicking inside it
+        // resolves to that PaneId and auto-expands it (R5 → R1).
+        let collapsed = pane_infos
+            .iter()
+            .find(|p| p.id == members[2])
+            .unwrap()
+            .clone();
+        assert_eq!(collapsed.rect.height, 1);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            collapsed.inner_rect.x + 1,
+            collapsed.inner_rect.y,
+        ));
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), members[2]);
+        // Re-deriving geometry shows member 2 is now the expanded member.
+        let after = app.state.workspaces[0].tabs[0].layout.panes(terminal_area);
+        let expanded = after.iter().find(|p| p.id == members[2]).unwrap();
+        assert!(expanded.rect.height > 1);
+        assert!(expanded
+            .stack
+            .as_ref()
+            .is_some_and(|member| !member.collapsed));
+    }
+
+    #[tokio::test]
     async fn right_clicking_unfocused_mouse_reporting_pane_keeps_focus_for_context_menu() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");

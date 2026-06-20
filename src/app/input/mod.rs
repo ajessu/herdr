@@ -711,6 +711,17 @@ impl AppState {
         ));
 
         let previous_focus = self.current_pane_focus_target();
+        // Capture stack context before the split mutates the tree: if the focus
+        // is currently a stack member, the just-created pane should fold into
+        // that stack when there is room (R9). `terminal_area` feeds the capacity
+        // check; the new-pane action does not receive a `Rect`, so read the view.
+        let terminal_area = self.view.terminal_area;
+        let (was_in_stack, stack_member) = self
+            .active
+            .and_then(|i| self.workspaces.get(i))
+            .and_then(|ws| ws.active_tab())
+            .map(|tab| (tab.layout.focused_in_stack(), tab.layout.focused()))
+            .unwrap_or((false, crate::layout::PaneId::from_raw(0)));
         if let Some(ws_idx) = self.active {
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
                 return;
@@ -730,6 +741,24 @@ impl AppState {
                 self.remove_alias_shadowed_by_new_pane(new_id);
                 self.terminals
                     .insert(new_pane.terminal.id.clone(), new_pane.terminal);
+                // Fold-after-split: the split already inserted the new PaneState,
+                // so `pane_ids() == panes.keys()` holds here. The fold is a pure
+                // tree rewrite over the unchanged id set (it never inserts/removes
+                // a PaneState), so the invariant holds before and after. If there
+                // is no room the fold is a no-op and the normal split remains.
+                if was_in_stack {
+                    if let Some(tab) = self
+                        .workspaces
+                        .get_mut(ws_idx)
+                        .and_then(|ws| ws.active_tab_mut())
+                    {
+                        tab.layout.fold_new_pane_into_focused_stack(
+                            new_id,
+                            stack_member,
+                            terminal_area,
+                        );
+                    }
+                }
                 self.record_pane_focus_change(previous_focus, ws_idx, new_id);
                 self.mark_session_dirty();
                 self.mode = Mode::Terminal;

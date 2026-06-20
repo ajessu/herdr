@@ -598,6 +598,8 @@ pub(crate) enum NavigateAction {
     SplitVertical,
     SplitHorizontal,
     SplitAuto,
+    StackPane,
+    UnstackPane,
     ClosePane,
     BreakPaneToTab,
     EditScrollback,
@@ -724,6 +726,8 @@ fn action_for_key(
         (&kb.split_vertical, NavigateAction::SplitVertical),
         (&kb.split_horizontal, NavigateAction::SplitHorizontal),
         (&kb.split_auto, NavigateAction::SplitAuto),
+        (&kb.stack_pane, NavigateAction::StackPane),
+        (&kb.unstack_pane, NavigateAction::UnstackPane),
         (&kb.close_pane, NavigateAction::ClosePane),
         (&kb.break_pane_to_tab, NavigateAction::BreakPaneToTab),
         (&kb.zoom, NavigateAction::Zoom),
@@ -963,6 +967,14 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::ResizeShrink => {
             state.resize_focused_pane(false);
+        }
+        NavigateAction::StackPane => {
+            state.stack_focused_pane();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::UnstackPane => {
+            state.unstack_focused_pane();
+            leave_navigate_mode(state);
         }
         NavigateAction::ClosePane => {
             if !state.close_pane() {
@@ -2034,11 +2046,11 @@ last_pane = "prefix+tab"
     #[test]
     fn modified_navigate_local_key_can_be_bound_as_prefix_rhs() {
         let mut state = state_with_workspaces(&["test"]);
-        state.keybinds.toggle_sidebar = crate::config::ActionKeybinds::prefix("shift+u");
+        state.keybinds.toggle_sidebar = crate::config::ActionKeybinds::prefix("shift+o");
 
         handle_navigate_key(
             &mut state,
-            KeyEvent::new(KeyCode::Char('U'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT),
         );
 
         assert!(state.sidebar_collapsed);

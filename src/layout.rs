@@ -367,7 +367,8 @@ impl TileLayout {
         let stack_ids: Vec<PaneId> = std::iter::once(stack_member)
             .chain(neighbors.iter().copied())
             .collect();
-        let stack_rects_union = stack_ids.iter()
+        let stack_rects_union = stack_ids
+            .iter()
             .filter_map(|id| panes.iter().find(|p| p.id == *id).map(|p| p.rect))
             .reduce(|acc, r| acc.union(r));
 
@@ -892,7 +893,9 @@ fn stack_member_neighbors(node: &Node, id: PaneId) -> Vec<PaneId> {
         Node::Pane(_) => Vec::new(),
         Node::Split { first, second, .. } => {
             let r = stack_member_neighbors(first, id);
-            if !r.is_empty() { return r; }
+            if !r.is_empty() {
+                return r;
+            }
             stack_member_neighbors(second, id)
         }
         Node::Stack { panes, .. } => {
@@ -922,12 +925,14 @@ fn contains_in_stack(node: &Node, id: PaneId) -> bool {
 fn find_promoted_after_close(node: &Node, neighbors: &[PaneId]) -> Option<PaneId> {
     match node {
         Node::Pane(id) => {
-            if neighbors.contains(id) { Some(*id) } else { None }
+            if neighbors.contains(id) {
+                Some(*id)
+            } else {
+                None
+            }
         }
-        Node::Split { first, second, .. } => {
-            find_promoted_after_close(first, neighbors)
-                .or_else(|| find_promoted_after_close(second, neighbors))
-        }
+        Node::Split { first, second, .. } => find_promoted_after_close(first, neighbors)
+            .or_else(|| find_promoted_after_close(second, neighbors)),
         Node::Stack { panes, expanded } => {
             if neighbors.iter().any(|n| panes.contains(n)) {
                 panes.get(*expanded).copied()
@@ -974,7 +979,13 @@ fn stack_at_focus(node: Node, focus: PaneId) -> (Node, bool) {
                             stack_size = 2,
                             "stack_focused: created 2-member stack"
                         );
-                        (Node::Stack { panes: vec![a, b], expanded: 0 }, true)
+                        (
+                            Node::Stack {
+                                panes: vec![a, b],
+                                expanded: 0,
+                            },
+                            true,
+                        )
                     }
                     (Node::Pane(a), Node::Stack { mut panes, .. }) => {
                         panes.insert(0, a);
@@ -985,12 +996,15 @@ fn stack_at_focus(node: Node, focus: PaneId) -> (Node, bool) {
                         );
                         (Node::Stack { panes, expanded: 0 }, true)
                     }
-                    (first_node, second_node) => (Node::Split {
-                        direction,
-                        ratio,
-                        first: Box::new(first_node),
-                        second: Box::new(second_node),
-                    }, false)
+                    (first_node, second_node) => (
+                        Node::Split {
+                            direction,
+                            ratio,
+                            first: Box::new(first_node),
+                            second: Box::new(second_node),
+                        },
+                        false,
+                    ),
                 }
             } else if second_has_focus {
                 match (*first, *second) {
@@ -1000,7 +1014,13 @@ fn stack_at_focus(node: Node, focus: PaneId) -> (Node, bool) {
                             stack_size = 2,
                             "stack_focused: created 2-member stack"
                         );
-                        (Node::Stack { panes: vec![a, b], expanded: 1 }, true)
+                        (
+                            Node::Stack {
+                                panes: vec![a, b],
+                                expanded: 1,
+                            },
+                            true,
+                        )
                     }
                     (Node::Stack { mut panes, .. }, Node::Pane(b)) => {
                         let expanded = panes.len();
@@ -1012,30 +1032,39 @@ fn stack_at_focus(node: Node, focus: PaneId) -> (Node, bool) {
                         );
                         (Node::Stack { panes, expanded }, true)
                     }
-                    (first_node, second_node) => (Node::Split {
-                        direction,
-                        ratio,
-                        first: Box::new(first_node),
-                        second: Box::new(second_node),
-                    }, false)
+                    (first_node, second_node) => (
+                        Node::Split {
+                            direction,
+                            ratio,
+                            first: Box::new(first_node),
+                            second: Box::new(second_node),
+                        },
+                        false,
+                    ),
                 }
             } else {
                 let (new_first, first_ok) = stack_at_focus(*first, focus);
                 if first_ok {
-                    return (Node::Split {
+                    return (
+                        Node::Split {
+                            direction,
+                            ratio,
+                            first: Box::new(new_first),
+                            second,
+                        },
+                        true,
+                    );
+                }
+                let (new_second, second_ok) = stack_at_focus(*second, focus);
+                (
+                    Node::Split {
                         direction,
                         ratio,
                         first: Box::new(new_first),
-                        second,
-                    }, true);
-                }
-                let (new_second, second_ok) = stack_at_focus(*second, focus);
-                (Node::Split {
-                    direction,
-                    ratio,
-                    first: Box::new(new_first),
-                    second: Box::new(new_second),
-                }, second_ok)
+                        second: Box::new(new_second),
+                    },
+                    second_ok,
+                )
             }
         }
     }
@@ -1051,7 +1080,10 @@ fn unstack_at_focus(
 ) -> (Node, bool) {
     match node {
         Node::Pane(_) => (node, false),
-        Node::Stack { mut panes, expanded } => {
+        Node::Stack {
+            mut panes,
+            expanded,
+        } => {
             let Some(pos) = panes.iter().position(|p| *p == focus) else {
                 return (Node::Stack { panes, expanded }, false);
             };
@@ -1059,19 +1091,29 @@ fn unstack_at_focus(
             let residual = if panes.len() == 1 {
                 Node::Pane(panes[0])
             } else {
-                let new_expanded = if pos < panes.len() { pos } else { panes.len() - 1 };
-                Node::Stack { panes, expanded: new_expanded }
+                let new_expanded = if pos < panes.len() {
+                    pos
+                } else {
+                    panes.len() - 1
+                };
+                Node::Stack {
+                    panes,
+                    expanded: new_expanded,
+                }
             };
             debug!(
                 focused = focus.raw(),
                 "unstack_focused: removed member from stack"
             );
-            (Node::Split {
-                direction: split_direction,
-                ratio: split_ratio,
-                first: Box::new(residual),
-                second: Box::new(Node::Pane(focus)),
-            }, true)
+            (
+                Node::Split {
+                    direction: split_direction,
+                    ratio: split_ratio,
+                    first: Box::new(residual),
+                    second: Box::new(Node::Pane(focus)),
+                },
+                true,
+            )
         }
         Node::Split {
             direction,
@@ -1079,22 +1121,30 @@ fn unstack_at_focus(
             first,
             second,
         } => {
-            let (new_first, first_ok) = unstack_at_focus(*first, focus, split_direction, split_ratio);
+            let (new_first, first_ok) =
+                unstack_at_focus(*first, focus, split_direction, split_ratio);
             if first_ok {
-                return (Node::Split {
+                return (
+                    Node::Split {
+                        direction,
+                        ratio,
+                        first: Box::new(new_first),
+                        second,
+                    },
+                    true,
+                );
+            }
+            let (new_second, second_ok) =
+                unstack_at_focus(*second, focus, split_direction, split_ratio);
+            (
+                Node::Split {
                     direction,
                     ratio,
                     first: Box::new(new_first),
-                    second,
-                }, true);
-            }
-            let (new_second, second_ok) = unstack_at_focus(*second, focus, split_direction, split_ratio);
-            (Node::Split {
-                direction,
-                ratio,
-                first: Box::new(new_first),
-                second: Box::new(new_second),
-            }, second_ok)
+                    second: Box::new(new_second),
+                },
+                second_ok,
+            )
         }
     }
 }
@@ -1125,7 +1175,13 @@ fn fold_into_stack(node: Node, focus: PaneId, new_id: PaneId) -> (Node, bool) {
                             stack_size = 2,
                             "fold_new_pane: created 2-member stack"
                         );
-                        (Node::Stack { panes: vec![f, new_id], expanded: 1 }, true)
+                        (
+                            Node::Stack {
+                                panes: vec![f, new_id],
+                                expanded: 1,
+                            },
+                            true,
+                        )
                     }
                     Node::Stack { mut panes, .. } => {
                         let expanded = panes.len();
@@ -1147,7 +1203,13 @@ fn fold_into_stack(node: Node, focus: PaneId, new_id: PaneId) -> (Node, bool) {
                             stack_size = 2,
                             "fold_new_pane: created 2-member stack"
                         );
-                        (Node::Stack { panes: vec![new_id, f], expanded: 0 }, true)
+                        (
+                            Node::Stack {
+                                panes: vec![new_id, f],
+                                expanded: 0,
+                            },
+                            true,
+                        )
                     }
                     Node::Stack { mut panes, .. } => {
                         panes.insert(0, new_id);
@@ -1164,25 +1226,32 @@ fn fold_into_stack(node: Node, focus: PaneId, new_id: PaneId) -> (Node, bool) {
                 // Recurse
                 let (new_first, first_ok) = fold_into_stack(*first, focus, new_id);
                 if first_ok {
-                    return (Node::Split {
+                    return (
+                        Node::Split {
+                            direction,
+                            ratio,
+                            first: Box::new(new_first),
+                            second,
+                        },
+                        true,
+                    );
+                }
+                let (new_second, second_ok) = fold_into_stack(*second, focus, new_id);
+                (
+                    Node::Split {
                         direction,
                         ratio,
                         first: Box::new(new_first),
-                        second,
-                    }, true);
-                }
-                let (new_second, second_ok) = fold_into_stack(*second, focus, new_id);
-                (Node::Split {
-                    direction,
-                    ratio,
-                    first: Box::new(new_first),
-                    second: Box::new(new_second),
-                }, second_ok)
+                        second: Box::new(new_second),
+                    },
+                    second_ok,
+                )
             }
         }
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1657,7 +1726,7 @@ mod tests {
 
         assert_eq!(infos[0].id, pane(1));
         assert_eq!(infos[0].rect, Rect::new(0, 0, 80, 1));
-        assert_eq!(infos[0].is_focused, false);
+        assert!(!infos[0].is_focused);
         assert_eq!(
             infos[0].stack,
             Some(StackMember {
@@ -1669,7 +1738,7 @@ mod tests {
 
         assert_eq!(infos[1].id, pane(2));
         assert_eq!(infos[1].rect, Rect::new(0, 1, 80, 22));
-        assert_eq!(infos[1].is_focused, true);
+        assert!(infos[1].is_focused);
         assert_eq!(
             infos[1].stack,
             Some(StackMember {
@@ -1681,7 +1750,7 @@ mod tests {
 
         assert_eq!(infos[2].id, pane(3));
         assert_eq!(infos[2].rect, Rect::new(0, 23, 80, 1));
-        assert_eq!(infos[2].is_focused, false);
+        assert!(!infos[2].is_focused);
         assert_eq!(
             infos[2].stack,
             Some(StackMember {
@@ -2156,15 +2225,24 @@ mod tests {
 
         // From expanded (pane 2): up should land on pane(1), down on pane(3)
         let p2 = panes.iter().find(|p| p.id == pane(2)).unwrap();
-        assert_eq!(find_in_direction(p2, NavDirection::Up, &panes), Some(pane(1)));
-        assert_eq!(find_in_direction(p2, NavDirection::Down, &panes), Some(pane(3)));
+        assert_eq!(
+            find_in_direction(p2, NavDirection::Up, &panes),
+            Some(pane(1))
+        );
+        assert_eq!(
+            find_in_direction(p2, NavDirection::Down, &panes),
+            Some(pane(3))
+        );
 
         // From top of stack (pane 1 when expanded): up should exit to pane(5)
         let mut layout2 = layout;
         layout2.focus_pane(pane(1));
         let panes2 = layout2.panes(area);
         let p1 = panes2.iter().find(|p| p.id == pane(1)).unwrap();
-        assert_eq!(find_in_direction(p1, NavDirection::Up, &panes2), Some(pane(5)));
+        assert_eq!(
+            find_in_direction(p1, NavDirection::Up, &panes2),
+            Some(pane(5))
+        );
 
         // From bottom of stack (pane 4 when expanded): down should be None (no pane below)
         let layout3 = TileLayout::from_saved(
@@ -2229,7 +2307,10 @@ mod tests {
         let panes = layout.panes(area);
         let p5 = panes.iter().find(|p| p.id == pane(5)).unwrap();
         // Right from pane(5) should land on pane(2) — the expanded member with the largest rect
-        assert_eq!(find_in_direction(p5, NavDirection::Right, &panes), Some(pane(2)));
+        assert_eq!(
+            find_in_direction(p5, NavDirection::Right, &panes),
+            Some(pane(2))
+        );
     }
 
     // --- Step-2: in-stack resize characterization ---
@@ -2253,6 +2334,53 @@ mod tests {
                 assert_eq!(*expanded, 1);
             }
             _ => panic!("expected Stack"),
+        }
+    }
+
+    #[test]
+    fn resize_expanded_member_changes_containing_split_ratio() {
+        // Split { Vertical, Stack{[1,2,3], expanded:2}, Pane(4) }: the stack is
+        // the top child and its expanded member sits at the bottom of the stack,
+        // so its lower edge is adjacent to the containing split border. Resizing
+        // the focused expanded member (pane 3) downward grows the stack area by
+        // changing the containing split's ratio (R10 = Zellij §8, structurally);
+        // the gained height flows to the expanded member because the collapsed
+        // members stay pinned at 1 row. Members do not reorder.
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.5,
+                first: Box::new(Node::Stack {
+                    panes: vec![pane(1), pane(2), pane(3)],
+                    expanded: 2,
+                }),
+                second: Box::new(Node::Pane(pane(4))),
+            },
+            pane(3),
+        );
+        let area = Rect::new(0, 0, 80, 40);
+
+        layout.resize_focused(NavDirection::Down, 0.05, area);
+
+        let splits = split_snapshot(&layout);
+        assert_eq!(splits.len(), 1);
+        assert_eq!(splits[0].0, Direction::Vertical);
+        assert!(
+            (splits[0].1 - 0.55).abs() < f32::EPSILON,
+            "expected ratio to grow to 0.55, got {}",
+            splits[0].1
+        );
+
+        // The stack survived unchanged: same members, same order, same expanded.
+        match layout.root() {
+            Node::Split { first, .. } => match first.as_ref() {
+                Node::Stack { panes, expanded } => {
+                    assert_eq!(*panes, vec![pane(1), pane(2), pane(3)]);
+                    assert_eq!(*expanded, 2);
+                }
+                _ => panic!("expected Stack as first child"),
+            },
+            _ => panic!("expected Split root"),
         }
     }
 }

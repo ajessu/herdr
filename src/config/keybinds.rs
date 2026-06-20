@@ -302,6 +302,8 @@ pub struct Keybinds {
     pub last_pane: ActionKeybinds,
     pub split_vertical: ActionKeybinds,
     pub split_horizontal: ActionKeybinds,
+    pub stack_pane: ActionKeybinds,
+    pub unstack_pane: ActionKeybinds,
     pub close_pane: ActionKeybinds,
     pub break_pane_to_tab: ActionKeybinds,
     pub zoom: ActionKeybinds,
@@ -505,6 +507,8 @@ impl Config {
             ),
             split_vertical: action!("keys.split_vertical", &self.keys.split_vertical),
             split_horizontal: action!("keys.split_horizontal", &self.keys.split_horizontal),
+            stack_pane: action!("keys.stack_pane", &self.keys.stack_pane),
+            unstack_pane: action!("keys.unstack_pane", &self.keys.unstack_pane),
             close_pane: action!("keys.close_pane", &self.keys.close_pane),
             break_pane_to_tab: action!("keys.break_pane_to_tab", &self.keys.break_pane_to_tab),
             zoom: action!("keys.zoom", &self.keys.zoom),
@@ -1271,6 +1275,23 @@ mod tests {
             parse_key_combo("v"),
             Some((KeyCode::Char('v'), KeyModifiers::empty()))
         );
+    }
+
+    #[test]
+    fn default_stack_keybinds_are_registered_without_conflicts() {
+        let config = Config::default();
+        let (_prefix_diag, _prefix, diagnostics, keybinds) = config.validated_keybinds();
+
+        // The default stack/unstack bindings must not collide with any existing
+        // default binding; a conflict would emit a diagnostic and drop a binding.
+        assert!(
+            diagnostics.is_empty(),
+            "default keybinds produced diagnostics: {diagnostics:?}"
+        );
+        assert!(!keybinds.stack_pane.bindings.is_empty());
+        assert!(!keybinds.unstack_pane.bindings.is_empty());
+        // `prefix+s` stays on settings rather than stacking.
+        assert!(!keybinds.settings.bindings.is_empty());
     }
 
     #[test]

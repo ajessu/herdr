@@ -111,6 +111,9 @@ fn non_colliding_backup_path(path: &Path, version: u32) -> Option<PathBuf> {
         .find(|candidate| !candidate.exists())
 }
 
+/// Single-path session save used by tests. Production saves session and history
+/// together via `save_to_paths` so both anti-clobber guards run atomically.
+#[cfg(test)]
 pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::Result<()> {
     backup_if_newer(path)?;
     save_json_to_path(path, snapshot)

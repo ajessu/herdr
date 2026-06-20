@@ -1299,6 +1299,34 @@ impl Workspace {
         tab.layout.unstack_focused(direction, ratio)
     }
 
+    /// Build an `expanded`-indexed stack of `count` panes as the active tab's
+    /// root, allocating fresh `PaneState`s so `tab.panes` stays consistent with
+    /// `layout.pane_ids()`. Returns the member ids in order. Test-only.
+    pub(crate) fn test_set_stack(&mut self, count: usize, expanded: usize) -> Vec<PaneId> {
+        assert!(count >= 2, "a stack needs at least 2 members");
+        let tab = self.active_tab_mut().expect("workspace must have tab");
+        let mut panes = vec![tab.root_pane];
+        for _ in 1..count {
+            panes.push(PaneId::alloc());
+        }
+        let expanded = expanded.min(count - 1);
+        tab.layout = TileLayout::from_saved(
+            crate::layout::Node::Stack {
+                panes: panes.clone(),
+                expanded,
+            },
+            panes[expanded],
+        );
+        for id in panes.iter().skip(1).copied() {
+            tab.panes.insert(id, PaneState::new(TerminalId::alloc()));
+        }
+        let new_ids: Vec<PaneId> = panes.iter().skip(1).copied().collect();
+        for id in new_ids {
+            self.register_new_pane(id);
+        }
+        panes
+    }
+
     pub(crate) fn test_fold_new_pane(&mut self, area: ratatui::layout::Rect) -> bool {
         let tab = self.active_tab_mut().expect("workspace must have tab");
         let old_focus = tab.layout.focused();
@@ -1531,12 +1559,7 @@ impl Workspace {
 
         // Stack-specific invariants
         for (tab_idx, tab) in self.tabs.iter().enumerate() {
-            validate_stack_invariants(
-                tab.layout.root(),
-                tab.layout.focused(),
-                &self.id,
-                tab_idx,
-            );
+            validate_stack_invariants(tab.layout.root(), tab.layout.focused(), &self.id, tab_idx);
         }
     }
 }

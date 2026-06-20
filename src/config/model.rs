@@ -401,6 +401,10 @@ pub struct KeysConfig {
     pub split_vertical: BindingConfig,
     /// Split pane horizontally (stacked). Default: "prefix+minus"
     pub split_horizontal: BindingConfig,
+    /// Stack the focused pane with its adjacent sibling. Default: "prefix+shift+s"
+    pub stack_pane: BindingConfig,
+    /// Remove the focused pane from its stack. Default: "prefix+shift+u"
+    pub unstack_pane: BindingConfig,
     /// Close the focused pane. Default: "prefix+x"
     pub close_pane: BindingConfig,
     /// Break the focused pane out into a new tab. Default: "prefix+!"
@@ -659,6 +663,8 @@ impl Default for KeysConfig {
             close_pane: BindingConfig::Many(vec!["prefix+x".into(), "alt+x".into()]),
             break_pane_to_tab: BindingConfig::one("prefix+!"),
             zoom: BindingConfig::Many(vec!["prefix+z".into(), "alt+z".into()]),
+            stack_pane: BindingConfig::one("prefix+shift+s"),
+            unstack_pane: BindingConfig::one("prefix+shift+u"),
             split_auto: BindingConfig::one("alt+n"),
             move_tab_left: BindingConfig::one("alt+i"),
             move_tab_right: BindingConfig::one("alt+o"),
