@@ -264,16 +264,25 @@ fn layout_tab_hit_areas(
     }
 
     let mut x = area.x;
-    let right = area.x + area.width;
+    let right = area.x.saturating_add(area.width);
+    let mut placed_any = false;
     for (idx, rect) in rects.iter_mut().enumerate().skip(scroll) {
         if x >= right {
             break;
         }
         let desired = tab_width(&chromes[idx], mode);
         let remaining = right.saturating_sub(x);
+        // No slivers: a tab that can't reach MIN_TAB_WIDTH is hidden (width 0)
+        // and reachable via scroll buttons / `…` indicators — unless nothing has
+        // been placed yet, in which case the first tab at this scroll offset is
+        // rendered clipped (>= 1 col) so the row is never blank.
+        if remaining < MIN_TAB_WIDTH && placed_any {
+            break;
+        }
         let width = desired.min(remaining).max(1);
         *rect = Rect::new(x, area.y, width, 1);
-        x = x.saturating_add(width + 1);
+        placed_any = true;
+        x = x.saturating_add(width.saturating_add(1));
     }
     rects
 }
@@ -408,6 +417,17 @@ pub(crate) fn compute_tab_bar_view(
         current_scroll.min(max_scroll)
     };
     let tab_hit_areas = layout_tab_hit_areas(&chromes, mode, tab_area, scroll);
+    let hidden_count = tab_hit_areas.iter().filter(|r| r.width == 0).count();
+    tracing::debug!(
+        tab_area_width = tab_area.width,
+        tab_count = chromes.len(),
+        ?mode,
+        active_tab,
+        max_scroll,
+        scroll,
+        hidden_count,
+        "tab bar overflow"
+    );
     let trailing_x = trailing_tab_controls_x(&tab_hit_areas, tab_area_x).min(tab_area_right);
     let right_hit_area = Rect::new(
         trailing_x,
@@ -778,7 +798,10 @@ mod tests {
     }
 
     #[test]
-    fn overflow_in_non_mouse_mode_clips_last_tab() {
+    fn overflow_in_non_mouse_mode_hides_last_tab() {
+        // Previously the last tab got a 2-col sliver; now it is hidden (width 0)
+        // because remaining (2) < MIN_TAB_WIDTH (8). The existing overflow
+        // detection (any(width == 0)) fires correctly for this case.
         let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
         let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 20, 1);
@@ -793,7 +816,7 @@ mod tests {
         );
         assert_eq!(view.tab_hit_areas[0].width, 8);
         assert_eq!(view.tab_hit_areas[1].width, 8);
-        assert_eq!(view.tab_hit_areas[2].width, 2);
+        assert_eq!(view.tab_hit_areas[2].width, 0);
     }
 
     #[test]
@@ -832,6 +855,8 @@ mod tests {
 
     #[test]
     fn centered_scroll_last_tab_scrolls_to_show_it() {
+        // With the no-sliver fix, the last tab's former 7-col sliver at scroll=2
+        // is now width 0, so max_tab_scroll becomes 3 and the resolved scroll is 3.
         let mut ws = make_ws_with_tabs(&["aa", "bb", "cc", "dd", "ee"]);
         ws.active_tab = 4;
         let chromes = chromes_from_ws(&ws);
@@ -850,7 +875,11 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(view.scroll, 2);
+        assert_eq!(view.scroll, 3);
+        assert!(
+            view.tab_hit_areas[4].width > 0,
+            "active/last tab must be visible"
+        );
     }
 
     #[test]
@@ -886,7 +915,9 @@ mod tests {
     }
 
     #[test]
-    fn layout_clips_last_tab_on_right_edge() {
+    fn layout_hides_last_tab_below_min_width() {
+        // Previously the last tab got a 2-col sliver (remaining=2 < MIN_TAB_WIDTH=8).
+        // Now it is hidden (width 0) so overflow detection fires correctly.
         let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
         let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 20, 1);
@@ -896,8 +927,7 @@ mod tests {
         assert_eq!(rects[0].x, 0);
         assert_eq!(rects[1].width, 8);
         assert_eq!(rects[1].x, 9);
-        assert_eq!(rects[2].width, 2);
-        assert_eq!(rects[2].x, 18);
+        assert_eq!(rects[2].width, 0);
     }
 
     #[test]
@@ -916,15 +946,16 @@ mod tests {
     }
 
     #[test]
-    fn layout_clipped_tab_has_at_least_one_column() {
+    fn layout_hides_non_first_tab_below_min_width() {
+        // Previously the second tab got a 1-col sliver (remaining=1 < MIN_TAB_WIDTH=8).
+        // Now non-first tabs below the threshold are hidden (width 0).
         let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
         let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 10, 1);
         let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 0);
 
         assert_eq!(rects[0].width, 8);
-        assert_eq!(rects[1].x, 9);
-        assert_eq!(rects[1].width, 1);
+        assert_eq!(rects[1].width, 0);
         assert_eq!(rects[2].width, 0);
     }
 
@@ -1018,11 +1049,13 @@ mod tests {
 
     #[test]
     fn drop_indicator_x_at_end_uses_right_scroll_button_when_right_clipped() {
+        // With the no-sliver fix, the trailing tab is hidden instead of slivered,
+        // collapsing trailing_x and moving the right scroll button left.
         let area = Rect::new(0, 0, 25, 1);
         let (app, view) = app_with_tab_bar_in(&["aa", "bb", "cc", "dd", "ee"], area, true, 2);
         assert_eq!(view.tab_hit_areas[4].width, 0);
-        assert_eq!(view.scroll_right_hit_area.x.saturating_sub(1), 18);
-        assert_eq!(tab_drop_indicator_x(&app, &app.workspaces[0], 5), Some(18));
+        assert_eq!(view.scroll_right_hit_area.x.saturating_sub(1), 10);
+        assert_eq!(tab_drop_indicator_x(&app, &app.workspaces[0], 5), Some(10));
     }
 
     // --- New unit tests for TabChrome ---
@@ -1393,5 +1426,255 @@ mod tests {
             "a",
             "expected name at col 1 when view mode is Off (tab width {off_tab_width})"
         );
+    }
+
+    // --- No-sliver invariant tests ---
+
+    #[test]
+    fn no_sliver_invariant_direct_layout() {
+        let ws = make_ws_with_tabs(&["alpha", "alpha", "alpha", "alpha", "alpha"]);
+        let chromes = chromes_from_ws(&ws);
+        for width in 10..60 {
+            let area = Rect::new(0, 0, width, 1);
+            let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 0);
+            let mut placed_first = false;
+            for r in &rects {
+                if r.width == 0 {
+                    continue;
+                }
+                if !placed_first {
+                    placed_first = true;
+                    continue;
+                }
+                assert!(
+                    r.width >= MIN_TAB_WIDTH,
+                    "width={width}: non-first tab has sliver width {}",
+                    r.width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_sliver_invariant_via_compute_tab_bar_view() {
+        let names = &["alpha", "alpha", "alpha", "alpha", "alpha"];
+        for active in [0, 2, 4] {
+            for width in 30..55 {
+                let mut ws = make_ws_with_tabs(names);
+                ws.active_tab = active;
+                let chromes = chromes_from_ws(&ws);
+                let area = Rect::new(0, 0, width, 1);
+                let view =
+                    compute_tab_bar_view(chromes, active, TabStatusMode::Off, area, 0, true, true);
+                for (idx, r) in view.tab_hit_areas.iter().enumerate() {
+                    if r.width == 0 {
+                        continue;
+                    }
+                    let is_first_visible =
+                        view.tab_hit_areas[..idx].iter().all(|prev| prev.width == 0);
+                    if is_first_visible {
+                        continue;
+                    }
+                    assert!(
+                        r.width >= MIN_TAB_WIDTH,
+                        "active={active} width={width} tab {idx} has sliver width {}",
+                        r.width
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn active_tab_never_hidden_at_resolved_scroll() {
+        let names = &["alpha", "alpha", "alpha", "alpha", "alpha"];
+        for active in [0, 2, 4] {
+            for width in 25..55 {
+                let mut ws = make_ws_with_tabs(names);
+                ws.active_tab = active;
+                let chromes = chromes_from_ws(&ws);
+                let area = Rect::new(0, 0, width, 1);
+                let view =
+                    compute_tab_bar_view(chromes, active, TabStatusMode::Off, area, 0, true, true);
+                assert!(
+                    view.tab_hit_areas[active].width > 0,
+                    "active={active} width={width}: active tab hidden"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn active_tab_never_hidden_when_max_scroll_clamps_centering() {
+        // Adversarial: the .min(max_scroll) clamp in compute_tab_bar_view could in
+        // principle pull the resolved scroll below the centered value and hide the
+        // active tab, since max_tab_scroll is computed from the LAST tab's
+        // visibility, not the active tab's. The design's Edit 3 proof argues this
+        // cannot happen because visible tabs form a contiguous fully-visible suffix.
+        // Pin that empirically with many non-uniform tabs, the active tab far right,
+        // across narrow widths where max_scroll resolves small.
+        let names = &[
+            "one", "two", "three", "fourfour", "five", "six", "seven", "eight",
+        ];
+        for active in [5, 6, 7] {
+            for width in 18..60 {
+                let mut ws = make_ws_with_tabs(names);
+                ws.active_tab = active;
+                let chromes = chromes_from_ws(&ws);
+                let area = Rect::new(0, 0, width, 1);
+                let view =
+                    compute_tab_bar_view(chromes, active, TabStatusMode::Off, area, 0, true, true);
+                assert!(
+                    view.tab_hit_areas[active].width > 0,
+                    "active={active} width={width}: active tab hidden by max_scroll clamp"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_terminal_fallback_first_tab_rendered() {
+        let ws = make_ws_with_tabs(&["alpha", "bravo"]);
+        let chromes = chromes_from_ws(&ws);
+        for width in 1..MIN_TAB_WIDTH {
+            let area = Rect::new(0, 0, width, 1);
+            let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 0);
+            assert!(
+                rects[0].width >= 1,
+                "width={width}: first tab must render (got width {})",
+                rects[0].width
+            );
+            assert_eq!(
+                rects[1].width, 0,
+                "width={width}: second tab must be hidden"
+            );
+        }
+    }
+
+    #[test]
+    fn truncation_preserved_above_min_width() {
+        let ws = make_ws_with_tabs(&["longername"]);
+        let chromes = chromes_from_ws(&ws);
+        let desired = tab_width(&chromes[0], TabStatusMode::Off);
+        let remaining = desired - 2;
+        assert!(remaining >= MIN_TAB_WIDTH);
+        let area = Rect::new(0, 0, remaining, 1);
+        let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 0);
+        assert_eq!(rects[0].width, remaining);
+    }
+
+    #[test]
+    fn overflow_detected_for_flagship_sliver_scenario() {
+        let ws = make_ws_with_tabs(&["alpha", "alpha", "alpha", "alpha", "alpha"]);
+        let chromes = chromes_from_ws(&ws);
+        let area = Rect::new(0, 0, 50, 1);
+        let view = compute_tab_bar_view(chromes, 0, TabStatusMode::Off, area, 0, true, true);
+        assert!(
+            view.scroll_left_hit_area.width > 0,
+            "scroll buttons must appear"
+        );
+        assert!(
+            view.scroll_right_hit_area.width > 0,
+            "scroll buttons must appear"
+        );
+    }
+
+    #[test]
+    fn tab_status_mode_boundary_triggers_overflow() {
+        let ws = make_ws_with_tabs(&["alpha", "alpha", "alpha"]);
+        let chromes_off: Vec<TabChrome> = chromes_from_ws(&ws);
+        let chromes_all: Vec<TabChrome> = (0..ws.tabs.len())
+            .map(|i| {
+                let name = ws
+                    .tab_display_name(i)
+                    .unwrap_or_else(|| (i + 1).to_string());
+                TabChrome {
+                    status: Some(TabStatusDot {
+                        glyph: "●",
+                        style: Style::default(),
+                    }),
+                    name,
+                    zoomed: false,
+                }
+            })
+            .collect();
+
+        let width_off = tab_width(&chromes_off[0], TabStatusMode::Off);
+        let width_all = tab_width(&chromes_all[0], TabStatusMode::All);
+        assert_eq!(width_all, width_off + 2);
+
+        let area_width = width_off * 3 + 2 + NEW_TAB_WIDTH;
+        let area = Rect::new(0, 0, area_width, 1);
+
+        let view_off =
+            compute_tab_bar_view(chromes_off, 0, TabStatusMode::Off, area, 0, true, true);
+        assert_eq!(
+            view_off.scroll_left_hit_area.width, 0,
+            "Off mode: no overflow"
+        );
+
+        let view_all = compute_tab_bar_view(
+            chromes_all.clone(),
+            0,
+            TabStatusMode::All,
+            area,
+            0,
+            true,
+            true,
+        );
+        assert!(
+            view_all.scroll_left_hit_area.width > 0,
+            "All mode: overflow triggered by +2 status columns"
+        );
+
+        // Attention reserves the same 2-col status slot as All (see display_width),
+        // so the +2 path that pushes the last tab below threshold applies equally.
+        let view_attention = compute_tab_bar_view(
+            chromes_all,
+            0,
+            TabStatusMode::Attention,
+            area,
+            0,
+            true,
+            true,
+        );
+        assert!(
+            view_attention.scroll_left_hit_area.width > 0,
+            "Attention mode: overflow triggered by +2 status columns"
+        );
+    }
+
+    #[test]
+    fn new_tab_button_reachable_across_overflow_transition() {
+        let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
+        let chromes = chromes_from_ws(&ws);
+
+        let no_overflow_area = Rect::new(0, 0, 30, 1);
+        let view = compute_tab_bar_view(
+            chromes.clone(),
+            0,
+            TabStatusMode::Off,
+            no_overflow_area,
+            0,
+            true,
+            true,
+        );
+        assert_eq!(view.new_tab_hit_area.width, NEW_TAB_WIDTH);
+
+        let overflow_area = Rect::new(0, 0, 21, 1);
+        let view =
+            compute_tab_bar_view(chromes, 0, TabStatusMode::Off, overflow_area, 0, true, true);
+        assert_eq!(view.new_tab_hit_area.width, NEW_TAB_WIDTH);
+    }
+
+    #[test]
+    fn happy_path_unchanged_when_tabs_fit() {
+        let ws = make_ws_with_tabs(&["ab", "cd", "ef"]);
+        let chromes = chromes_from_ws(&ws);
+        let area = Rect::new(5, 3, 50, 1);
+        let rects = layout_tab_hit_areas(&chromes, TabStatusMode::Off, area, 0);
+        assert_eq!(rects[0], Rect::new(5, 3, 8, 1));
+        assert_eq!(rects[1], Rect::new(14, 3, 8, 1));
+        assert_eq!(rects[2], Rect::new(23, 3, 8, 1));
     }
 }
