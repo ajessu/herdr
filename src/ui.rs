@@ -38,7 +38,10 @@ use self::mobile::{
 use self::navigator::render_navigator_overlay;
 pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
-use self::panes::{compute_pane_infos, render_panes, resize_tab_panes};
+use self::panes::{
+    compute_floating_pane_infos, compute_pane_infos, render_floating_panes, render_panes,
+    resize_tab_panes,
+};
 pub(crate) use self::release_notes::{
     product_announcement_display_lines, release_notes_close_button_rect,
     release_notes_display_lines, release_notes_wrapped_line_count, PRODUCT_ANNOUNCEMENT_MODAL_SIZE,
@@ -275,6 +278,15 @@ fn compute_view_internal(
         );
     }
 
+    if let Some(ws) = app.active.and_then(|i| app.workspaces.get_mut(i)) {
+        if let Some(tab) = ws.active_tab_mut() {
+            tab.floating.clamp_all_within(terminal_area);
+        }
+    }
+
+    let floating_pane_infos =
+        compute_floating_pane_infos(app, terminal_runtimes, resize_panes, cell_size);
+
     let toast_hit_area = app
         .toast
         .as_ref()
@@ -306,7 +318,7 @@ fn compute_view_internal(
         toast_hit_area,
         pane_infos,
         split_borders,
-        floating_pane_infos: Vec::new(),
+        floating_pane_infos,
     };
 }
 
@@ -410,6 +422,7 @@ pub fn render_with_runtime_registry(
         render_tab_bar(app, frame, tab_bar_area);
     }
     render_panes(app, terminal_runtimes, frame, terminal_area);
+    render_floating_panes(app, terminal_runtimes, frame);
 
     if app.view.layout != ViewLayout::Mobile {
         hint_bar::render_hint_bar(app, frame, app.view.hint_bar_rect);
