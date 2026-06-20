@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use ratatui::layout::Direction;
+use tracing::warn;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, LayoutApplyParams, LayoutDescription, LayoutExportParams,
@@ -87,7 +88,9 @@ impl App {
                     .get(target_ws)
                     .is_some_and(|ws| ws.active_tab_index() == target_tab)
         });
-        let root_leaf = first_layout_leaf(&params.root);
+        let Some(root_leaf) = first_layout_leaf(&params.root) else {
+            return encode_error(id, "invalid_layout", "layout has no panes");
+        };
         let first_cwd = self.layout_root_cwd(ws_idx, replace_target, root_leaf);
         let (rows, cols) = self.state.estimate_pane_size();
         let default_shell = self.state.default_shell.clone();
@@ -271,9 +274,19 @@ impl App {
                 first: Box::new(self.layout_node_description(ws_idx, tab_idx, first)?),
                 second: Box::new(self.layout_node_description(ws_idx, tab_idx, second)?),
             }),
-            // TODO(step-5): map to a real LayoutNode::Stack arm. None here makes
-            // the whole tab un-exportable, so this must not survive past step-5.
-            Node::Stack { .. } => None,
+            Node::Stack { panes, expanded } => {
+                let layout_panes: Vec<LayoutPane> = panes
+                    .iter()
+                    .filter_map(|id| self.layout_pane_description(ws_idx, tab_idx, *id))
+                    .collect();
+                if layout_panes.len() != panes.len() {
+                    return None;
+                }
+                Some(LayoutNode::Stack {
+                    panes: layout_panes,
+                    expanded: *expanded,
+                })
+            }
         }
     }
 
@@ -340,7 +353,7 @@ impl App {
                 first,
                 second,
             } => {
-                let second_leaf = first_layout_leaf(second);
+                let second_leaf = first_layout_leaf(second).ok_or("split child has no panes")?;
                 let new_pane = self.layout_split_pane(
                     ws_idx,
                     pane_id,
@@ -350,6 +363,58 @@ impl App {
                 )?;
                 self.apply_layout_node_to_pane(ws_idx, pane_id, first)?;
                 self.apply_layout_node_to_pane(ws_idx, new_pane, second)
+            }
+            LayoutNode::Stack { panes, expanded } => {
+                // A stack with fewer than 2 members has no accordion to build:
+                // an empty stack is rejected; a 1-member stack collapses to the
+                // single pane already created at `pane_id` (its command/env came
+                // through tab/split creation; apply its label here).
+                let Some(first_pane) = panes.first() else {
+                    return Err("stack must have at least one pane".into());
+                };
+                if panes.len() == 1 {
+                    warn!("LayoutNode::Stack with a single member, collapsing to a pane");
+                    self.apply_layout_pane_label(ws_idx, pane_id, first_pane);
+                    return Ok(());
+                }
+
+                let expanded = if *expanded >= panes.len() {
+                    warn!(
+                        expanded,
+                        members = panes.len(),
+                        "LayoutNode::Stack expanded out of range, clamping"
+                    );
+                    panes.len() - 1
+                } else {
+                    *expanded
+                };
+
+                self.apply_layout_pane_label(ws_idx, pane_id, first_pane);
+                let mut member_ids = vec![pane_id];
+                for member_pane in panes.iter().skip(1) {
+                    let new_pane = self.layout_split_pane(
+                        ws_idx,
+                        *member_ids.last().expect("member_ids is non-empty"),
+                        SplitDirection::Down,
+                        0.5,
+                        member_pane,
+                    )?;
+                    member_ids.push(new_pane);
+                }
+
+                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                    return Err("workspace not found".into());
+                };
+                let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) else {
+                    return Err("tab not found for stack pane".into());
+                };
+                if !ws.tabs[tab_idx]
+                    .layout
+                    .replace_subtree_with_stack(&member_ids, expanded)
+                {
+                    return Err("failed to build stack subtree".into());
+                }
+                Ok(())
             }
         }
     }
@@ -483,10 +548,14 @@ impl App {
     }
 }
 
-fn first_layout_leaf(node: &LayoutNode) -> &LayoutPane {
+/// First materializable leaf pane of a layout tree, or `None` for a tree with
+/// no panes (an empty stack). Total over all inputs so callers don't depend on
+/// `validate_layout_tree` having run first.
+fn first_layout_leaf(node: &LayoutNode) -> Option<&LayoutPane> {
     match node {
-        LayoutNode::Pane { pane } => pane,
+        LayoutNode::Pane { pane } => Some(pane),
         LayoutNode::Split { first, .. } => first_layout_leaf(first),
+        LayoutNode::Stack { panes, .. } => panes.first(),
     }
 }
 
@@ -558,6 +627,24 @@ fn validate_layout_node(
             }
             validate_layout_node(first, depth + 1, stats)?;
             validate_layout_node(second, depth + 1, stats)
+        }
+        LayoutNode::Stack { panes, .. } => {
+            // An empty stack cannot materialize any pane; reject it. A 1-member
+            // stack or out-of-range `expanded` are clamped (with a warning) at
+            // the apply boundary per design §4.6, so they are not rejected here.
+            if panes.is_empty() {
+                return Err("stack must have at least one pane".into());
+            }
+            for pane in panes {
+                stats.panes += 1;
+                if stats.panes > MAX_LAYOUT_PANES {
+                    return Err(format!("layout has more than {} panes", MAX_LAYOUT_PANES));
+                }
+                layout_command(pane)?;
+                super::env::normalize_launch_env(pane.env.clone())
+                    .map_err(|(_, message)| message.to_string())?;
+            }
+            Ok(())
         }
     }
 }
@@ -798,5 +885,242 @@ mod tests {
 
         let err = validate_layout_tree(&root).unwrap_err();
         assert!(err.contains("maximum"));
+    }
+
+    #[test]
+    fn layout_export_stack_produces_stack_node() {
+        let mut app = app_with_workspace();
+        let _second = app.state.workspaces[0].test_split(Direction::Vertical);
+        app.state.ensure_test_terminals();
+        assert!(app.state.workspaces[0].test_stack_focused());
+
+        let response = app.handle_layout_export(
+            "req".into(),
+            LayoutExportParams {
+                tab_id: None,
+                pane_id: None,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutExport { layout } = success.result else {
+            panic!("expected layout export response");
+        };
+        let LayoutNode::Stack { panes, expanded } = layout.root else {
+            panic!("expected stack layout root, got {:?}", layout.root);
+        };
+        assert_eq!(panes.len(), 2);
+        assert_eq!(expanded, 1);
+    }
+
+    #[tokio::test]
+    async fn layout_apply_stack_round_trip() {
+        let mut app = app_with_workspace();
+
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: Some(app.public_workspace_id(0)),
+                tab_id: None,
+                tab_label: Some("stacked".into()),
+                focus: true,
+                root: LayoutNode::Stack {
+                    panes: vec![
+                        LayoutPane {
+                            label: Some("agent-1".into()),
+                            ..Default::default()
+                        },
+                        LayoutPane {
+                            label: Some("agent-2".into()),
+                            ..Default::default()
+                        },
+                        LayoutPane {
+                            label: Some("agent-3".into()),
+                            ..Default::default()
+                        },
+                    ],
+                    expanded: 1,
+                },
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutApply { layout } = success.result else {
+            panic!("expected layout apply response");
+        };
+        let LayoutNode::Stack { panes, expanded } = layout.root else {
+            panic!("expected stack layout root, got {:?}", layout.root);
+        };
+        assert_eq!(panes.len(), 3);
+        assert_eq!(expanded, 1);
+        assert_eq!(panes[0].label.as_deref(), Some("agent-1"));
+        assert_eq!(panes[1].label.as_deref(), Some("agent-2"));
+        assert_eq!(panes[2].label.as_deref(), Some("agent-3"));
+        // Identity invariant: every stack member is a real pane with a PaneState
+        // (layout.pane_ids() == tab.panes.keys()).
+        app.state.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
+    async fn layout_apply_split_containing_stack_round_trips() {
+        let mut app = app_with_workspace();
+
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: Some(app.public_workspace_id(0)),
+                tab_id: None,
+                tab_label: Some("mixed".into()),
+                focus: true,
+                root: LayoutNode::Split {
+                    direction: SplitDirection::Right,
+                    ratio: 0.5,
+                    first: Box::new(LayoutNode::Pane {
+                        pane: LayoutPane {
+                            label: Some("editor".into()),
+                            ..Default::default()
+                        },
+                    }),
+                    second: Box::new(LayoutNode::Stack {
+                        panes: vec![
+                            LayoutPane {
+                                label: Some("agent-1".into()),
+                                ..Default::default()
+                            },
+                            LayoutPane {
+                                label: Some("agent-2".into()),
+                                ..Default::default()
+                            },
+                            LayoutPane {
+                                label: Some("agent-3".into()),
+                                ..Default::default()
+                            },
+                        ],
+                        expanded: 2,
+                    }),
+                },
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutApply { layout } = success.result else {
+            panic!("expected layout apply response");
+        };
+        let LayoutNode::Split { first, second, .. } = layout.root else {
+            panic!("expected split layout root, got {:?}", layout.root);
+        };
+        let LayoutNode::Pane { pane } = *first else {
+            panic!("expected first child to be a pane");
+        };
+        assert_eq!(pane.label.as_deref(), Some("editor"));
+        let LayoutNode::Stack { panes, expanded } = *second else {
+            panic!("expected second child to be a stack");
+        };
+        assert_eq!(panes.len(), 3);
+        assert_eq!(expanded, 2);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn layout_validation_rejects_empty_stack() {
+        let root = LayoutNode::Stack {
+            panes: vec![],
+            expanded: 0,
+        };
+        let err = validate_layout_tree(&root).unwrap_err();
+        assert!(err.contains("at least one pane"));
+    }
+
+    #[test]
+    fn layout_validation_allows_under_sized_and_out_of_range_stack_for_clamping() {
+        // Per design §4.6 the apply boundary clamps a 1-member stack and an
+        // out-of-range `expanded`, so validation must let them through.
+        let one_member = LayoutNode::Stack {
+            panes: vec![LayoutPane::default()],
+            expanded: 0,
+        };
+        assert!(validate_layout_tree(&one_member).is_ok());
+
+        let out_of_range = LayoutNode::Stack {
+            panes: vec![LayoutPane::default(), LayoutPane::default()],
+            expanded: 5,
+        };
+        assert!(validate_layout_tree(&out_of_range).is_ok());
+    }
+
+    #[tokio::test]
+    async fn layout_apply_clamps_out_of_range_expanded() {
+        let mut app = app_with_workspace();
+
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: Some(app.public_workspace_id(0)),
+                tab_id: None,
+                tab_label: Some("stacked".into()),
+                focus: true,
+                root: LayoutNode::Stack {
+                    panes: vec![
+                        LayoutPane {
+                            label: Some("agent-1".into()),
+                            ..Default::default()
+                        },
+                        LayoutPane {
+                            label: Some("agent-2".into()),
+                            ..Default::default()
+                        },
+                    ],
+                    expanded: 9,
+                },
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutApply { layout } = success.result else {
+            panic!("expected layout apply response");
+        };
+        let LayoutNode::Stack { panes, expanded } = layout.root else {
+            panic!("expected stack layout root, got {:?}", layout.root);
+        };
+        assert_eq!(panes.len(), 2);
+        assert_eq!(expanded, 1, "expanded should clamp to last member");
+    }
+
+    #[tokio::test]
+    async fn layout_apply_one_member_stack_collapses_to_pane() {
+        let mut app = app_with_workspace();
+
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: Some(app.public_workspace_id(0)),
+                tab_id: None,
+                tab_label: Some("collapsed".into()),
+                focus: true,
+                root: LayoutNode::Stack {
+                    panes: vec![LayoutPane {
+                        label: Some("solo".into()),
+                        command: Some(vec!["sh".into(), "-c".into(), "true".into()]),
+                        ..Default::default()
+                    }],
+                    expanded: 0,
+                },
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutApply { layout } = success.result else {
+            panic!("expected layout apply response");
+        };
+        let LayoutNode::Pane { pane } = layout.root else {
+            panic!("expected a single pane, got {:?}", layout.root);
+        };
+        assert_eq!(pane.label.as_deref(), Some("solo"));
+        // The collapsed member's command flows through tab creation, not the
+        // label-only collapse path, so it must survive the round-trip.
+        assert_eq!(
+            pane.command,
+            Some(vec!["sh".into(), "-c".into(), "true".into()])
+        );
     }
 }

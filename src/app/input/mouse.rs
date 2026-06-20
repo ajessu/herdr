@@ -1869,6 +1869,7 @@ fn floating_pane_info_to_pane_info(fp: &crate::app::state::FloatingPaneInfo) -> 
         inner_rect: fp.inner_rect,
         scrollbar_rect: None,
         is_focused: fp.is_focused,
+        stack: None,
     }
 }
 

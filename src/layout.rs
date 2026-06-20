@@ -394,6 +394,107 @@ impl TileLayout {
         }
         success
     }
+
+    /// Replace the minimal subtree containing all `member_ids` with a
+    /// `Node::Stack`. Used by layout-apply to construct a stack from freshly
+    /// split panes. On success, sets focus to `member_ids[expanded]` and
+    /// reconciles the expanded index. Returns false (leaving the tree
+    /// unchanged) if the panes don't form a contiguous subtree or any id is
+    /// missing.
+    pub fn replace_subtree_with_stack(&mut self, member_ids: &[PaneId], expanded: usize) -> bool {
+        if member_ids.len() < 2 {
+            return false;
+        }
+        let ids = self.pane_ids();
+        if !member_ids.iter().all(|id| ids.contains(id)) {
+            return false;
+        }
+        let expanded_idx = expanded.min(member_ids.len() - 1);
+        let placeholder = PaneId::from_raw(0);
+        let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
+        let (new_root, success) = replace_subtree_as_stack(old, member_ids, expanded_idx);
+        self.root = new_root;
+        if success {
+            self.focus = member_ids[expanded_idx];
+            expand_member(&mut self.root, self.focus);
+        }
+        success
+    }
+}
+
+/// Recursively find and replace the minimal subtree containing all `ids`
+/// with a `Node::Stack { panes: ids, expanded }`. Always returns a valid
+/// tree: on a non-match the original `node` is returned unchanged with
+/// `false`, so a failed match never destroys the layout.
+fn replace_subtree_as_stack(node: Node, ids: &[PaneId], expanded: usize) -> (Node, bool) {
+    if ids.len() < 2 {
+        return (node, false);
+    }
+    match node {
+        Node::Pane(_) | Node::Stack { .. } => (node, false),
+        Node::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let mut first_ids_buf = Vec::new();
+            collect_ids(&first, &mut first_ids_buf);
+            let first_match = first_ids_buf.iter().filter(|id| ids.contains(id)).count();
+            let mut second_ids_buf = Vec::new();
+            collect_ids(&second, &mut second_ids_buf);
+            let second_match = second_ids_buf.iter().filter(|id| ids.contains(id)).count();
+
+            let all_in_first = first_match == ids.len() && second_match == 0;
+            let all_in_second = second_match == ids.len() && first_match == 0;
+            let spans_both = first_match > 0 && second_match > 0;
+
+            if all_in_first {
+                let (new_first, success) = replace_subtree_as_stack(*first, ids, expanded);
+                (
+                    Node::Split {
+                        direction,
+                        ratio,
+                        first: Box::new(new_first),
+                        second,
+                    },
+                    success,
+                )
+            } else if all_in_second {
+                let (new_second, success) = replace_subtree_as_stack(*second, ids, expanded);
+                (
+                    Node::Split {
+                        direction,
+                        ratio,
+                        first,
+                        second: Box::new(new_second),
+                    },
+                    success,
+                )
+            } else if spans_both
+                && first_match == first_ids_buf.len()
+                && second_match == second_ids_buf.len()
+            {
+                (
+                    Node::Stack {
+                        panes: ids.to_vec(),
+                        expanded,
+                    },
+                    true,
+                )
+            } else {
+                (
+                    Node::Split {
+                        direction,
+                        ratio,
+                        first,
+                        second,
+                    },
+                    false,
+                )
+            }
+        }
+    }
 }
 
 // --- Directional pane navigation ---
@@ -2201,6 +2302,138 @@ mod tests {
         assert!(!layout.fold_new_pane_into_focused_stack(pane(5), pane(1), area));
         // Tree unchanged, focus stays on pane(5)
         assert_eq!(layout.focused(), pane(5));
+    }
+
+    // --- Step-5: replace_subtree_with_stack (layout.apply construction) ---
+
+    #[test]
+    fn replace_subtree_with_stack_right_leaning_chain() {
+        // Shape produced by layout.apply: Split(p1, Split(p2, p3)).
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(2))),
+                    second: Box::new(Node::Pane(pane(3))),
+                }),
+            },
+            pane(1),
+        );
+        assert!(layout.replace_subtree_with_stack(&[pane(1), pane(2), pane(3)], 1));
+        match layout.root() {
+            Node::Stack { panes, expanded } => {
+                assert_eq!(panes, &[pane(1), pane(2), pane(3)]);
+                assert_eq!(*expanded, 1);
+            }
+            _ => panic!("expected stack root"),
+        }
+        assert_eq!(layout.focused(), pane(2));
+    }
+
+    #[test]
+    fn replace_subtree_with_stack_left_leaning_chain() {
+        // Split(Split(p1, p2), p3) — exercises the all_in_first descent.
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.5,
+                first: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(1))),
+                    second: Box::new(Node::Pane(pane(2))),
+                }),
+                second: Box::new(Node::Pane(pane(3))),
+            },
+            pane(1),
+        );
+        assert!(layout.replace_subtree_with_stack(&[pane(1), pane(2), pane(3)], 0));
+        match layout.root() {
+            Node::Stack { panes, expanded } => {
+                assert_eq!(panes, &[pane(1), pane(2), pane(3)]);
+                assert_eq!(*expanded, 0);
+            }
+            _ => panic!("expected stack root"),
+        }
+    }
+
+    #[test]
+    fn replace_subtree_with_stack_nested_subtree_preserves_siblings() {
+        // Stack only the right side; the outer split and pane(9) must survive.
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(9))),
+                second: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(1))),
+                    second: Box::new(Node::Pane(pane(2))),
+                }),
+            },
+            pane(9),
+        );
+        assert!(layout.replace_subtree_with_stack(&[pane(1), pane(2)], 0));
+        match layout.root() {
+            Node::Split { first, second, .. } => {
+                assert!(matches!(**first, Node::Pane(p) if p == pane(9)));
+                assert!(matches!(**second, Node::Stack { .. }));
+            }
+            _ => panic!("expected split root"),
+        }
+    }
+
+    #[test]
+    fn replace_subtree_with_stack_non_contiguous_leaves_tree_intact() {
+        // ids [p1, p3] are interleaved with non-member p2, so they do not form
+        // an exact subtree. Must return false AND leave the tree unchanged
+        // (no Stack node, all original panes still present, focus unmoved).
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(2))),
+                    second: Box::new(Node::Pane(pane(3))),
+                }),
+            },
+            pane(1),
+        );
+        assert!(!layout.replace_subtree_with_stack(&[pane(1), pane(3)], 0));
+        assert!(
+            matches!(layout.root(), Node::Split { .. }),
+            "tree must remain a split on failure, not be clobbered"
+        );
+        let mut ids = layout.pane_ids();
+        ids.sort_by_key(|id| id.raw());
+        assert_eq!(ids, vec![pane(1), pane(2), pane(3)]);
+        assert_eq!(layout.focused(), pane(1));
+    }
+
+    #[test]
+    fn replace_subtree_with_stack_missing_id_returns_false() {
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Pane(pane(2))),
+            },
+            pane(1),
+        );
+        assert!(!layout.replace_subtree_with_stack(&[pane(1), pane(99)], 0));
+        assert!(matches!(layout.root(), Node::Split { .. }));
+        let mut ids = layout.pane_ids();
+        ids.sort_by_key(|id| id.raw());
+        assert_eq!(ids, vec![pane(1), pane(2)]);
     }
 
     // --- Step-2: directional navigation characterization ---

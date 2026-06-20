@@ -148,6 +148,10 @@ pub enum LayoutNode {
         first: Box<LayoutNode>,
         second: Box<LayoutNode>,
     },
+    Stack {
+        panes: Vec<LayoutPane>,
+        expanded: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

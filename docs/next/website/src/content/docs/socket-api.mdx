@@ -139,9 +139,18 @@ export the tab containing that pane.
 ```
 
 The response includes `workspace_id`, `tab_id`, `zoomed`, `focused_pane_id`, and
-`root`. `root` is a BSP tree of `pane` and `split` nodes. Pane nodes can include
-`pane_id`, `label`, `cwd`, and argv `command`. Split nodes use
-`direction` (`right` or `down`), `ratio`, `first`, and `second`.
+`root`. `root` is a BSP tree of `pane`, `split`, and `stack` nodes. Pane nodes can
+include `pane_id`, `label`, `cwd`, and argv `command`. Split nodes use
+`direction` (`right` or `down`), `ratio`, `first`, and `second`. Stack nodes use
+`panes` (an ordered array of pane objects — the same fields as a `pane` node but
+without the `type` tag — that share one area, accordion-style) and `expanded`
+(the zero-based index of the member that fills the area; the rest collapse to
+single title rows). On `layout.apply` a stack should have at least two
+members and `expanded` in range; a single-member stack collapses to a plain pane
+and an out-of-range `expanded` is clamped to the last member. Stack structure is
+only carried on the `layout` tree: per-pane events (`pane.created`) and
+`pane.list` do not include stacking metadata, so use `layout.export` to discover
+which panes are stacked and which member is expanded.
 
 `layout.apply` creates a fresh tab from a declarative tree. If `tab_id` is
 provided, Herdr creates the replacement tab first and then closes the old tab.
@@ -172,6 +181,29 @@ not preserve live PTYs, scrollback, or running processes.
         "command": ["sh", "-c", "just test"],
         "env": { "HERDR_ROLE": "tests" }
       }
+    }
+  }
+}
+```
+
+A `stack` node groups several panes into one accordion area:
+
+```json
+{
+  "id": "req_apply_stack",
+  "method": "layout.apply",
+  "params": {
+    "workspace_id": "wabc",
+    "tab_label": "agents",
+    "focus": true,
+    "root": {
+      "type": "stack",
+      "expanded": 1,
+      "panes": [
+        { "label": "agent-1" },
+        { "label": "agent-2" },
+        { "label": "agent-3" }
+      ]
     }
   }
 }

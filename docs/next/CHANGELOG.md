@@ -4,6 +4,7 @@
 
 ### Added
 - Added default Alt+key shortcuts for common pane and tab actions, inspired by Zellij's ergonomics. Alt+h/j/k/l focus panes directionally, Alt+n auto-splits (side-by-side for wide panes, stacked otherwise), Alt+x closes a pane, Alt+z toggles zoom, Alt+=/- resize by 5%, and Alt+i/o move the current tab left/right. These work in terminal mode without entering prefix mode and coexist with the existing prefix bindings. All Alt shortcuts are user-configurable and removable.
+- Added stacked panes: accordion-style pane groups where one pane is expanded and the rest collapse to single title rows. Stack/unstack with `prefix+shift+s` / `prefix+shift+u`, click collapsed titles to expand, directional nav walks the stack. Persisted across sessions (snapshot version 4) with downgrade-safe anti-clobber backup. Public API supports `layout.export`/`layout.apply` with `LayoutNode::Stack`.
 - Added configurable agent status dots on tab bar labels with `[ui] show_tab_status`. Three modes: `"off"` (default, no dots), `"attention"` (dots for blocked and done tabs only), and `"all"` (dots for all known agent states). Dot colors match the sidebar's existing state palette. Enabled modes reserve a constant-width slot per tab to prevent layout jitter on state transitions.
 - Added a `break_pane_to_tab` keybinding (default `prefix+!`) that breaks the focused pane out into a new tab in the same workspace, keeping its terminal process and focus. Single-pane tabs are left unchanged.
 
