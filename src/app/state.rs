@@ -754,11 +754,8 @@ pub struct FloatingPaneInfo {
     pub pane_id: PaneId,
     pub rect: Rect,
     pub inner_rect: Rect,
-    // `is_focused` and `z_index` are read by floating-pane rendering (step-5),
-    // which consumes this hit-test metadata to draw borders and z-order.
-    #[allow(dead_code)]
     pub is_focused: bool,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // populated for floating-pane rendering; not yet read
     pub z_index: usize,
 }
 
