@@ -35,7 +35,7 @@ impl AppState {
         if self.mode != Mode::Terminal {
             return;
         }
-        let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() else {
+        let Some(info) = self.pane_at(mouse.column, mouse.row) else {
             return;
         };
 
@@ -392,6 +392,56 @@ impl AppState {
                 }
 
                 if !in_sidebar {
+                    if let Some(fp_info) =
+                        self.floating_pane_info_at(mouse.column, mouse.row).cloned()
+                    {
+                        let pane_id = fp_info.pane_id;
+                        // Focus and raise the clicked floating pane. `focus_pane`
+                        // alone can early-return when the pane is already focused,
+                        // so raise explicitly to keep z-order in sync on click.
+                        self.focus_pane(pane_id);
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.floating.bring_to_front(pane_id);
+                        }
+                        if self.mode != Mode::Terminal {
+                            self.mode = Mode::Terminal;
+                        }
+                        let geom = self
+                            .active_tab()
+                            .and_then(|tab| tab.floating.geom_for(pane_id).copied());
+                        if let Some(geom) = geom {
+                            let target =
+                                if rect_contains(geom.inner_rect(), mouse.column, mouse.row) {
+                                    Some(DragTarget::FloatingPaneMove {
+                                        pane_id,
+                                        offset_x: mouse.column.saturating_sub(geom.x),
+                                        offset_y: mouse.row.saturating_sub(geom.y),
+                                        original_geom: geom,
+                                    })
+                                } else {
+                                    geom.border_hit(mouse.column, mouse.row).map(|edge| {
+                                        DragTarget::FloatingPaneResize {
+                                            pane_id,
+                                            edge,
+                                            original_geom: geom,
+                                        }
+                                    })
+                                };
+                            if let Some(target) = target {
+                                self.drag = Some(DragState { target });
+                            }
+                        }
+                        return None;
+                    }
+
+                    if !self.view.floating_pane_infos.is_empty() {
+                        if let Some(tab) = self.active_tab_mut() {
+                            if tab.floating.is_focused() {
+                                tab.floating.unfocus();
+                            }
+                        }
+                    }
+
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         self.drag = Some(DragState {
                             target: DragTarget::PaneSplit {
@@ -573,7 +623,7 @@ impl AppState {
                         self.mode = Mode::Terminal;
                         return None;
                     }
-                } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
+                } else if let Some(info) = self.pane_at(mouse.column, mouse.row) {
                     self.focus_pane(info.id);
                     if self.mode != Mode::Terminal {
                         self.mode = Mode::Terminal;
@@ -616,7 +666,7 @@ impl AppState {
                 }
 
                 if self.drag.is_none() {
-                    if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                    if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row) {
                         if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                             self.selection = None;
                             self.selection_autoscroll = None;
@@ -738,6 +788,31 @@ impl AppState {
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
+                        DragTarget::FloatingPaneMove {
+                            pane_id,
+                            offset_x,
+                            offset_y,
+                            ..
+                        } => {
+                            let pane_id = *pane_id;
+                            let new_x = mouse.column.saturating_sub(*offset_x);
+                            let new_y = mouse.row.saturating_sub(*offset_y);
+                            let bounds = self.view.terminal_area;
+                            if let Some(geom) = self.active_floating_geom_mut(pane_id) {
+                                geom.x = new_x;
+                                geom.y = new_y;
+                                geom.clamp_within(bounds);
+                            }
+                        }
+                        DragTarget::FloatingPaneResize { pane_id, edge, .. } => {
+                            let pane_id = *pane_id;
+                            let edge = *edge;
+                            let bounds = self.view.terminal_area;
+                            let (col, row) = (mouse.column, mouse.row);
+                            if let Some(geom) = self.active_floating_geom_mut(pane_id) {
+                                apply_floating_resize(geom, edge, col, row, bounds);
+                            }
+                        }
                     }
                 }
             }
@@ -762,7 +837,7 @@ impl AppState {
                 }
 
                 if self.drag.is_none() {
-                    if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                    if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row) {
                         if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                             self.selection = None;
                             self.selection_autoscroll = None;
@@ -820,7 +895,7 @@ impl AppState {
             MouseEventKind::Up(MouseButton::Middle) | MouseEventKind::Drag(MouseButton::Middle)
                 if !in_sidebar =>
             {
-                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row) {
                     let _ = self.forward_pane_mouse_button(terminal_runtimes, &info, mouse);
                 }
             }
@@ -891,7 +966,7 @@ impl AppState {
             }
 
             MouseEventKind::Moved if self.mode == Mode::Terminal && !in_sidebar => {
-                if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
+                if let Some(info) = self.pane_at(mouse.column, mouse.row) {
                     let _ = self.forward_pane_mouse_motion(terminal_runtimes, &info, mouse);
                 }
             }
@@ -966,7 +1041,7 @@ impl AppState {
             }
 
             MouseEventKind::Down(MouseButton::Right) if !in_sidebar => {
-                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row) {
                     let ws_idx = self.active?;
                     let tab_idx = self
                         .workspaces
@@ -1272,18 +1347,45 @@ impl AppState {
         })
     }
 
-    pub(super) fn pane_at(&self, col: u16, row: u16) -> Option<&PaneInfo> {
-        self.view.pane_infos.iter().find(|p| {
-            col >= p.inner_rect.x
-                && col < p.inner_rect.x + p.inner_rect.width
-                && row >= p.inner_rect.y
-                && row < p.inner_rect.y + p.inner_rect.height
+    /// Topmost pane at the cell, floating layer first.
+    ///
+    /// Floating panes are not in `view.pane_infos`, so a hit there is returned as
+    /// a synthesized `PaneInfo` built from the floating geometry. Any hit within a
+    /// floating pane's outer rect (border included) claims the pane so that
+    /// scroll/click routing does not leak through the border to the tiled pane
+    /// underneath; coordinate translation against `inner_rect` happens downstream.
+    pub(super) fn pane_at(&self, col: u16, row: u16) -> Option<PaneInfo> {
+        if let Some(fp_info) = self.floating_pane_info_at(col, row) {
+            return Some(floating_pane_info_to_pane_info(fp_info));
+        }
+        self.view
+            .pane_infos
+            .iter()
+            .find(|p| {
+                col >= p.inner_rect.x
+                    && col < p.inner_rect.x + p.inner_rect.width
+                    && row >= p.inner_rect.y
+                    && row < p.inner_rect.y + p.inner_rect.height
+            })
+            .cloned()
+    }
+
+    pub(super) fn floating_pane_info_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<&crate::app::state::FloatingPaneInfo> {
+        self.view.floating_pane_infos.iter().rev().find(|fp| {
+            col >= fp.rect.x
+                && col < fp.rect.x + fp.rect.width
+                && row >= fp.rect.y
+                && row < fp.rect.y + fp.rect.height
         })
     }
 
-    pub(super) fn pane_mouse_target(&self, col: u16, row: u16) -> Option<&PaneInfo> {
+    pub(super) fn pane_mouse_target(&self, col: u16, row: u16) -> Option<PaneInfo> {
         self.pane_at(col, row)
-            .or_else(|| self.pane_frame_at(col, row))
+            .or_else(|| self.pane_frame_at(col, row).cloned())
     }
 
     pub(crate) fn pane_info_by_id(&self, pane_id: crate::layout::PaneId) -> Option<&PaneInfo> {
@@ -1302,6 +1404,56 @@ impl AppState {
     pub(super) fn focus_pane(&mut self, pane_id: crate::layout::PaneId) {
         if let Some(ws_idx) = self.active {
             self.focus_pane_in_workspace(ws_idx, pane_id);
+        }
+    }
+
+    fn active_tab(&self) -> Option<&crate::workspace::Tab> {
+        self.active
+            .and_then(|i| self.workspaces.get(i))
+            .and_then(|ws| ws.active_tab())
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut crate::workspace::Tab> {
+        self.active
+            .and_then(|i| self.workspaces.get_mut(i))
+            .and_then(|ws| ws.active_tab_mut())
+    }
+
+    /// Mutable geometry of a floating pane in the active tab, if present.
+    fn active_floating_geom_mut(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<&mut crate::workspace::floating::FloatingGeom> {
+        self.active_tab_mut()
+            .and_then(|tab| tab.floating.geom_for_mut(pane_id))
+    }
+
+    pub(crate) fn cancel_floating_drag(&mut self) -> bool {
+        let Some(drag) = self.drag.take() else {
+            return false;
+        };
+        match drag.target {
+            DragTarget::FloatingPaneMove {
+                pane_id,
+                original_geom,
+                ..
+            }
+            | DragTarget::FloatingPaneResize {
+                pane_id,
+                original_geom,
+                ..
+            } => {
+                if let Some(geom) = self.active_floating_geom_mut(pane_id) {
+                    *geom = original_geom;
+                }
+                true
+            }
+            _ => {
+                self.drag = Some(DragState {
+                    target: drag.target,
+                });
+                false
+            }
         }
     }
 
@@ -1412,7 +1564,7 @@ impl AppState {
             return false;
         }
 
-        let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() else {
+        let Some(info) = self.pane_at(mouse.column, mouse.row) else {
             return false;
         };
 
@@ -1453,7 +1605,7 @@ impl AppState {
     ) {
         let lines_per_notch = self.mouse_scroll_lines;
 
-        if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
+        if let Some(info) = self.pane_at(mouse.column, mouse.row) {
             self.focus_pane(info.id);
             if self.forward_pane_wheel(terminal_runtimes, &info, mouse) {
                 return;
@@ -1708,6 +1860,65 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
         && col < rect.x + rect.width
         && row >= rect.y
         && row < rect.y + rect.height
+}
+
+fn floating_pane_info_to_pane_info(fp: &crate::app::state::FloatingPaneInfo) -> PaneInfo {
+    PaneInfo {
+        id: fp.pane_id,
+        rect: fp.rect,
+        inner_rect: fp.inner_rect,
+        scrollbar_rect: None,
+        is_focused: fp.is_focused,
+    }
+}
+
+fn apply_floating_resize(
+    geom: &mut crate::workspace::floating::FloatingGeom,
+    edge: crate::workspace::floating::BorderEdge,
+    col: u16,
+    row: u16,
+    bounds: Rect,
+) {
+    use crate::workspace::floating::BorderEdge;
+    const MIN_W: u16 = 3;
+    const MIN_H: u16 = 3;
+
+    // Clamp the cursor to the bounds before deriving the dragged edge. This keeps
+    // an overshoot past the right/bottom edge from inflating the dimension so far
+    // that the later clamp_within has to reposition the *opposite* (anchored)
+    // edge, which would otherwise jump while the user drags only one edge.
+    let bounds_right = bounds.x.saturating_add(bounds.width);
+    let bounds_bottom = bounds.y.saturating_add(bounds.height);
+    let col = col.clamp(bounds.x, bounds_right.saturating_sub(1));
+    let row = row.clamp(bounds.y, bounds_bottom.saturating_sub(1));
+
+    match edge {
+        BorderEdge::Left | BorderEdge::TopLeft | BorderEdge::BottomLeft => {
+            let right = geom.x.saturating_add(geom.width);
+            let new_w = right.saturating_sub(col).max(MIN_W);
+            geom.x = right.saturating_sub(new_w);
+            geom.width = new_w;
+        }
+        BorderEdge::Right | BorderEdge::TopRight | BorderEdge::BottomRight => {
+            let new_w = col.saturating_sub(geom.x).saturating_add(1).max(MIN_W);
+            geom.width = new_w;
+        }
+        _ => {}
+    }
+    match edge {
+        BorderEdge::Top | BorderEdge::TopLeft | BorderEdge::TopRight => {
+            let bottom = geom.y.saturating_add(geom.height);
+            let new_h = bottom.saturating_sub(row).max(MIN_H);
+            geom.y = bottom.saturating_sub(new_h);
+            geom.height = new_h;
+        }
+        BorderEdge::Bottom | BorderEdge::BottomLeft | BorderEdge::BottomRight => {
+            let new_h = row.saturating_sub(geom.y).saturating_add(1).max(MIN_H);
+            geom.height = new_h;
+        }
+        _ => {}
+    }
+    geom.clamp_within(bounds);
 }
 
 fn apply_scroll(scroll: &mut usize, delta: i16, max_scroll: usize) {
@@ -3296,5 +3507,390 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+
+    mod floating_pane_mouse {
+        use super::*;
+        use crate::{app::state::FloatingPaneInfo, workspace::floating::FloatingGeom};
+
+        fn app_with_floating_pane() -> (super::super::super::App, crate::layout::PaneId) {
+            let mut app = app_for_mouse_test();
+            let ws = Workspace::test_new("test");
+            let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+            app.state.workspaces = vec![ws];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.view.pane_infos = pane_infos;
+
+            let floating_id = crate::layout::PaneId::alloc();
+            let geom = FloatingGeom {
+                x: 30,
+                y: 5,
+                width: 30,
+                height: 15,
+            };
+            app.state.workspaces[0].tabs[0]
+                .floating
+                .add_pane(floating_id, geom);
+            app.state.workspaces[0].tabs[0].floating.show();
+            let terminal_id = crate::terminal::TerminalId::alloc();
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .insert(floating_id, crate::pane::PaneState::new(terminal_id));
+
+            app.state.view.floating_pane_infos = vec![FloatingPaneInfo {
+                pane_id: floating_id,
+                rect: geom.rect(),
+                inner_rect: geom.inner_rect(),
+                is_focused: true,
+                z_index: 0,
+            }];
+
+            (app, floating_id)
+        }
+
+        #[test]
+        fn click_on_floating_body_starts_move_drag() {
+            let (mut app, floating_id) = app_with_floating_pane();
+            let col = 35;
+            let row = 10;
+
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+            assert!(app.state.drag.is_some());
+            let drag = app.state.drag.as_ref().unwrap();
+            match &drag.target {
+                DragTarget::FloatingPaneMove {
+                    pane_id,
+                    offset_x,
+                    offset_y,
+                    original_geom,
+                } => {
+                    assert_eq!(*pane_id, floating_id);
+                    assert_eq!(*offset_x, col - 30);
+                    assert_eq!(*offset_y, row - 5);
+                    assert_eq!(original_geom.x, 30);
+                    assert_eq!(original_geom.y, 5);
+                }
+                _ => panic!("expected FloatingPaneMove"),
+            }
+        }
+
+        #[test]
+        fn click_on_floating_border_starts_resize_drag() {
+            let (mut app, floating_id) = app_with_floating_pane();
+            let col = 30;
+            let row = 10;
+
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+            assert!(app.state.drag.is_some());
+            let drag = app.state.drag.as_ref().unwrap();
+            match &drag.target {
+                DragTarget::FloatingPaneResize {
+                    pane_id,
+                    edge,
+                    original_geom,
+                } => {
+                    assert_eq!(*pane_id, floating_id);
+                    assert_eq!(*edge, crate::workspace::floating::BorderEdge::Left);
+                    assert_eq!(original_geom.x, 30);
+                }
+                _ => panic!("expected FloatingPaneResize"),
+            }
+        }
+
+        #[test]
+        fn click_outside_floating_unfocuses_layer() {
+            let (mut app, _floating_id) = app_with_floating_pane();
+            app.state.workspaces[0].tabs[0]
+                .floating
+                .focus_pane(app.state.view.floating_pane_infos[0].pane_id);
+            assert!(app.state.workspaces[0].tabs[0].floating.is_focused());
+
+            let col = 70;
+            let row = 3;
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+            assert!(!app.state.workspaces[0].tabs[0].floating.is_focused());
+        }
+
+        #[test]
+        fn drag_moves_floating_pane() {
+            let (mut app, floating_id) = app_with_floating_pane();
+            // Give the pane room to move so the drag is not clamped.
+            app.state.view.terminal_area = Rect::new(26, 0, 80, 40);
+            app.state.drag = Some(DragState {
+                target: DragTarget::FloatingPaneMove {
+                    pane_id: floating_id,
+                    offset_x: 5,
+                    offset_y: 5,
+                    original_geom: FloatingGeom {
+                        x: 30,
+                        y: 5,
+                        width: 30,
+                        height: 15,
+                    },
+                },
+            });
+
+            app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 50, 12));
+
+            let geom = app.state.workspaces[0].tabs[0]
+                .floating
+                .geom_for(floating_id)
+                .unwrap();
+            assert_eq!(geom.x, 45);
+            assert_eq!(geom.y, 7);
+        }
+
+        #[test]
+        fn drag_move_clamps_within_bounds() {
+            let (mut app, floating_id) = app_with_floating_pane();
+            app.state.drag = Some(DragState {
+                target: DragTarget::FloatingPaneMove {
+                    pane_id: floating_id,
+                    offset_x: 0,
+                    offset_y: 0,
+                    original_geom: FloatingGeom {
+                        x: 30,
+                        y: 5,
+                        width: 30,
+                        height: 15,
+                    },
+                },
+            });
+
+            app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 200, 200));
+
+            let geom = app.state.workspaces[0].tabs[0]
+                .floating
+                .geom_for(floating_id)
+                .unwrap();
+            let bounds = app.state.view.terminal_area;
+            assert!(geom.x + geom.width <= bounds.x + bounds.width);
+            assert!(geom.y + geom.height <= bounds.y + bounds.height);
+        }
+
+        #[test]
+        fn release_clears_floating_drag() {
+            let (mut app, floating_id) = app_with_floating_pane();
+            app.state.drag = Some(DragState {
+                target: DragTarget::FloatingPaneMove {
+                    pane_id: floating_id,
+                    offset_x: 5,
+                    offset_y: 5,
+                    original_geom: FloatingGeom {
+                        x: 30,
+                        y: 5,
+                        width: 30,
+                        height: 15,
+                    },
+                },
+            });
+
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 50, 12));
+
+            assert!(app.state.drag.is_none());
+        }
+
+        #[test]
+        fn escape_cancels_floating_move_drag() {
+            let (mut app, floating_id) = app_with_floating_pane();
+            let original = FloatingGeom {
+                x: 30,
+                y: 5,
+                width: 30,
+                height: 15,
+            };
+            app.state.drag = Some(DragState {
+                target: DragTarget::FloatingPaneMove {
+                    pane_id: floating_id,
+                    offset_x: 5,
+                    offset_y: 5,
+                    original_geom: original,
+                },
+            });
+            if let Some(geom) = app.state.workspaces[0].tabs[0]
+                .floating
+                .geom_for_mut(floating_id)
+            {
+                geom.x = 50;
+                geom.y = 12;
+            }
+
+            let cancelled = app.state.cancel_floating_drag();
+            assert!(cancelled);
+            assert!(app.state.drag.is_none());
+            let geom = app.state.workspaces[0].tabs[0]
+                .floating
+                .geom_for(floating_id)
+                .unwrap();
+            assert_eq!(geom.x, 30);
+            assert_eq!(geom.y, 5);
+        }
+
+        #[test]
+        fn escape_cancels_floating_resize_drag() {
+            let (mut app, floating_id) = app_with_floating_pane();
+            let original = FloatingGeom {
+                x: 30,
+                y: 5,
+                width: 30,
+                height: 15,
+            };
+            app.state.drag = Some(DragState {
+                target: DragTarget::FloatingPaneResize {
+                    pane_id: floating_id,
+                    edge: crate::workspace::floating::BorderEdge::Right,
+                    original_geom: original,
+                },
+            });
+            if let Some(geom) = app.state.workspaces[0].tabs[0]
+                .floating
+                .geom_for_mut(floating_id)
+            {
+                geom.width = 50;
+            }
+
+            let cancelled = app.state.cancel_floating_drag();
+            assert!(cancelled);
+            assert!(app.state.drag.is_none());
+            let geom = app.state.workspaces[0].tabs[0]
+                .floating
+                .geom_for(floating_id)
+                .unwrap();
+            assert_eq!(geom.width, 30);
+        }
+
+        #[test]
+        fn escape_without_floating_drag_returns_false() {
+            let (mut app, _) = app_with_floating_pane();
+            app.state.drag = None;
+            assert!(!app.state.cancel_floating_drag());
+
+            app.state.drag = Some(DragState {
+                target: DragTarget::SidebarDivider,
+            });
+            assert!(!app.state.cancel_floating_drag());
+            assert!(app.state.drag.is_some());
+        }
+
+        #[test]
+        fn floating_pane_info_at_returns_topmost() {
+            let (mut app, _) = app_with_floating_pane();
+            let second_id = crate::layout::PaneId::alloc();
+            let second_geom = FloatingGeom {
+                x: 35,
+                y: 8,
+                width: 20,
+                height: 10,
+            };
+            app.state.view.floating_pane_infos.push(FloatingPaneInfo {
+                pane_id: second_id,
+                rect: second_geom.rect(),
+                inner_rect: second_geom.inner_rect(),
+                is_focused: false,
+                z_index: 1,
+            });
+
+            let hit = app.state.floating_pane_info_at(40, 10);
+            assert_eq!(hit.unwrap().pane_id, second_id);
+        }
+
+        #[test]
+        fn pane_at_returns_floating_pane_over_tiled() {
+            let (app, floating_id) = app_with_floating_pane();
+            // (40, 10) is inside the floating pane's inner_rect, which overlaps
+            // the tiled root pane underneath.
+            let info = app.state.pane_at(40, 10).expect("pane at floating cell");
+            assert_eq!(info.id, floating_id);
+        }
+
+        #[test]
+        fn pane_at_border_cell_routes_to_floating_pane() {
+            let (app, floating_id) = app_with_floating_pane();
+            // (30, 5) is the floating pane's top-left border corner. A border hit
+            // must still claim the floating pane so scroll/click do not leak to
+            // the tiled pane underneath.
+            let info = app
+                .state
+                .pane_at(30, 5)
+                .expect("border hit claims floating");
+            assert_eq!(info.id, floating_id);
+        }
+
+        #[test]
+        fn pane_at_falls_through_to_tiled_when_floating_missed() {
+            let (app, floating_id) = app_with_floating_pane();
+            // (70, 18) is outside the floating pane; routing falls through to the
+            // tiled pane beneath.
+            let info = app.state.pane_at(70, 18);
+            assert!(info.is_none() || info.unwrap().id != floating_id);
+        }
+
+        #[test]
+        fn resize_right_edge_overshoot_does_not_move_left_edge() {
+            // Dragging the right edge far past the bounds must not jump the
+            // anchored left edge: only the dragged dimension should change.
+            let bounds = Rect::new(26, 2, 80, 18);
+            let mut geom = FloatingGeom {
+                x: 30,
+                y: 5,
+                width: 30,
+                height: 10,
+            };
+            apply_floating_resize(
+                &mut geom,
+                crate::workspace::floating::BorderEdge::Right,
+                200,
+                10,
+                bounds,
+            );
+            assert_eq!(geom.x, 30, "left edge must stay anchored");
+            // Width is clamped so the pane stays within the right bound.
+            assert!(geom.x + geom.width <= bounds.x + bounds.width);
+        }
+
+        #[test]
+        fn resize_bottom_edge_overshoot_does_not_move_top_edge() {
+            let bounds = Rect::new(26, 2, 80, 18);
+            let mut geom = FloatingGeom {
+                x: 30,
+                y: 5,
+                width: 20,
+                height: 8,
+            };
+            apply_floating_resize(
+                &mut geom,
+                crate::workspace::floating::BorderEdge::Bottom,
+                200,
+                200,
+                bounds,
+            );
+            assert_eq!(geom.y, 5, "top edge must stay anchored");
+            assert!(geom.y + geom.height <= bounds.y + bounds.height);
+        }
+
+        #[test]
+        fn resize_left_edge_respects_minimum_width() {
+            let bounds = Rect::new(0, 0, 100, 50);
+            let mut geom = FloatingGeom {
+                x: 30,
+                y: 5,
+                width: 20,
+                height: 10,
+            };
+            // Drag the left edge rightward past the right edge: width pins at 3.
+            apply_floating_resize(
+                &mut geom,
+                crate::workspace::floating::BorderEdge::Left,
+                90,
+                10,
+                bounds,
+            );
+            assert_eq!(geom.width, 3);
+        }
     }
 }

@@ -34,6 +34,10 @@ impl App {
 
         let key_event = key.as_key_event();
 
+        if key_event.code == KeyCode::Esc && self.state.cancel_floating_drag() {
+            return None;
+        }
+
         if let Some(action) = super::terminal_direct_navigation_action(&self.state, key) {
             debug!(
                 code = ?key_event.code,

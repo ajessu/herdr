@@ -306,6 +306,7 @@ fn compute_view_internal(
         toast_hit_area,
         pane_infos,
         split_borders,
+        floating_pane_infos: Vec::new(),
     };
 }
 
@@ -378,6 +379,7 @@ fn compute_mobile_view(
         toast_hit_area,
         pane_infos,
         split_borders,
+        floating_pane_infos: Vec::new(),
     };
 }
 

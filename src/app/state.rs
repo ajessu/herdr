@@ -6,6 +6,7 @@ use ratatui::style::Color;
 use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
+use crate::workspace::floating::{BorderEdge, FloatingGeom};
 
 pub(crate) type InstalledPluginRegistry =
     std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
@@ -745,6 +746,20 @@ pub struct ViewState {
     pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
+    pub floating_pane_infos: Vec<FloatingPaneInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FloatingPaneInfo {
+    pub pane_id: PaneId,
+    pub rect: Rect,
+    pub inner_rect: Rect,
+    // `is_focused` and `z_index` are read by floating-pane rendering (step-5),
+    // which consumes this hit-test metadata to draw borders and z-order.
+    #[allow(dead_code)]
+    pub is_focused: bool,
+    #[allow(dead_code)]
+    pub z_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1028,9 +1043,20 @@ pub(crate) enum DragTarget {
     },
     SidebarDivider,
     SidebarSectionDivider,
+    FloatingPaneMove {
+        pane_id: crate::layout::PaneId,
+        offset_x: u16,
+        offset_y: u16,
+        original_geom: FloatingGeom,
+    },
+    FloatingPaneResize {
+        pane_id: crate::layout::PaneId,
+        edge: BorderEdge,
+        original_geom: FloatingGeom,
+    },
 }
 
-/// Active mouse drag on a split border or sidebar divider.
+/// Active mouse drag, identified by what is being dragged (see [`DragTarget`]).
 pub(crate) struct DragState {
     pub target: DragTarget,
 }
@@ -1673,6 +1699,7 @@ impl AppState {
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
+                floating_pane_infos: Vec::new(),
             },
             drag: None,
             workspace_press: None,

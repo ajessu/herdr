@@ -318,7 +318,7 @@ impl App {
             return false;
         }
 
-        let Some(info) = self.state.pane_at(mouse.column, mouse.row).cloned() else {
+        let Some(info) = self.state.pane_at(mouse.column, mouse.row) else {
             return false;
         };
         let viewport_row = mouse.row.saturating_sub(info.inner_rect.y);
@@ -397,10 +397,22 @@ impl App {
             return None;
         }
 
-        let Some(info) = self.state.pane_at(mouse.column, mouse.row).cloned() else {
+        let Some(info) = self.state.pane_at(mouse.column, mouse.row) else {
             self.last_pane_click = None;
             return None;
         };
+
+        // A hit on a floating pane's border claims the pane (so scroll/click do
+        // not leak underneath) but has no content cell, so it is not a text
+        // double-click candidate.
+        if mouse.column < info.inner_rect.x
+            || mouse.column >= info.inner_rect.x + info.inner_rect.width
+            || mouse.row < info.inner_rect.y
+            || mouse.row >= info.inner_rect.y + info.inner_rect.height
+        {
+            self.last_pane_click = None;
+            return None;
+        }
 
         Some(PaneClickState {
             pane_id: info.id,
