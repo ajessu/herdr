@@ -1671,6 +1671,9 @@ navigate_pane_right = "ctrl+l"
     #[test]
     fn terminal_direct_last_pane_shortcut_maps_to_navigation_action() {
         let mut state = state_with_workspaces(&["test"]);
+        // focus_pane_right defaults to alt+l and is matched before last_pane, so
+        // clear it before binding last_pane to the same key.
+        state.keybinds.focus_pane_right = crate::config::ActionKeybinds::default();
         state.keybinds.last_pane = crate::config::ActionKeybinds::direct("alt+l");
 
         let action = terminal_direct_navigation_action(
