@@ -299,12 +299,6 @@ async fn handle_text_message(
                 })
                 .await;
         }
-        ClientControl::Mouse { .. } => {
-            // Mouse events require encoding through the terminal's mouse
-            // reporting protocol. For MVP, these are forwarded as raw bytes
-            // if/when the frontend sends them as binary. The structured mouse
-            // JSON is a placeholder for future refinement.
-        }
         ClientControl::Hello { .. } => {
             // Duplicate hello after connection established — ignore.
         }

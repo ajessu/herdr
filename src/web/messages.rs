@@ -18,13 +18,6 @@ pub(crate) enum ClientControl {
     Paste {
         text: String,
     },
-    #[allow(dead_code)]
-    Mouse {
-        kind: String,
-        col: u16,
-        row: u16,
-        modifiers: u8,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -98,26 +91,6 @@ mod tests {
         match msg {
             ClientControl::Paste { text } => assert_eq!(text, "hello world"),
             _ => panic!("expected Paste"),
-        }
-    }
-
-    #[test]
-    fn deserialize_mouse() {
-        let json = r#"{"type": "mouse", "kind": "down", "col": 5, "row": 10, "modifiers": 0}"#;
-        let msg: ClientControl = serde_json::from_str(json).unwrap();
-        match msg {
-            ClientControl::Mouse {
-                kind,
-                col,
-                row,
-                modifiers,
-            } => {
-                assert_eq!(kind, "down");
-                assert_eq!(col, 5);
-                assert_eq!(row, 10);
-                assert_eq!(modifiers, 0);
-            }
-            _ => panic!("expected Mouse"),
         }
     }
 
