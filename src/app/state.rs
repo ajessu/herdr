@@ -768,6 +768,11 @@ pub enum Mode {
     Prefix,
     Copy,
     Terminal,
+    Pane,
+    Tab,
+    Move,
+    Session,
+    Locked,
     RenameWorkspace,
     RenameTab,
     RenamePane,
@@ -781,6 +786,26 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     Navigator,
+}
+
+impl Mode {
+    #[allow(dead_code)]
+    pub fn is_sticky(self) -> bool {
+        matches!(self, Self::Pane | Self::Tab | Self::Resize | Self::Move | Self::Session)
+    }
+
+    #[allow(dead_code)]
+    pub fn is_locked(self) -> bool {
+        self == Self::Locked
+    }
+
+    pub fn normal_mode(has_workspace: bool) -> Self {
+        if has_workspace {
+            Self::Terminal
+        } else {
+            Self::Navigate
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

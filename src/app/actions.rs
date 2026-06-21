@@ -1582,6 +1582,42 @@ impl AppState {
         }
     }
 
+    pub fn navigate_pane_or_tab(&mut self, direction: NavDirection) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
+            return;
+        };
+        if tab.focused_target().is_floating() {
+            return;
+        }
+        let panes = if tab.zoomed {
+            tab.layout.panes(self.view.terminal_area)
+        } else {
+            self.view.pane_infos.clone()
+        };
+
+        let moved = if let Some(focused) = panes.iter().find(|p| p.is_focused) {
+            if let Some(target) = find_in_direction(focused, direction, &panes) {
+                self.focus_pane_in_workspace(ws_idx, target);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !moved {
+            match direction {
+                NavDirection::Left => self.previous_tab(),
+                NavDirection::Right => self.next_tab(),
+                _ => {}
+            }
+        }
+    }
+
     pub fn swap_pane(&mut self, direction: NavDirection) -> bool {
         let Some(ws_idx) = self.active else {
             return false;

@@ -271,11 +271,7 @@ pub enum DefaultMode {
 /// Resolved mode-entry key combos. `None` means the key was dropped during
 /// validation (parse failure with no usable fallback, or a duplicate of an
 /// earlier mode-entry key), so that mode is not reachable by its entry key.
-///
-/// These are resolved and validated at config load; the input dispatcher does
-/// not yet read them while the modal system is being built out.
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)] // not yet read by the input dispatcher
 pub struct ModeEntryKeys {
     pub pane: Option<KeyCombo>,
     pub tab: Option<KeyCombo>,
@@ -524,7 +520,7 @@ impl Default for ReleasedKeys {
             navigate_pane_down: BindingConfig::one("j"),
             navigate_pane_up: BindingConfig::one("k"),
             navigate_pane_right: BindingConfig::one("l"),
-            detach: BindingConfig::one("prefix+q"),
+            detach: BindingConfig::Many(vec!["prefix+q".into(), "ctrl+q".into()]),
             reload_config: BindingConfig::one("prefix+shift+r"),
             open_notification_target: BindingConfig::one("prefix+o"),
             previous_workspace: BindingConfig::empty(),
@@ -532,8 +528,8 @@ impl Default for ReleasedKeys {
             previous_agent: BindingConfig::empty(),
             next_agent: BindingConfig::empty(),
             focus_agent: BindingConfig::empty(),
-            new_tab: BindingConfig::one("prefix+c"),
-            rename_tab: BindingConfig::one("prefix+shift+t"),
+            new_tab: BindingConfig::Many(vec!["prefix+c".into(), "alt+t".into()]),
+            rename_tab: BindingConfig::Many(vec!["prefix+shift+t".into(), "alt+r".into()]),
             previous_tab: BindingConfig::one("prefix+p"),
             next_tab: BindingConfig::one("prefix+n"),
             switch_tab: BindingConfig::one("prefix+1..9"),
@@ -567,7 +563,7 @@ impl Default for ReleasedKeys {
             resize_shrink: BindingConfig::one("alt+-"),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
-            toggle_floating: BindingConfig::one("prefix+f"),
+            toggle_floating: BindingConfig::Many(vec!["prefix+f".into(), "alt+w".into()]),
             new_floating_pane: BindingConfig::one("prefix+shift+f"),
             close_floating_pane: BindingConfig::empty(),
             move_floating_left: BindingConfig::empty(),
@@ -2309,7 +2305,12 @@ workspaces = "ctrl+alt"
             .new_tab
             .bindings
             .iter()
-            .all(|binding| binding.trigger.is_prefix()));
+            .any(|binding| binding.trigger.is_prefix()));
+        assert!(kb
+            .new_tab
+            .bindings
+            .iter()
+            .any(|binding| binding.trigger.is_direct()));
         assert_eq!(
             binding_triggers(&kb.swap_pane_left),
             vec![BindingTrigger::Prefix((

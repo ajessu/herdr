@@ -34,6 +34,7 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
 }
 
 mod copy_mode;
+mod dispatch_baseline;
 mod modal;
 mod mouse;
 mod navigate;
@@ -62,6 +63,113 @@ use super::state::{AppState, Mode};
 use super::App;
 
 // ---------------------------------------------------------------------------
+// Modal dispatch helpers
+// ---------------------------------------------------------------------------
+
+fn check_mode_entry_locked(state: &AppState, key: TerminalKey) -> bool {
+    if let Some(combo) = state.keybinds.mode_entry.locked {
+        crate::config::terminal_key_matches_combo(key, combo)
+    } else {
+        false
+    }
+}
+
+fn check_mode_entry(state: &AppState, key: TerminalKey) -> Option<Mode> {
+    let me = &state.keybinds.mode_entry;
+    if let Some(combo) = me.pane {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return Some(Mode::Pane);
+        }
+    }
+    if let Some(combo) = me.tab {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return Some(Mode::Tab);
+        }
+    }
+    if let Some(combo) = me.resize {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return Some(Mode::Resize);
+        }
+    }
+    if let Some(combo) = me.move_ {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return Some(Mode::Move);
+        }
+    }
+    if let Some(combo) = me.session {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return Some(Mode::Session);
+        }
+    }
+    if let Some(combo) = me.locked {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return Some(Mode::Locked);
+        }
+    }
+    if let Some(combo) = me.tmux {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return Some(Mode::Prefix);
+        }
+    }
+    None
+}
+
+/// Shared bindings active in all non-Locked modes (except Copy/Prefix).
+fn resolve_shared_binding(
+    state: &AppState,
+    key: TerminalKey,
+) -> Option<navigate::NavigateAction> {
+    use navigate::NavigateAction;
+    let kb = &state.keybinds;
+
+    if kb.focus_pane_left.matches_direct_key(key) {
+        return Some(NavigateAction::FocusPaneLeftOrTab);
+    }
+    if kb.focus_pane_down.matches_direct_key(key) {
+        return Some(NavigateAction::FocusPaneDown);
+    }
+    if kb.focus_pane_up.matches_direct_key(key) {
+        return Some(NavigateAction::FocusPaneUp);
+    }
+    if kb.focus_pane_right.matches_direct_key(key) {
+        return Some(NavigateAction::FocusPaneRightOrTab);
+    }
+    if kb.split_auto.matches_direct_key(key) {
+        return Some(NavigateAction::SplitAuto);
+    }
+    if kb.close_pane.matches_direct_key(key) {
+        return Some(NavigateAction::ClosePane);
+    }
+    if kb.resize_grow.matches_direct_key(key) {
+        return Some(NavigateAction::ResizeGrow);
+    }
+    if kb.resize_shrink.matches_direct_key(key) {
+        return Some(NavigateAction::ResizeShrink);
+    }
+    if kb.move_tab_left.matches_direct_key(key) {
+        return Some(NavigateAction::MoveTabLeft);
+    }
+    if kb.move_tab_right.matches_direct_key(key) {
+        return Some(NavigateAction::MoveTabRight);
+    }
+    if kb.detach.matches_direct_key(key) {
+        return Some(NavigateAction::Detach);
+    }
+    if kb.new_tab.matches_direct_key(key) {
+        return Some(NavigateAction::NewTab);
+    }
+    if kb.rename_tab.matches_direct_key(key) {
+        return Some(NavigateAction::RenameTab);
+    }
+    if kb.toggle_floating.matches_direct_key(key) {
+        return Some(NavigateAction::ToggleFloating);
+    }
+    None
+}
+
+fn run_mode_action(_state: &mut AppState, _key: TerminalKey) {}
+
+// ---------------------------------------------------------------------------
 // Key handling
 // ---------------------------------------------------------------------------
 
@@ -75,40 +183,95 @@ impl App {
             return;
         }
 
+        // Locked mode: only the mode_locked key exits; everything else → PTY.
+        if self.state.mode == Mode::Locked {
+            if check_mode_entry_locked(&self.state, key) {
+                self.state.mode = Mode::normal_mode(self.state.active.is_some());
+            } else {
+                self.forward_key_to_pty(key).await;
+            }
+            return;
+        }
+
+        // Overlay modes get exclusive dispatch — no shared/mode-entry interception.
+        match self.state.mode {
+            Mode::Onboarding => { self.handle_onboarding_key(key_event); return; }
+            Mode::ReleaseNotes => { self.handle_release_notes_key(key_event); return; }
+            Mode::ProductAnnouncement => { self.handle_product_announcement_key(key_event); return; }
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+                handle_rename_key(&mut self.state, key_event); return;
+            }
+            Mode::NewLinkedWorktree => { self.handle_worktree_create_key(key_event); return; }
+            Mode::OpenExistingWorktree => { self.handle_worktree_open_key(key_event); return; }
+            Mode::ConfirmRemoveWorktree => { self.handle_worktree_remove_key(key_event); return; }
+            Mode::ConfirmClose => { handle_confirm_close_key(&mut self.state, key_event); return; }
+            Mode::ContextMenu => {
+                handle_context_menu_key(&mut self.state, &mut self.terminal_runtimes, key_event);
+                return;
+            }
+            Mode::Settings => { self.handle_settings_key(key_event); return; }
+            Mode::GlobalMenu => { handle_global_menu_key(&mut self.state, key_event); return; }
+            Mode::KeybindHelp => { handle_keybind_help_key(&mut self.state, key_event); return; }
+            Mode::Navigator => {
+                handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
+                return;
+            }
+            _ => {}
+        }
+
+        // Mode-entry keys: from any non-Locked mode (except Copy and Prefix which
+        // have their own exit semantics), pressing a mode-entry key switches directly.
+        if !matches!(self.state.mode, Mode::Copy | Mode::Prefix) {
+            if let Some(target) = check_mode_entry(&self.state, key) {
+                self.state.mode = target;
+                return;
+            }
+        }
+
+        // Shared bindings: resolve from any non-Locked mode (except Copy/Prefix).
+        if !matches!(self.state.mode, Mode::Copy | Mode::Prefix) {
+            if let Some(action) = resolve_shared_binding(&self.state, key) {
+                self.execute_shared_action(action);
+                return;
+            }
+        }
+
+        // Mode-specific dispatch.
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
             Mode::Prefix => self.handle_prefix_key(key),
-            Mode::Navigate => self.handle_navigate_key(key),
+            Mode::Navigate | Mode::Session => self.handle_navigate_key(key),
             Mode::Copy => self.handle_copy_mode_key(key),
-            _ => match self.state.mode {
-                Mode::Onboarding => self.handle_onboarding_key(key_event),
-                Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
-                Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
-                Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
-                Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                    handle_rename_key(&mut self.state, key_event)
-                }
-                Mode::NewLinkedWorktree => self.handle_worktree_create_key(key_event),
-                Mode::OpenExistingWorktree => self.handle_worktree_open_key(key_event),
-                Mode::ConfirmRemoveWorktree => self.handle_worktree_remove_key(key_event),
-                Mode::Resize => handle_resize_key(&mut self.state, key),
-                Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key_event),
-                Mode::ContextMenu => {
-                    handle_context_menu_key(
-                        &mut self.state,
-                        &mut self.terminal_runtimes,
-                        key_event,
-                    );
-                }
-                Mode::Settings => self.handle_settings_key(key_event),
-                Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
-                Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key_event),
-                Mode::Navigator => {
-                    handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
-                }
-                Mode::Terminal => unreachable!(),
-            },
+            Mode::Resize => handle_resize_key(&mut self.state, key),
+            Mode::Pane | Mode::Tab | Mode::Move => {
+                run_mode_action(&mut self.state, key);
+            }
+            Mode::Locked => unreachable!(),
+            _ => {}
         }
+    }
+
+    async fn forward_key_to_pty(&mut self, key: TerminalKey) {
+        if let Some(ws_idx) = self.state.active {
+            if let Some(rt) = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            {
+                let bytes = rt.encode_terminal_key(key);
+                if !bytes.is_empty() {
+                    let _ = rt.try_send_bytes(bytes::Bytes::from(bytes));
+                }
+            }
+        }
+    }
+
+    fn execute_shared_action(&mut self, action: navigate::NavigateAction) {
+        navigate::execute_navigate_action_in_context(
+            &mut self.state,
+            &mut self.terminal_runtimes,
+            action,
+            navigate::ActionContext::Direct,
+        );
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {

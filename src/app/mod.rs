@@ -420,10 +420,13 @@ impl App {
         let startup_product_announcement =
             crate::product_announcements::load_unseen_for_current_version();
 
+        let keybinds = config.keybinds();
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
         } else if startup_product_announcement.is_some() {
             state::Mode::ProductAnnouncement
+        } else if keybinds.default_mode == crate::config::DefaultMode::Locked {
+            state::Mode::Locked
         } else if active.is_some() {
             state::Mode::Terminal
         } else {
@@ -564,7 +567,7 @@ impl App {
             sound: config.ui.sound.clone(),
             local_sound_playback: true,
             toast_config: config.ui.toast.clone(),
-            keybinds: config.keybinds(),
+            keybinds,
             spinner_tick: 0,
             palette: resolve_palette(config),
             theme_name: config
@@ -722,7 +725,9 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
-        app.state.mode = if app.state.active.is_some() {
+        app.state.mode = if app.state.keybinds.default_mode == crate::config::DefaultMode::Locked {
+            state::Mode::Locked
+        } else if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
             state::Mode::Navigate
@@ -1496,7 +1501,7 @@ impl App {
             Mode::Prefix => {
                 self.handle_prefix_key(key);
             }
-            Mode::Navigate => {
+            Mode::Navigate | Mode::Session => {
                 self.handle_navigate_key(key);
             }
             Mode::Copy => {
@@ -1548,8 +1553,8 @@ impl App {
             Mode::Navigator => {
                 input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
             }
-            Mode::Terminal => {
-                // Should not be called in terminal mode.
+            Mode::Terminal | Mode::Pane | Mode::Tab | Mode::Move | Mode::Locked => {
+                // Not dispatched through this path.
             }
         }
     }

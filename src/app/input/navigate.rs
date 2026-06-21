@@ -631,6 +631,8 @@ pub(crate) enum NavigateAction {
     ResizeFloatingShrink,
     CycleFloatingFocusNext,
     CycleFloatingFocusPrevious,
+    FocusPaneLeftOrTab,
+    FocusPaneRightOrTab,
 }
 
 fn indexed_navigation_action(
@@ -925,6 +927,8 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::FocusPaneDown => state.navigate_pane(NavDirection::Down),
         NavigateAction::FocusPaneUp => state.navigate_pane(NavDirection::Up),
         NavigateAction::FocusPaneRight => state.navigate_pane(NavDirection::Right),
+        NavigateAction::FocusPaneLeftOrTab => state.navigate_pane_or_tab(NavDirection::Left),
+        NavigateAction::FocusPaneRightOrTab => state.navigate_pane_or_tab(NavDirection::Right),
         NavigateAction::SwapPaneLeft => {
             state.swap_pane(NavDirection::Left);
             leave_navigate_mode(state);
