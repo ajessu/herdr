@@ -30,6 +30,15 @@
         if (el) {
           el.classList.toggle('herdr-mouse-captured', !!msg.enabled);
         }
+        // Mirror crossterm's Enable/DisableMouseCapture so xterm.js reports
+        // mouse events to the PTY exactly as a native host terminal would.
+        // Without this xterm emits nothing and the binary path has nothing to
+        // forward.
+        if (term) {
+          term.write(msg.enabled
+            ? '\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h'
+            : '\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l');
+        }
         break;
       case 'notify':
         break;
