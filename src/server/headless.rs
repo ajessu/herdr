@@ -29,7 +29,7 @@ use interprocess::local_socket::traits::Stream as _;
 use interprocess::local_socket::ListenerNonblockingMode;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use base64::Engine;
 use bytes::Bytes;
@@ -2843,6 +2843,11 @@ impl HeadlessServer {
                 broken_clients.push(client_id);
                 continue;
             }
+            trace!(
+                client_id,
+                enabled,
+                "streaming mouse capture state to web client"
+            );
             client.host_mouse_capture_active = Some(enabled);
         }
 

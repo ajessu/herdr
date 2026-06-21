@@ -26,6 +26,10 @@
         }
         break;
       case 'mouse_capture':
+        var el = document.getElementById('terminal');
+        if (el) {
+          el.classList.toggle('herdr-mouse-captured', !!msg.enabled);
+        }
         break;
       case 'notify':
         break;
@@ -145,7 +149,12 @@
       } catch (e) {}
     }
 
-    fitAddon.fit();
-    connect();
+    // Defer the initial fit one frame so the container has real layout
+    // dimensions (it was just unhidden). connect() stays inside the callback so
+    // the hello frame reports the fitted term.cols/rows, not the pre-fit size.
+    requestAnimationFrame(function () {
+      fitAddon.fit();
+      connect();
+    });
   };
 })();

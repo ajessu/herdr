@@ -6,6 +6,7 @@
 
 html, body {
   height: 100%;
+  overflow: hidden;
   background: #1a1b26;
   color: #c0caf5;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -75,6 +76,18 @@ html, body {
 }
 
 #terminal {
-  width: 100%;
-  height: 100%;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+}
+
+/* xterm.js renders a `.xterm` child that fills #terminal and sets `cursor: text`
+   directly on itself, so a cursor rule on the #terminal container alone is
+   overridden. Target the child, mirroring xterm's own `.xterm.enable-mouse-events`
+   convention, so the captured-state cursor actually takes effect. */
+#terminal.herdr-mouse-captured .xterm {
+  cursor: default;
 }

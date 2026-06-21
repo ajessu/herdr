@@ -412,6 +412,38 @@ fn strip_ansi(bytes: &[u8]) -> String {
     out
 }
 
+/// Find an SGR mouse sequence in `cat -v`-rendered text that ends with the given
+/// `terminator` (`M` press / `m` release).
+///
+/// `cat -v` prints ESC as the two printable characters `^[`, so a re-encoded SGR
+/// mouse report appears as `^[[<button;col;row` ended by `M`/`m`. The function
+/// scans every `^[[<` occurrence rather than only the first, so a press echo
+/// still lingering in the buffer cannot mask the release (or vice versa).
+fn find_sgr_mouse(text: &str, terminator: char) -> Option<String> {
+    let mut from = 0;
+    while let Some(rel) = text[from..].find("^[[<") {
+        let start = from + rel;
+        let rest = &text[start..];
+        let Some(end) = rest.find(['M', 'm']) else {
+            break;
+        };
+        let seq = &rest[..=end];
+        if seq.ends_with(terminator) {
+            return Some(seq.to_string());
+        }
+        from = start + end + 1;
+    }
+    None
+}
+
+/// Parse the column field (second `;`-separated number) from an SGR mouse
+/// sequence like `^[[<0;34;19M`. Returns None if the shape doesn't match.
+fn sgr_mouse_column(seq: &str) -> Option<u16> {
+    let body = seq.strip_prefix("^[[<")?;
+    let body = &body[..body.len() - 1]; // drop the M/m terminator
+    body.split(';').nth(1)?.parse().ok()
+}
+
 // ---------------------------------------------------------------------------
 // Trust-proxy helpers
 // ---------------------------------------------------------------------------
@@ -1038,6 +1070,105 @@ async fn connection_cap_rejects_excess() {
     assert!(
         after_close.is_ok(),
         "after a slot is freed, upgrade should succeed again"
+    );
+
+    cleanup_spawned_herdr(env.spawned, env.base);
+}
+
+#[tokio::test]
+async fn web_mouse_roundtrip() {
+    let _lock = test_lock();
+    let env = setup_web_env();
+
+    let session = authenticate(&env.web_url, &env.token).await;
+    // Connect wide (>= the 96-col mobile threshold) so herdr renders the desktop
+    // layout with a stable sidebar + single tiled pane. A narrower terminal would
+    // trip the mobile layout, whose pane geometry and mouse routing differ.
+    let mut ws = connect_ws(&env.web_url, &session, 120, 40).await;
+
+    assert!(
+        wait_for_any_binary(&mut ws, Duration::from_secs(5)).await,
+        "should receive initial render"
+    );
+
+    // Disable canonical mode so cat echoes each byte as it arrives (mouse
+    // sequences carry no newline, so line-buffered input would never flush),
+    // enable SGR mouse mode via printf, echo a marker so we know it ran, then
+    // keep stdin open with cat -v (which makes mouse bytes visible as ^[...).
+    //
+    // Use octal \033 for ESC: POSIX printf (dash, the test's /bin/sh) supports
+    // octal escapes but not \xHH hex, so \x1b would print literally and never
+    // enable mouse reporting.
+    let enable_mouse =
+        b"stty -icanon min 1 time 0; printf '\\033[?1000h\\033[?1002h\\033[?1006h'; echo MOUSE_READY; cat -v\n";
+    let (mut write, read) = ws.split();
+    write
+        .send(tungstenite::Message::Binary(enable_mouse.to_vec().into()))
+        .await
+        .unwrap();
+    let mut ws = read.reunite(write).unwrap();
+
+    // Wait until the marker appears confirming mouse mode is set.
+    assert!(
+        wait_for_output(&mut ws, "MOUSE_READY", Duration::from_secs(5)).await,
+        "MOUSE_READY marker should appear"
+    );
+
+    // Brief pause for the VT to process the DECSET sequences that preceded the marker.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Drain any pending render frames.
+    let _ = collect_visible_text(&mut ws, Duration::from_millis(400)).await;
+
+    // Send an SGR mouse button press at screen col 60, row 20 (1-indexed). These
+    // coordinates land inside the tiled pane's interior: past the sidebar (~26
+    // cols) and the tab bar (row 0), well clear of any chrome.
+    let sgr_click = b"\x1b[<0;60;20M";
+    let (mut write, read) = ws.split();
+    write
+        .send(tungstenite::Message::Binary(sgr_click.to_vec().into()))
+        .await
+        .unwrap();
+    let mut ws = read.reunite(write).unwrap();
+
+    // The server parses the SGR mouse event, routes it to the pane (focused in
+    // App mode, the web client's mode), re-encodes it per the pane's negotiated
+    // protocol, and writes it to the PTY (cat -v's stdin). cat -v renders ESC as
+    // the printable "^[", so the press surfaces as "^[[<...M".
+    //
+    // The trailing uppercase M proves a button press round-tripped. Critically,
+    // the re-encoded column is pane-local: the screen column minus the pane's
+    // inner_rect.x offset (the sidebar + left border). So the echoed column must
+    // be strictly between 1 and the sent screen column 60 — proving the server
+    // routed and translated the event rather than echoing the input verbatim
+    // (verbatim would report 60) or dropping it.
+    let sent_col = 60;
+    let click_text = collect_visible_text(&mut ws, Duration::from_secs(3)).await;
+    let click_seq = find_sgr_mouse(&click_text, 'M');
+    let click_col = click_seq.as_deref().and_then(sgr_mouse_column);
+    assert!(
+        click_col.is_some_and(|c| c > 0 && c < sent_col),
+        "press should echo a pane-local column in 1..{sent_col} (routed + re-encoded, not verbatim), got: {click_text:?}"
+    );
+
+    // Send the SGR mouse button release at the same cell. The release differs from
+    // the press only in the final byte (lowercase m), so asserting the terminator
+    // distinguishes it and proves the release routed independently of the press.
+    let sgr_release = b"\x1b[<0;60;20m";
+    let (mut write, read) = ws.split();
+    write
+        .send(tungstenite::Message::Binary(sgr_release.to_vec().into()))
+        .await
+        .unwrap();
+    let mut ws = read.reunite(write).unwrap();
+
+    let release_text = collect_visible_text(&mut ws, Duration::from_secs(3)).await;
+    let release_col = find_sgr_mouse(&release_text, 'm')
+        .as_deref()
+        .and_then(sgr_mouse_column);
+    assert!(
+        release_col.is_some_and(|c| c > 0 && c < sent_col),
+        "release should echo a pane-local column in 1..{sent_col} (terminator m), got: {release_text:?}"
     );
 
     cleanup_spawned_herdr(env.spawned, env.base);
