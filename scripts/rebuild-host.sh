@@ -94,8 +94,20 @@ docker run --rm \
         zig version
         rustup target add "${TARGET}"
         cd /src
+        # vendor/libghostty-vt/zig-out is built for a single target ABI. When
+        # a different builder (e.g. scripts/test-host.sh, which builds for the
+        # glibc host target) populated zig-out, reusing it for a musl build
+        # links a glibc libghostty-vt against musl and fails with undefined
+        # references to *64 symbols (mmap64, openat64, lseek64, ...). Stamp
+        # zig-out with the target it was built for and wipe it on mismatch.
+        stamp=vendor/libghostty-vt/zig-out/.herdr-build-target
+        if [ -d vendor/libghostty-vt/zig-out/lib ] \
+           && [ "$(cat "$stamp" 2>/dev/null)" != "${TARGET}" ]; then
+            echo "zig-out built for a different target ($(cat "$stamp" 2>/dev/null || echo unknown)); wiping for ${TARGET}"
+            rm -rf vendor/libghostty-vt/zig-out vendor/libghostty-vt/.zig-cache
+        fi
         # build.rs rerun-if-changed watches inputs only, never outputs.
-        # If vendor/libghostty-vt/zig-out is missing (e.g. wiped by a prior
+        # If vendor/libghostty-vt/zig-out is missing (wiped above or by a prior
         # broken run), cargo will skip build.rs based on its cached
         # fingerprint, link will fail with `cannot find -lghostty-vt`.
         # Force a rerun by touching build.rs when zig-out is absent.
@@ -108,6 +120,9 @@ docker run --rm \
         mkdir -p /src/.local/zig-cache
         export ZIG_GLOBAL_CACHE_DIR=/src/.local/zig-cache
         cargo build --release --locked --target "${TARGET}" --features web
+        # Record which target zig-out was built for so the next run can detect
+        # a cross-ABI mismatch and wipe it.
+        printf '%s\n' "${TARGET}" > vendor/libghostty-vt/zig-out/.herdr-build-target
         # Match build outputs to host ownership so the next run can reuse
         # them without sudo chown. Container runs as root; without this,
         # target/ and .local/ are root-owned on the host.

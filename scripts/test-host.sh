@@ -69,6 +69,18 @@ docker run "${docker_args[@]}" \
         git config --global --add safe.directory /src
         git config --global --add safe.directory "*"
         cd /src
+        # This runs cargo nextest with no --target, so it builds for the
+        # default host target (glibc). zig-out is target-specific: if a musl
+        # rebuild-host.sh run left a musl libghostty-vt here, linking the glibc
+        # test build against it fails. Stamp zig-out and wipe on mismatch.
+        # (Symmetric with the guard in rebuild-host.sh.)
+        host_target=$(rustc -vV | sed -n "s/^host: //p")
+        stamp=vendor/libghostty-vt/zig-out/.herdr-build-target
+        if [ -d vendor/libghostty-vt/zig-out/lib ] \
+           && [ "$(cat "$stamp" 2>/dev/null)" != "$host_target" ]; then
+            echo "zig-out built for a different target ($(cat "$stamp" 2>/dev/null || echo unknown)); wiping for $host_target"
+            rm -rf vendor/libghostty-vt/zig-out vendor/libghostty-vt/.zig-cache
+        fi
         # See rebuild-host.sh: force a build.rs rerun if zig-out was wiped, or
         # cargo skips it on its cached fingerprint and the link fails.
         if [ ! -d vendor/libghostty-vt/zig-out/lib ]; then
@@ -81,6 +93,11 @@ docker run "${docker_args[@]}" \
         export ZIG_GLOBAL_CACHE_DIR=/src/.local/zig-cache
         status=0
         cargo nextest run --locked "$@" || status=$?
+        # Record which target zig-out was built for so rebuild-host.sh (musl)
+        # detects the cross-ABI mismatch and wipes it.
+        if [ -d vendor/libghostty-vt/zig-out/lib ]; then
+            printf '%s\n' "$host_target" > vendor/libghostty-vt/zig-out/.herdr-build-target
+        fi
         # Match build outputs to host ownership so the next host/container run
         # can reuse them without sudo chown (container runs as root).
         chown -R "${HOST_UID}:${HOST_GID}" \
