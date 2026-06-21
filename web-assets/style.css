@@ -82,6 +82,8 @@ html, body {
   right: 0;
   bottom: 0;
   overflow: hidden;
+  touch-action: pinch-zoom;
+  overscroll-behavior: none;
 }
 
 /* xterm.js renders a `.xterm` child that fills #terminal and sets `cursor: text`

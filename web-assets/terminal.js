@@ -97,6 +97,7 @@
       });
       ws.send(hello);
       window.herdrSetupInput(term, getSocket);
+      window.herdrSetupTouchScroll(term, getSocket);
       window.herdrSetupResize(term, getSocket, fitAddon);
     };
 
