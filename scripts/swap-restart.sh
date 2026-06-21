@@ -55,26 +55,45 @@ log "stopping server..."
 log "waiting ${SLEEP_SECS}s for old server to exit..."
 sleep "$SLEEP_SECS"
 
-# 3. Start a fresh server, fully detached, logging to its own file.
-log "starting new server..."
-setsid "$HERDR_BIN" server >/tmp/herdr-server-boot.log 2>&1 < /dev/null &
-disown 2>/dev/null || true
-
-# 4. Wait for the new server to answer.
-log "waiting for new server to come up..."
+# 3. Wait for a server to come back. An attached herdr client (TUI or web)
+#    auto-respawns the server when it sees the socket gone, and that respawn
+#    loads the current on-disk binary — which is exactly the swap we want. So
+#    first give the auto-respawn a chance; only start one ourselves as a
+#    fallback if nothing comes back. (Starting unconditionally races the
+#    respawn and fails with "server is already running".)
+log "waiting for server to come back (client auto-respawn)..."
 up=0
-for i in $(seq 1 30); do
+for i in $(seq 1 20); do
     if "$HERDR_BIN" status server >/dev/null 2>&1; then
         up=1
-        log "server is up (after ${i}s)"
+        log "server is up via auto-respawn (after ${i}s)"
         break
     fi
     sleep 1
 done
+
 if [ "$up" -ne 1 ]; then
-    log "ERROR: server did not come up within 30s; check /tmp/herdr-server-boot.log"
+    log "no auto-respawn — starting server ourselves (detached)..."
+    setsid "$HERDR_BIN" server >/tmp/herdr-server-boot.log 2>&1 < /dev/null &
+    disown 2>/dev/null || true
+    for i in $(seq 1 20); do
+        if "$HERDR_BIN" status server >/dev/null 2>&1; then
+            up=1
+            log "server is up via explicit start (after ${i}s)"
+            break
+        fi
+        sleep 1
+    done
+fi
+
+if [ "$up" -ne 1 ]; then
+    log "ERROR: server did not come up; check /tmp/herdr-server-boot.log"
     exit 1
 fi
+
+# Settle: a fresh server can briefly reject API calls (e.g. herdr web) while it
+# finishes restoring the session. Give it a moment before driving it.
+sleep 3
 
 # 5. Start the web server (cold boot does not auto-start it).
 log "starting web server on ${WEB_BIND}..."
