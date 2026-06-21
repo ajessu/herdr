@@ -636,8 +636,7 @@ mod tests {
         let keybindings = parse_client_keybindings(ClientKeybindings::Local {
             keys_toml: r#"
 [keys]
-prefix = "ctrl+a"
-new_tab = "prefix+t"
+mode_tmux = "ctrl+a"
 
 [[keys.command]]
 key = "prefix+g"
@@ -649,12 +648,14 @@ command = "lazygit"
         .expect("local profile");
 
         assert_eq!(keybindings.prefix.0, crossterm::event::KeyCode::Char('a'));
+        // Dispatch reads the released keymap; new_tab keeps its released
+        // prefix binding.
         assert!(keybindings
             .keybinds
             .new_tab
             .bindings
             .iter()
-            .any(|binding| binding.label == "prefix+t"));
+            .any(|binding| binding.label == "prefix+c"));
         assert!(keybindings.keybinds.custom_commands.is_empty());
     }
 
@@ -663,14 +664,22 @@ command = "lazygit"
         let keybindings = parse_client_keybindings(ClientKeybindings::Local {
             keys_toml: r#"
 [keys]
-new_tab = "ctrl+notakey"
+mode_pane = "ctrl+notakey"
 "#
             .to_owned(),
         })
         .expect("diagnostic-only client keybindings should be accepted")
         .expect("local profile");
 
-        assert!(keybindings.keybinds.new_tab.bindings.is_empty());
+        // Invalid mode-entry key falls back to its default; other released
+        // bindings remain intact.
+        assert_eq!(
+            keybindings.keybinds.mode_entry.pane,
+            Some((
+                crossterm::event::KeyCode::Char('p'),
+                crossterm::event::KeyModifiers::CONTROL
+            ))
+        );
         assert!(keybindings
             .keybinds
             .next_tab

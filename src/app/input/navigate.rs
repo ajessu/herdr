@@ -1546,22 +1546,16 @@ mod tests {
     }
 
     #[test]
-    fn navigate_workspace_keys_are_configurable() {
+    fn navigate_workspace_down_uses_arrow_default() {
+        // Navigate dispatch reads the released defaults: the down arrow moves
+        // the workspace selection.
         let mut state = state_with_workspaces(&["a", "b"]);
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-navigate_workspace_down = "j"
-navigate_pane_down = "ctrl+j"
-"#,
-        )
-        .unwrap();
-        state.keybinds = config.keybinds();
+        state.keybinds = Config::default().keybinds();
         state.selected = 0;
 
         handle_navigate_key(
             &mut state,
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
         );
 
         assert_eq!(state.selected, 1);
@@ -1569,7 +1563,7 @@ navigate_pane_down = "ctrl+j"
     }
 
     #[test]
-    fn navigate_pane_keys_are_configurable() {
+    fn navigate_pane_down_uses_j_default() {
         let mut state = state_with_workspaces(&["test"]);
         let root = state.workspaces[0].tabs[0].root_pane;
         let below = state.workspaces[0].test_split(Direction::Vertical);
@@ -1579,89 +1573,13 @@ navigate_pane_down = "ctrl+j"
             .unwrap()
             .layout
             .panes(ratatui::layout::Rect::new(0, 0, 80, 24));
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-navigate_workspace_down = "j"
-navigate_pane_down = "ctrl+j"
-"#,
-        )
-        .unwrap();
-        state.keybinds = config.keybinds();
-
-        handle_navigate_key(
-            &mut state,
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-        );
-
-        assert_eq!(state.workspaces[0].focused_pane_id(), Some(below));
-        assert_eq!(state.mode, Mode::Navigate);
-    }
-
-    #[test]
-    fn focus_pane_prefix_rhs_does_not_create_navigate_mode_pane_shortcut() {
-        let mut state = state_with_workspaces(&["test"]);
-        let root = state.workspaces[0].tabs[0].root_pane;
-        let below = state.workspaces[0].test_split(Direction::Vertical);
-        state.workspaces[0].layout.focus_pane(root);
-        state.view.pane_infos = state.workspaces[0]
-            .active_tab()
-            .unwrap()
-            .layout
-            .panes(ratatui::layout::Rect::new(0, 0, 80, 24));
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-focus_pane_down = "prefix+f"
-"#,
-        )
-        .unwrap();
-        state.keybinds = config.keybinds();
-
-        handle_navigate_key(
-            &mut state,
-            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty()),
-        );
-        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        state.keybinds = Config::default().keybinds();
 
         handle_navigate_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
         );
-        assert_eq!(state.workspaces[0].focused_pane_id(), Some(below));
-        assert_eq!(state.mode, Mode::Navigate);
-    }
 
-    #[test]
-    fn customized_navigate_pane_key_disables_matching_prefix_rhs_fallback() {
-        let mut state = state_with_workspaces(&["test"]);
-        let root = state.workspaces[0].tabs[0].root_pane;
-        let below = state.workspaces[0].test_split(Direction::Vertical);
-        state.workspaces[0].layout.focus_pane(root);
-        state.view.pane_infos = state.workspaces[0]
-            .active_tab()
-            .unwrap()
-            .layout
-            .panes(ratatui::layout::Rect::new(0, 0, 80, 24));
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-navigate_pane_down = "ctrl+j"
-"#,
-        )
-        .unwrap();
-        state.keybinds = config.keybinds();
-
-        handle_navigate_key(
-            &mut state,
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
-        );
-        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
-
-        handle_navigate_key(
-            &mut state,
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-        );
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(below));
         assert_eq!(state.mode, Mode::Navigate);
     }
@@ -1772,30 +1690,10 @@ navigate_pane_right = "ctrl+l"
     }
 
     #[test]
-    fn prefix_tab_override_can_map_to_last_pane() {
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-last_pane = "prefix+tab"
-"#,
-        )
-        .unwrap();
-        let mut state = state_with_workspaces(&["test"]);
-        state.keybinds = config.keybinds();
-
-        let pane_action = action_for_key(
-            &state,
-            TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()),
-            BindingDispatch::Prefix,
-        );
-
-        assert_eq!(pane_action, Some(NavigateAction::LastPane));
-    }
-
-    #[test]
     fn terminal_direct_indexed_tab_shortcut_maps_to_navigation_action() {
         let mut state = state_with_workspaces(&["test"]);
-        let config: Config = toml::from_str("[keys]\nswitch_tab = \"ctrl+3\"\n").unwrap();
+        // The retained `[keys.indexed]` mechanism expands a modifier over 1-9.
+        let config: Config = toml::from_str("[keys.indexed]\ntabs = \"ctrl\"\n").unwrap();
         state.keybinds.switch_tab = config.keybinds().switch_tab;
 
         let action = terminal_direct_navigation_action(
@@ -2394,10 +2292,7 @@ last_pane = "prefix+tab"
     #[test]
     fn alt_n_direct_maps_to_split_auto() {
         let state = state_with_workspaces(&["test"]);
-        let key = TerminalKey::from(KeyEvent::new(
-            KeyCode::Char('n'),
-            KeyModifiers::ALT,
-        ));
+        let key = TerminalKey::from(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT));
         let action = terminal_direct_navigation_action(&state, key);
         assert_eq!(action, Some(NavigateAction::SplitAuto));
     }
@@ -2405,10 +2300,7 @@ last_pane = "prefix+tab"
     #[test]
     fn alt_eq_direct_maps_to_resize_grow() {
         let state = state_with_workspaces(&["test"]);
-        let key = TerminalKey::from(KeyEvent::new(
-            KeyCode::Char('='),
-            KeyModifiers::ALT,
-        ));
+        let key = TerminalKey::from(KeyEvent::new(KeyCode::Char('='), KeyModifiers::ALT));
         let action = terminal_direct_navigation_action(&state, key);
         assert_eq!(action, Some(NavigateAction::ResizeGrow));
     }
@@ -2416,10 +2308,7 @@ last_pane = "prefix+tab"
     #[test]
     fn alt_i_direct_maps_to_move_tab_left() {
         let state = state_with_workspaces(&["test"]);
-        let key = TerminalKey::from(KeyEvent::new(
-            KeyCode::Char('i'),
-            KeyModifiers::ALT,
-        ));
+        let key = TerminalKey::from(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
         let action = terminal_direct_navigation_action(&state, key);
         assert_eq!(action, Some(NavigateAction::MoveTabLeft));
     }
@@ -2427,10 +2316,7 @@ last_pane = "prefix+tab"
     #[test]
     fn alt_keys_not_reachable_via_prefix_dispatch() {
         let state = state_with_workspaces(&["test"]);
-        let key = TerminalKey::from(KeyEvent::new(
-            KeyCode::Char('n'),
-            KeyModifiers::ALT,
-        ));
+        let key = TerminalKey::from(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT));
         let action = action_for_key(&state, key, BindingDispatch::Prefix);
         assert_eq!(action, None);
     }

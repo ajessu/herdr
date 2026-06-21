@@ -1571,7 +1571,7 @@ mod tests {
     use crate::detect::{Agent, AgentState};
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::Mutex;
@@ -2227,7 +2227,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nmode_pane = \"ctrl+y\"\nmode_tmux = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -2238,11 +2238,10 @@ mod tests {
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.prefix_code, KeyCode::Char('a'));
         assert_eq!(app.state.prefix_mods, KeyModifiers::CONTROL);
-        assert!(app
-            .state
-            .keybinds
-            .new_workspace
-            .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
+        assert_eq!(
+            app.state.keybinds.mode_entry.pane,
+            Some((KeyCode::Char('y'), KeyModifiers::CONTROL))
+        );
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
@@ -2577,14 +2576,14 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[keys]\nnew_workspace = \"wat\"\n[ui.toast]\ndelivery = \"terminal\"\n",
+            "[keys]\nmode_pane = \"wat\"\n[ui.toast]\ndelivery = \"terminal\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
         let original_prefix = (app.state.prefix_code, app.state.prefix_mods);
-        let original_keybinds = app.state.keybinds.new_workspace.clone();
+        let original_keybinds = app.state.keybinds.mode_entry.pane;
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
@@ -2592,7 +2591,7 @@ mod tests {
             (app.state.prefix_code, app.state.prefix_mods),
             original_prefix
         );
-        assert_eq!(app.state.keybinds.new_workspace, original_keybinds);
+        assert_eq!(app.state.keybinds.mode_entry.pane, original_keybinds);
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Terminal
@@ -2602,7 +2601,7 @@ mod tests {
             .config_diagnostic
             .as_deref()
             .is_some_and(|message| {
-                message.contains("keys.new_workspace") && message.contains("kept current keybinds")
+                message.contains("keys.mode_pane") && message.contains("kept current keybinds")
             }));
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
@@ -2616,7 +2615,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[keys]\nnew_workspace = \"prefix+m\"\n[ui.toast]\ndelivery = \"desktop\"\n",
+            "[keys]\nmode_pane = \"ctrl+y\"\n[ui.toast]\ndelivery = \"desktop\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -2626,11 +2625,10 @@ mod tests {
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
-        assert!(app
-            .state
-            .keybinds
-            .new_workspace
-            .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
+        assert_eq!(
+            app.state.keybinds.mode_entry.pane,
+            Some((KeyCode::Char('y'), KeyModifiers::CONTROL))
+        );
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
@@ -4034,45 +4032,6 @@ mod tests {
             Mode::Terminal,
             "q should leave navigate mode"
         );
-    }
-
-    #[test]
-    fn route_client_input_prefix_tab_dispatches_global_last_pane() {
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-last_pane = "prefix+tab"
-"#,
-        )
-        .unwrap();
-        let mut app = test_app();
-        let mut first = Workspace::test_new("one");
-        let first_second_tab = first.test_add_tab(Some("logs"));
-        let first_second_root = first.tabs[first_second_tab].root_pane;
-        let second = Workspace::test_new("two");
-        let second_root = second.tabs[0].root_pane;
-        app.state.workspaces = vec![first, second];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.keybinds = config.keybinds();
-        app.state.mode = Mode::Terminal;
-        app.state.switch_workspace_tab(0, first_second_tab);
-        app.state.switch_workspace_tab(1, 0);
-
-        app.route_client_input(vec![0x02, b'\t']);
-
-        assert_eq!(app.state.mode, Mode::Terminal);
-        assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.workspaces[0].active_tab, first_second_tab);
-        assert_eq!(
-            app.state.workspaces[0].focused_pane_id(),
-            Some(first_second_root)
-        );
-
-        app.route_client_input(vec![0x02, b'\t']);
-
-        assert_eq!(app.state.active, Some(1));
-        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(second_root));
     }
 
     #[tokio::test]

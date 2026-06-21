@@ -95,44 +95,170 @@ fn platform_state_dir() -> PathBuf {
 impl Config {
     pub fn load() -> LoadedConfig {
         let path = config_path();
-        if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => match toml::from_str::<Config>(&content) {
-                    Ok(config) => {
-                        let mut diagnostics =
-                            unknown_top_level_section_diagnostics_from_str(&content);
-                        diagnostics.extend(config.collect_diagnostics());
-                        return LoadedConfig {
-                            config,
-                            diagnostics,
-                            invalid_sections: Vec::new(),
-                        };
+        if !path.exists() {
+            return LoadedConfig {
+                config: Self::default(),
+                diagnostics: Vec::new(),
+                invalid_sections: Vec::new(),
+            };
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(err) => {
+                warn!(err = %err, "config read error, using defaults");
+                return LoadedConfig {
+                    config: Self::default(),
+                    diagnostics: vec![format!("config read error: {err}; using defaults")],
+                    invalid_sections: Vec::new(),
+                };
+            }
+        };
+
+        match toml::from_str::<Config>(&content) {
+            Ok(config) => {
+                let mut diagnostics = unknown_top_level_section_diagnostics_from_str(&content);
+                // Flag legacy flat `[keys]` fields so the maintainer is told
+                // their old keymap no longer applies instead of silently losing
+                // it. The salvage path below routes through
+                // `load_live_config_from_str`, which emits these itself.
+                diagnostics.extend(legacy_keys_diagnostics_from_str(&content));
+                diagnostics.extend(config.collect_diagnostics());
+                LoadedConfig {
+                    config,
+                    diagnostics,
+                    invalid_sections: Vec::new(),
+                }
+            }
+            // A full-config parse failure (commonly a malformed `[keys]` under
+            // the new schema) must not wipe theme/session/agent/update/worktree
+            // settings. Fall back to section-isolated parsing so only the bad
+            // section degrades to defaults.
+            Err(err) => {
+                warn!(err = %err, "config parse error, salvaging valid sections");
+                match load_live_config_from_str(&content) {
+                    Ok(mut loaded) => {
+                        loaded
+                            .diagnostics
+                            .extend(loaded.config.collect_diagnostics());
+                        loaded
                     }
-                    Err(err) => {
-                        warn!(err = %err, "config parse error, using defaults");
-                        return LoadedConfig {
-                            config: Self::default(),
-                            diagnostics: vec![format!("config parse error: {err}; using defaults")],
-                            invalid_sections: Vec::new(),
-                        };
-                    }
-                },
-                Err(err) => {
-                    warn!(err = %err, "config read error, using defaults");
-                    return LoadedConfig {
+                    Err(top_level_errors) => LoadedConfig {
                         config: Self::default(),
-                        diagnostics: vec![format!("config read error: {err}; using defaults")],
+                        diagnostics: top_level_errors,
                         invalid_sections: Vec::new(),
-                    };
+                    },
                 }
             }
         }
-        LoadedConfig {
-            config: Self::default(),
-            diagnostics: Vec::new(),
-            invalid_sections: Vec::new(),
-        }
     }
+}
+
+/// Legacy `[keys]` field names from the pre-modal flat schema. Their presence
+/// means the maintainer's old keymap no longer applies under the modal schema.
+const LEGACY_KEYS_FIELDS: &[&str] = &[
+    "prefix",
+    "help",
+    "settings",
+    "new_workspace",
+    "new_worktree",
+    "open_worktree",
+    "remove_worktree",
+    "rename_workspace",
+    "close_workspace",
+    "workspace_picker",
+    "goto",
+    "navigate_workspace_up",
+    "navigate_workspace_down",
+    "navigate_pane_left",
+    "navigate_pane_down",
+    "navigate_pane_up",
+    "navigate_pane_right",
+    "detach",
+    "reload_config",
+    "open_notification_target",
+    "previous_workspace",
+    "next_workspace",
+    "previous_agent",
+    "next_agent",
+    "focus_agent",
+    "new_tab",
+    "rename_tab",
+    "previous_tab",
+    "next_tab",
+    "switch_tab",
+    "switch_workspace",
+    "close_tab",
+    "rename_pane",
+    "edit_scrollback",
+    "copy_mode",
+    "focus_pane_left",
+    "focus_pane_down",
+    "focus_pane_up",
+    "focus_pane_right",
+    "swap_pane_left",
+    "swap_pane_down",
+    "swap_pane_up",
+    "swap_pane_right",
+    "cycle_pane_next",
+    "cycle_pane_previous",
+    "last_pane",
+    "split_vertical",
+    "split_horizontal",
+    "stack_pane",
+    "unstack_pane",
+    "close_pane",
+    "break_pane_to_tab",
+    "zoom",
+    "fullscreen",
+    "split_auto",
+    "move_tab_left",
+    "move_tab_right",
+    "resize_grow",
+    "resize_shrink",
+    "resize_mode",
+    "toggle_sidebar",
+    "toggle_floating",
+    "new_floating_pane",
+    "close_floating_pane",
+    "move_floating_left",
+    "move_floating_down",
+    "move_floating_up",
+    "move_floating_right",
+    "resize_floating_grow",
+    "resize_floating_shrink",
+    "cycle_floating_next",
+    "cycle_floating_previous",
+];
+
+fn legacy_keys_diagnostics_from_str(content: &str) -> Vec<String> {
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(keys) = value.get("keys").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+
+    // Custom commands ([[keys.command]]) and [keys.indexed] remain supported,
+    // so they are intentionally absent from LEGACY_KEYS_FIELDS.
+    let present: Vec<String> = LEGACY_KEYS_FIELDS
+        .iter()
+        .filter(|field| keys.contains_key(**field))
+        .map(|field| format!("keys.{field}"))
+        .collect();
+    if present.is_empty() {
+        return Vec::new();
+    }
+
+    // One aggregated message naming every dropped field, so the startup
+    // notification (which truncates to a few lines) does not imply only the
+    // first field is affected.
+    let diagnostic = format!(
+        "{} no longer recognized; herdr now uses the mode-structured [keys] schema (default_mode, mode_* entry keys, and [keys.shared]/[keys.pane]/[keys.tab]/[keys.resize]/[keys.move]/[keys.session]/[keys.tmux] tables); prefix mode is now keys.mode_tmux",
+        present.join(", ")
+    );
+    warn!(message = %diagnostic, "config diagnostic");
+    vec![diagnostic]
 }
 
 pub(super) fn resolve_config_relative_path(path: &Path) -> PathBuf {
@@ -200,6 +326,9 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
 
     let mut config = Config::default();
     let mut diagnostics = unknown_top_level_section_diagnostics(table);
+    // Flag legacy flat [keys] fields on reload too, so an in-session reload
+    // surfaces a dropped keymap instead of silently ignoring it.
+    diagnostics.extend(legacy_keys_diagnostics_from_str(content));
     let mut invalid_sections = Vec::new();
 
     if let Some(value) = table.get("onboarding") {
@@ -724,5 +853,181 @@ mouse_capture = false
         let (updated, removed) = remove_keybinding_config_sections(content);
         assert!(!removed);
         assert_eq!(updated, content);
+    }
+
+    #[test]
+    fn malformed_keys_section_degrades_only_keybindings() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-malformed-keys-{}.toml",
+            std::process::id()
+        ));
+        // `mode_pane` must be a string; an integer makes the whole-config parse
+        // fail. Other sections must still load via section-isolated salvage.
+        std::fs::write(
+            &path,
+            r#"
+[keys]
+mode_pane = 42
+
+[ui]
+mouse_capture = false
+
+[session]
+resume_agents_on_restore = false
+"#,
+        )
+        .unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+
+        // Keybindings fell back to defaults.
+        assert_eq!(loaded.config.keys.mode_pane, "ctrl+p");
+        // Other sections survived.
+        assert!(!loaded.config.ui.mouse_capture);
+        assert!(!loaded.config.session.resume_agents_on_restore);
+        assert!(loaded
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("keybinding config")));
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_flat_keys_fields_produce_no_longer_recognized_diagnostics() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-legacy-keys-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+[keys]
+prefix = "ctrl+a"
+focus_pane_left = "prefix+h"
+new_tab = "prefix+t"
+move_tab_left = "alt+i"
+"#,
+        )
+        .unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+
+        // One aggregated diagnostic naming every dropped field, so a truncated
+        // startup notification cannot imply only the first field is affected.
+        let legacy: Vec<&String> = loaded
+            .diagnostics
+            .iter()
+            .filter(|d| d.contains("no longer recognized"))
+            .collect();
+        assert_eq!(
+            legacy.len(),
+            1,
+            "expected one aggregated legacy diagnostic: {legacy:?}"
+        );
+        for field in ["prefix", "focus_pane_left", "new_tab", "move_tab_left"] {
+            assert!(
+                legacy[0].contains(&format!("keys.{field}")),
+                "aggregated legacy diagnostic missing {field}: {}",
+                legacy[0]
+            );
+        }
+        // The diagnostics feed the user-visible startup notification summary.
+        let summary = config_diagnostic_summary(&loaded.diagnostics);
+        assert!(summary.is_some_and(|s| s.contains("no longer recognized")));
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_keys_diagnostics_emitted_on_live_reload() {
+        // An in-session reload must also flag a dropped legacy keymap, not only
+        // the cold-start load.
+        let loaded =
+            load_live_config_from_str("[keys]\nprefix = \"ctrl+a\"\nnew_tab = \"prefix+t\"\n")
+                .expect("valid top-level toml");
+        let legacy: Vec<&String> = loaded
+            .diagnostics
+            .iter()
+            .filter(|d| d.contains("no longer recognized"))
+            .collect();
+        assert_eq!(
+            legacy.len(),
+            1,
+            "expected one legacy diagnostic on reload: {legacy:?}"
+        );
+        assert!(legacy[0].contains("keys.prefix") && legacy[0].contains("keys.new_tab"));
+    }
+
+    #[test]
+    fn legacy_keys_not_duplicated_on_malformed_config_salvage() {
+        // A whole-config parse failure routes through the salvage path; legacy
+        // diagnostics must appear exactly once, not once per code path.
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-legacy-salvage-{}.toml",
+            std::process::id()
+        ));
+        // `mode_pane = 1` is a type error that fails the whole-config parse and
+        // forces section-isolated salvage; `prefix` is a dropped legacy field.
+        std::fs::write(&path, "[keys]\nprefix = \"ctrl+a\"\nmode_pane = 1\n").unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+        let legacy_count = loaded
+            .diagnostics
+            .iter()
+            .filter(|d| d.contains("no longer recognized"))
+            .count();
+        assert_eq!(
+            legacy_count, 1,
+            "legacy diagnostic duplicated: {:?}",
+            loaded.diagnostics
+        );
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_keys_command_and_indexed_remain_supported() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-retained-keys-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+[keys.indexed]
+tabs = "ctrl"
+
+[[keys.command]]
+key = "prefix+g"
+command = "lazygit"
+"#,
+        )
+        .unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+
+        assert!(
+            !loaded
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("no longer recognized")),
+            "retained fields must not be flagged legacy: {:?}",
+            loaded.diagnostics
+        );
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -132,68 +132,55 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # channel = "stable"
 
 [keys]
-# Prefix key to enter prefix mode (default: "ctrl+b")
-# Examples: "ctrl+b", "f12", "esc", "-"
-# Action bindings use explicit syntax: "prefix+n" requires the prefix;
-# "ctrl+alt+n" is a direct terminal-mode shortcut.
-# Accepted key syntax: plain keys, ctrl/shift/alt/cmd/super modifiers, and special keys like enter/tab/esc/left/right/up/down.
-# Named punctuation such as minus, comma, ampersand, plus, and backtick is also accepted.
-# Most reliable direct bindings are ctrl+letter, function keys, and explicit modified chords.
-# alt+..., cmd/super, and punctuation-with-modifiers may depend on your terminal/tmux setup.
-# prefix = "ctrl+b"
+# Herdr uses a zellij-compatible modal keybinding model. Ctrl+letter enters a
+# sticky mode where bare keys perform actions; the tmux/prefix model remains
+# available as a configurable alternative.
+#
+# Accepted key syntax: plain keys, ctrl/shift/alt/cmd/super modifiers, and
+# special keys like enter/tab/esc/left/right/up/down. Named punctuation such as
+# minus, comma, ampersand, plus, and backtick is also accepted (use "plus" for
+# the + key; a literal "+" cannot be parsed).
 
-# Prefix-mode actions
-# help = "prefix+?"
-# settings = "prefix+s"
-# detach = "prefix+q"
-# reload_config = "prefix+shift+r"
-# open_notification_target = "prefix+o"
-# workspace_picker = "prefix+w"
-# goto = "prefix+g"
-# new_workspace = "prefix+shift+n"
-# new_worktree = "prefix+shift+g"
-# open_worktree = ""    # optional, unset by default
-# remove_worktree = ""  # optional, unset by default; opens confirmation
-# rename_workspace = "prefix+shift+w"
-# close_workspace = "prefix+shift+d"
-# previous_workspace = "" # optional, unset by default
-# next_workspace = ""     # optional, unset by default
-# previous_agent = ""     # optional, unset by default
-# next_agent = ""         # optional, unset by default
-# focus_agent = ""        # optional indexed binding, e.g. "prefix+alt+1..9"
-# new_tab = "prefix+c"
-# rename_tab = "prefix+shift+t"
-# previous_tab = "prefix+p"
-# next_tab = "prefix+n"
-# switch_tab = "prefix+1..9"
-# switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
-# close_tab = "prefix+shift+x"
-# rename_pane = "prefix+shift+p"
-# edit_scrollback = "prefix+e"
-# focus_pane_left = "prefix+h"
-# focus_pane_down = "prefix+j"
-# focus_pane_up = "prefix+k"
-# focus_pane_right = "prefix+l"
-# cycle_pane_next = "prefix+tab"
-# cycle_pane_previous = "prefix+shift+tab"
-# last_pane = ""          # optional, unset by default; bind e.g. "prefix+tab" for global back-and-forth
-# split_vertical = "prefix+v"
-# split_horizontal = "prefix+minus"
-# stack_pane = "prefix+shift+s"
-# unstack_pane = "prefix+shift+u"
-# close_pane = "prefix+x"
-# zoom = "prefix+z"       # legacy alias: fullscreen
-# resize_mode = "prefix+r"
-# toggle_sidebar = "prefix+b"
+# Base interaction mode: "modal" (default) or "locked" (start locked; pair with
+# mode_tmux for prefix-style use).
+# default_mode = "modal"
 
-# Navigate-mode movement. These local shortcuts win while navigate mode is open.
-# They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.
-# navigate_workspace_up = "up"
-# navigate_workspace_down = "down"
-# navigate_pane_left = "h"      # left arrow always focuses the pane to the left
-# navigate_pane_down = "j"
-# navigate_pane_up = "k"
-# navigate_pane_right = "l"     # right arrow always focuses the pane to the right
+# Mode-entry keys (active in all non-locked modes).
+# mode_pane = "ctrl+p"
+# mode_tab = "ctrl+t"
+# mode_resize = "ctrl+n"
+# mode_move = "ctrl+h"
+# mode_session = "ctrl+o"
+# mode_locked = "ctrl+g"
+# mode_tmux = "ctrl+b"     # prefix/tmux key
+
+# Shared bindings (active in all non-locked modes). Use modified chords here so
+# they do not collide with the bare keys used inside modes.
+# [keys.shared]
+# focus_left = "alt+h"
+# focus_down = "alt+j"
+# focus_up = "alt+k"
+# focus_right = "alt+l"
+# new_pane = "alt+n"
+# close_focus = "alt+x"
+# detach = "ctrl+q"
+# resize_increase = ["alt+=", "alt+plus"]
+# resize_decrease = "alt+-"
+# move_tab_left = "alt+i"
+# move_tab_right = "alt+o"
+# new_tab = "alt+t"
+# rename_tab = "alt+r"
+# toggle_floating = "alt+w"
+
+# Per-mode bare keys. Each mode has an independent keyspace, so the same bare
+# key may appear in more than one mode. See the docs for the full action lists
+# in [keys.pane], [keys.tab], [keys.resize], [keys.move], [keys.session], and
+# [keys.tmux].
+# [keys.pane]
+# focus_left = ["h", "left"]
+# new_pane = "n"
+# close = "x"
+# zoom = ["f", "z"]
 
 # Custom commands use the same binding syntax.
 # type = "shell" runs detached in the background.
@@ -203,8 +190,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # type = "pane"
 # command = "lazygit"
 
-# Legacy indexed shortcut config is still parsed for compatibility.
-# Prefer switch_tab, switch_workspace, and focus_agent for new configs.
+# Optional indexed shortcuts expanded over number keys 1-9.
 # [keys.indexed]
 # tabs = ""       # e.g. "ctrl" makes ctrl+1..9 switch tabs directly
 # workspaces = "" # e.g. "ctrl+shift" makes ctrl+shift+1..9 switch workspaces directly
@@ -769,6 +755,20 @@ mod tests {
     fn nested_herdr_blocks_when_env_is_set() {
         let config = config::Config::default();
         assert!(should_block_nested_for_env(&config, Some(HERDR_ENV_VALUE)));
+    }
+
+    #[test]
+    fn default_config_template_parses_cleanly() {
+        // `--default-config` is the canonical example users copy. It must parse
+        // and produce no diagnostics, so an edited template can never ship a
+        // broken or warning-producing example.
+        let config: config::Config =
+            toml::from_str(DEFAULT_CONFIG).expect("default config template parses");
+        assert!(
+            config.collect_diagnostics().is_empty(),
+            "default config template produced diagnostics: {:?}",
+            config.collect_diagnostics()
+        );
     }
 
     #[test]

@@ -143,8 +143,10 @@ sidebar_width_ratio = -1.0
         let config: Config = toml::from_str(
             r#"
 [keys]
-prefix = "ctrl+a"
-new_tab = "prefix+t"
+mode_tmux = "ctrl+a"
+
+[keys.tmux]
+new_tab = "t"
 
 [[keys.command]]
 key = "prefix+g"
@@ -155,9 +157,10 @@ command = "lazygit"
 
         let profile = config.local_keybindings_profile_toml().unwrap();
         assert!(profile.contains("[keys]"));
-        assert!(profile.contains("prefix = \"ctrl+a\""));
-        assert!(profile.contains("new_tab = \"prefix+t\""));
-        assert!(profile.contains("next_tab = \"prefix+n\""));
+        assert!(profile.contains("mode_tmux = \"ctrl+a\""));
+        // Customized and defaulted mode tables both serialize.
+        assert!(profile.contains("new_tab = \"t\""));
+        assert!(profile.contains("[keys.shared]"));
         assert!(!profile.contains("lazygit"));
         assert!(!profile.contains("command ="));
         assert!(!profile.contains("[[keys.command]]"));

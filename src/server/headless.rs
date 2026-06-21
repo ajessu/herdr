@@ -4313,8 +4313,7 @@ mod tests {
         let local_config: crate::config::Config = toml::from_str(
             r#"
 [keys]
-prefix = "ctrl+a"
-new_tab = "prefix+t"
+mode_tmux = "ctrl+a"
 "#,
         )
         .unwrap();
@@ -4337,6 +4336,7 @@ new_tab = "prefix+t"
             server.app.state.prefix_code,
             crossterm::event::KeyCode::Char('a')
         );
+        // Dispatch reads the released keymap.
         assert!(server
             .app
             .state
@@ -4344,7 +4344,7 @@ new_tab = "prefix+t"
             .new_tab
             .bindings
             .iter()
-            .any(|binding| binding.label == "prefix+t"));
+            .any(|binding| binding.label == "prefix+c"));
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 2,
@@ -4434,9 +4434,7 @@ new_tab = "prefix+t"
         let local_config: crate::config::Config = toml::from_str(
             r#"
 [keys]
-prefix = "ctrl+a"
-new_workspace = "prefix+n"
-next_tab = ""
+mode_tmux = "ctrl+a"
 "#,
         )
         .unwrap();
@@ -4466,14 +4464,6 @@ next_tab = ""
             server.app.state.prefix_code,
             crossterm::event::KeyCode::Char('a')
         );
-        assert!(server
-            .app
-            .state
-            .keybinds
-            .new_workspace
-            .bindings
-            .iter()
-            .any(|binding| binding.label == "prefix+n"));
         assert!(server.app.state.toast.is_none());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("delivery = \"herdr\""));
@@ -4494,7 +4484,7 @@ next_tab = ""
         ));
         std::fs::write(
             &path,
-            "onboarding = false\n[keys]\nnew_workspace = \"x\"\n[ui.toast]\ndelivery = \"off\"\n",
+            "onboarding = false\n[keys]\nmode_pane = \"ctrl+notakey\"\n[ui.toast]\ndelivery = \"off\"\n",
         )
         .unwrap();
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
@@ -4502,14 +4492,12 @@ next_tab = ""
 
         let mut server = test_headless_server();
         let previous_server_config: crate::config::Config =
-            toml::from_str("[keys]\nprefix = \"ctrl+c\"\nnew_workspace = \"prefix+m\"\n").unwrap();
+            toml::from_str("[keys]\nmode_tmux = \"ctrl+c\"\n").unwrap();
         server.server_keybindings = previous_server_config.live_keybinds().unwrap();
         let local_config: crate::config::Config = toml::from_str(
             r#"
 [keys]
-prefix = "ctrl+a"
-new_workspace = "prefix+n"
-next_tab = ""
+mode_tmux = "ctrl+a"
 "#,
         )
         .unwrap();
@@ -4551,14 +4539,6 @@ next_tab = ""
             server.app.state.prefix_code,
             crossterm::event::KeyCode::Char('c')
         );
-        assert!(server
-            .app
-            .state
-            .keybinds
-            .new_workspace
-            .bindings
-            .iter()
-            .any(|binding| binding.label == "prefix+m"));
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_file(path);
