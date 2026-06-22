@@ -46,6 +46,20 @@ pub(crate) fn test_config_env_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+pub(crate) fn sidebar_ratio_diagnostic(ratio: f32) -> Option<String> {
+    if !ratio.is_finite() || ratio < 0.0 {
+        Some(format!(
+            "ui.sidebar_width_ratio ({ratio}) is non-finite or negative; falling back to fixed sidebar width"
+        ))
+    } else if ratio > 1.0 {
+        Some(format!(
+            "ui.sidebar_width_ratio ({ratio}) is greater than 1.0 (likely misconfiguration); sidebar will be clamped to sidebar_max_width"
+        ))
+    } else {
+        None
+    }
+}
+
 impl Config {
     pub fn should_show_onboarding(&self) -> bool {
         self.onboarding.unwrap_or(true)
@@ -62,10 +76,12 @@ impl Config {
 
     pub fn collect_diagnostics(&self) -> Vec<String> {
         let (prefix_diag, _, keybind_diags, _) = self.validated_keybinds();
+        let ratio_diag = sidebar_ratio_diagnostic(self.ui.sidebar_width_ratio);
         prefix_diag
             .into_iter()
             .chain(keybind_diags)
             .chain(self.ui.sound.diagnostics())
+            .chain(ratio_diag)
             .collect()
     }
 
@@ -95,6 +111,32 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_ratio_diagnostic_valid_values() {
+        assert_eq!(sidebar_ratio_diagnostic(0.18), None);
+        assert_eq!(sidebar_ratio_diagnostic(0.0), None);
+        assert_eq!(sidebar_ratio_diagnostic(1.0), None);
+    }
+
+    #[test]
+    fn sidebar_ratio_diagnostic_invalid_values() {
+        assert!(sidebar_ratio_diagnostic(f32::NAN).is_some());
+        assert!(sidebar_ratio_diagnostic(f32::INFINITY).is_some());
+        assert!(sidebar_ratio_diagnostic(-0.5).is_some());
+        assert!(sidebar_ratio_diagnostic(1.5).is_some());
+    }
+
+    #[test]
+    fn collect_diagnostics_includes_bad_ratio() {
+        let toml_str = r#"
+[ui]
+sidebar_width_ratio = -1.0
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let diags = config.collect_diagnostics();
+        assert!(diags.iter().any(|d| d.contains("sidebar_width_ratio")));
+    }
 
     #[test]
     fn local_keybindings_profile_includes_defaults_and_excludes_commands() {

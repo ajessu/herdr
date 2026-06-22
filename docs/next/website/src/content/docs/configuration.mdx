@@ -287,6 +287,7 @@ Common options:
 ```toml
 [ui]
 sidebar_width = 32
+sidebar_width_ratio = 0.18
 sidebar_min_width = 18
 sidebar_max_width = 36
 mobile_width_threshold = 64
@@ -301,6 +302,10 @@ show_tab_status = "off"
 agent_panel_sort = "spaces"
 accent = "cyan"
 ```
+
+`sidebar_width_ratio` makes the expanded sidebar responsive: its width tracks `sidebar_width_ratio` of the terminal width, clamped to `[sidebar_min_width, sidebar_max_width]`. The default is `0.18`. Set it to `0` to disable responsive sizing and use the fixed `sidebar_width` instead. Dragging the divider pins a manual width that overrides the ratio until you double-click the divider to return to responsive sizing.
+
+`sidebar_width` is the fixed width (in columns) used when responsive sizing is disabled (`sidebar_width_ratio = 0`).
 
 `sidebar_min_width` and `sidebar_max_width` control the expanded sidebar's resize bounds in columns. The defaults are 18 and 36.
 

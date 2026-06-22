@@ -101,7 +101,7 @@ fn spawn_server_with_path(
     register_runtime_dir(runtime_dir);
     fs::write(
         config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
+        "onboarding = false\n\n[ui]\nsidebar_width_ratio = 0.0\n",
     )
     .unwrap();
 
@@ -878,7 +878,7 @@ fn cross_area_client_and_api_workspace_views_are_consistent() {
     wait_for_socket(&client_socket, Duration::from_secs(10));
 
     let mut client = UnixStream::connect(&client_socket).expect("client should connect");
-    client_handshake(&mut client, 14, 100, 30);
+    client_handshake(&mut client, 14, 200, 30);
     assert!(wait_for_frame(&mut client, Duration::from_secs(2)));
     drain_server_messages(&mut client, Duration::from_millis(300));
 

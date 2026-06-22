@@ -3149,6 +3149,7 @@ mod tests {
     #[test]
     fn wheel_over_overflowing_tab_bar_switches_tabs() {
         let mut app = app_for_mouse_test();
+        app.state.sidebar_width_ratio = 0.0;
         let mut ws = Workspace::test_new("one");
         ws.tabs[0].set_custom_name("very-long-one".into());
         ws.test_add_tab(Some("very-long-two"));

@@ -214,8 +214,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # directory = "~/.herdr/worktrees"
 
 [ui]
-# Sidebar width (auto-scaled based on workspace names, this sets the default)
+# Base sidebar width (columns) used when responsive sizing is disabled (sidebar_width_ratio = 0)
 # sidebar_width = 26
+
+# Fraction of terminal width for the sidebar (0 disables; double-click divider to return to responsive after a drag)
+# sidebar_width_ratio = 0.18
 
 # Minimum sidebar width when expanded (columns)
 # sidebar_min_width = 18

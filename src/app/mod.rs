@@ -190,6 +190,17 @@ fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
 }
 
+/// Map a snapshot's `sidebar_width_manual` flag to a width source. A manual pin
+/// restores as `Manual`; everything else (including legacy snapshots that lack
+/// the flag) restores as `ConfigDefault` so responsive sizing re-activates.
+fn restored_sidebar_source(sidebar_width_manual: Option<bool>) -> state::SidebarWidthSource {
+    if sidebar_width_manual == Some(true) {
+        state::SidebarWidthSource::Manual
+    } else {
+        state::SidebarWidthSource::ConfigDefault
+    }
+}
+
 fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginRegistry {
     if no_session {
         return std::collections::HashMap::new();
@@ -326,16 +337,18 @@ impl App {
             restored_terminal_runtimes = terminal_runtimes.into();
             if ws.is_empty() {
                 crate::logging::session_restored(0, "empty");
+                let source = restored_sidebar_source(snap.sidebar_width_manual);
+                let width = if source == state::SidebarWidthSource::Manual {
+                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width)
+                } else {
+                    config.ui.sidebar_width
+                };
                 (
                     Vec::new(),
                     None,
                     0,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                    if snap.sidebar_width.is_some() {
-                        state::SidebarWidthSource::Persisted
-                    } else {
-                        state::SidebarWidthSource::ConfigDefault
-                    },
+                    width,
+                    source,
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
                 )
@@ -343,16 +356,18 @@ impl App {
                 crate::logging::session_restored(ws.len(), "ok");
                 let active = snap.active.filter(|&i| i < ws.len());
                 let selected = snap.selected.min(ws.len().saturating_sub(1));
+                let source = restored_sidebar_source(snap.sidebar_width_manual);
+                let width = if source == state::SidebarWidthSource::Manual {
+                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width)
+                } else {
+                    config.ui.sidebar_width
+                };
                 (
                     ws,
                     active,
                     selected,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                    if snap.sidebar_width.is_some() {
-                        state::SidebarWidthSource::Persisted
-                    } else {
-                        state::SidebarWidthSource::ConfigDefault
-                    },
+                    width,
+                    source,
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
                 )
@@ -516,6 +531,7 @@ impl App {
             sidebar_max_width,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
+            sidebar_width_ratio: config.ui.sidebar_width_ratio,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split,
@@ -696,9 +712,11 @@ impl App {
         app.state.selected = snapshot
             .selected
             .min(app.state.workspaces.len().saturating_sub(1));
-        if let Some(width) = snapshot.sidebar_width {
-            app.state.sidebar_width = width;
-            app.state.sidebar_width_source = state::SidebarWidthSource::Persisted;
+        app.state.sidebar_width_source = restored_sidebar_source(snapshot.sidebar_width_manual);
+        if snapshot.sidebar_width_manual == Some(true) {
+            if let Some(width) = snapshot.sidebar_width {
+                app.state.sidebar_width = width;
+            }
         }
         if let Some(split) = snapshot.sidebar_section_split {
             app.state.sidebar_section_split = split;
@@ -1227,8 +1245,12 @@ impl App {
                 ));
             } else {
                 diagnostics.extend(config.ui.sound.diagnostics());
+                diagnostics.extend(crate::config::sidebar_ratio_diagnostic(
+                    config.ui.sidebar_width_ratio,
+                ));
 
                 self.state.default_sidebar_width = config.ui.sidebar_width;
+                self.state.sidebar_width_ratio = config.ui.sidebar_width_ratio;
                 if self.state.sidebar_width_source == state::SidebarWidthSource::ConfigDefault {
                     self.state.sidebar_width = config.ui.sidebar_width;
                 }
@@ -1236,7 +1258,7 @@ impl App {
                 self.state.sidebar_max_width = config.ui.sidebar_max_width;
                 self.state.mobile_width_threshold = config.ui.mobile_width_threshold;
                 // Re-clamp the live width to the new bounds. No source guard — bounds
-                // always apply, including to widths owned by Persisted or Manual.
+                // always apply, including to a Manual pin or the config default.
                 self.state.sidebar_width = self
                     .state
                     .sidebar_width
@@ -2281,6 +2303,130 @@ mod tests {
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_updates_sidebar_width_ratio() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-ratio");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+
+        std::fs::write(&path, "[ui]\nsidebar_width_ratio = 0.25\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.sidebar_width_ratio, 0.25);
+
+        // A Manual pin is unaffected by ratio changes — the helper checks source first.
+        app.state.sidebar_width = 30;
+        app.state.sidebar_width_source = state::SidebarWidthSource::Manual;
+        std::fs::write(&path, "[ui]\nsidebar_width_ratio = 0.30\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.sidebar_width_ratio, 0.30);
+        assert_eq!(app.state.effective_sidebar_width(200), 30);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_invalid_sidebar_ratio_emits_diagnostic() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-ratio-bad");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        std::fs::write(&path, "[ui]\nsidebar_width_ratio = -0.5\n").unwrap();
+        let report = app.reload_config();
+        // A diagnostic makes the reload Partial, not Applied.
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("sidebar_width_ratio")));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    fn empty_handoff_snapshot(
+        sidebar_width: Option<u16>,
+        sidebar_width_manual: Option<bool>,
+    ) -> crate::persist::SessionSnapshot {
+        crate::persist::SessionSnapshot {
+            // Version is irrelevant to sidebar restore; any current value works.
+            version: 4,
+            workspaces: Vec::new(),
+            active: None,
+            selected: 0,
+            sidebar_width,
+            sidebar_width_manual,
+            sidebar_section_split: None,
+            collapsed_space_keys: std::collections::HashSet::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn restore_from_handoff(config: &Config, snapshot: &crate::persist::SessionSnapshot) -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut imports = std::collections::HashMap::new();
+        App::new_from_handoff(
+            config,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+            snapshot,
+            &mut imports,
+        )
+        .expect("handoff restore should succeed for an empty snapshot")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_restores_manual_pin() {
+        let config = Config::default();
+        let snapshot = empty_handoff_snapshot(Some(29), Some(true));
+        let app = restore_from_handoff(&config, &snapshot);
+        assert_eq!(
+            app.state.sidebar_width_source,
+            state::SidebarWidthSource::Manual
+        );
+        assert_eq!(app.state.sidebar_width, 29);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_restores_responsive_as_config_default() {
+        let config = Config::default();
+        let snapshot = empty_handoff_snapshot(None, None);
+        let app = restore_from_handoff(&config, &snapshot);
+        assert_eq!(
+            app.state.sidebar_width_source,
+            state::SidebarWidthSource::ConfigDefault
+        );
+        // Non-manual restore keeps the constructor's config default width.
+        assert_eq!(app.state.sidebar_width, config.ui.sidebar_width);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_legacy_snapshot_with_width_but_no_flag_is_config_default() {
+        // A legacy SessionSnapshot carries sidebar_width: Some(w) but no
+        // sidebar_width_manual flag. It must restore as ConfigDefault (no
+        // freeze), not Manual, and must not panic.
+        let config = Config::default();
+        let snapshot = empty_handoff_snapshot(Some(33), None);
+        let app = restore_from_handoff(&config, &snapshot);
+        assert_eq!(
+            app.state.sidebar_width_source,
+            state::SidebarWidthSource::ConfigDefault
+        );
+        assert_eq!(app.state.sidebar_width, config.ui.sidebar_width);
     }
 
     #[test]

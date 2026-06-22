@@ -1476,6 +1476,31 @@ mod tests {
     }
 
     #[test]
+    fn manual_pin_uses_clicked_column_not_rendered_width() {
+        // Multi-client safety on the input path: set_manual_sidebar_width derives
+        // the pinned width from divider_col - sidebar.x + 1, reading only
+        // sidebar.x (always 0, width-invariant). So an already-foreground client
+        // dragging to a given column pins exactly that column regardless of which
+        // client's responsive width last populated view.sidebar_rect.
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_width_ratio = 0.18;
+        app.state.sidebar_width_source = crate::app::state::SidebarWidthSource::ConfigDefault;
+
+        // A different-width client rendered last, leaving a narrow rect width.
+        app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 18, 20);
+
+        // The dragging client (already foreground) drops the divider on column 28.
+        app.state.set_manual_sidebar_width(28);
+
+        // Pinned width = 28 - 0 + 1 = 29, independent of the stale rect width 18.
+        assert_eq!(app.state.sidebar_width, 29);
+        assert_eq!(
+            app.state.sidebar_width_source,
+            crate::app::state::SidebarWidthSource::Manual
+        );
+    }
+
+    #[test]
     fn dragging_sidebar_bottom_divider_still_sets_manual_width() {
         let mut app = app_for_mouse_test();
         let divider_col = app.state.view.sidebar_rect.x + app.state.view.sidebar_rect.width - 1;
@@ -1549,14 +1574,27 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.default_sidebar_width = 26;
         app.state.sidebar_width = 30;
+        app.state.sidebar_width_source = crate::app::state::SidebarWidthSource::Manual;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 25, 5));
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
 
         assert_eq!(app.state.sidebar_width, 26);
+        assert_eq!(
+            app.state.sidebar_width_source,
+            crate::app::state::SidebarWidthSource::ConfigDefault,
+        );
         assert!(app.state.drag.is_none());
         let snapshot = capture_snapshot(&app.state);
-        assert_eq!(snapshot.sidebar_width, Some(26));
+        // Non-manual capture emits None (responsive width does not persist)
+        assert_eq!(snapshot.sidebar_width, None);
+        assert_eq!(snapshot.sidebar_width_manual, None);
+
+        // Responsive sizing re-activates: a layout pass now derives the width
+        // from the ratio rather than honoring the prior manual pin.
+        app.state.sidebar_width_ratio = 0.18;
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 20));
+        assert_eq!(app.state.view.sidebar_rect.width, 22);
     }
 }

@@ -1266,7 +1266,6 @@ pub struct KeybindHelpState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarWidthSource {
     ConfigDefault,
-    Persisted,
     Manual,
 }
 
@@ -1358,11 +1357,16 @@ pub struct AppState {
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
     pub default_sidebar_width: u16,
+    /// Stored sidebar-width intent: the config default when responsive
+    /// (`ConfigDefault`), or the user's pinned width when `Manual`. The rendered
+    /// width is derived from this via [`AppState::effective_sidebar_width`]; the
+    /// layout pass never mutates this field.
     pub sidebar_width: u16,
     pub sidebar_min_width: u16,
     pub sidebar_max_width: u16,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
+    pub sidebar_width_ratio: f32,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
     /// Ratio of sidebar height allocated to the workspaces section.
@@ -1443,6 +1447,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn effective_sidebar_width(&self, total_width: u16) -> u16 {
+        debug_assert!(self.sidebar_min_width <= self.sidebar_max_width);
+        let r = self.sidebar_width_ratio;
+        if self.sidebar_width_source == SidebarWidthSource::Manual || !(r.is_finite() && r > 0.0) {
+            return self
+                .sidebar_width
+                .clamp(self.sidebar_min_width, self.sidebar_max_width);
+        }
+        let raw = (total_width as f32) * r;
+        let w = raw.round().clamp(0.0, u16::MAX as f32) as u16;
+        w.clamp(self.sidebar_min_width, self.sidebar_max_width)
+    }
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }
@@ -1729,6 +1746,7 @@ impl AppState {
             sidebar_max_width: 36,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
+            sidebar_width_ratio: 0.0,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,
@@ -2349,5 +2367,128 @@ mod tests {
         state.request_break_focused_pane_to_tab();
 
         assert_eq!(state.request_break_pane_to_tab, Some(focused));
+    }
+
+    #[test]
+    fn effective_sidebar_width_responsive_table() {
+        let mut state = AppState::test_new();
+        state.sidebar_width_ratio = 0.18;
+        state.sidebar_min_width = 18;
+        state.sidebar_max_width = 36;
+        state.sidebar_width_source = SidebarWidthSource::ConfigDefault;
+
+        // (total_cols, expected)
+        let cases = [
+            (80u16, 18u16), // round(14.4)=14 → clamped to min 18
+            (120, 22),      // round(21.6)=22
+            (144, 26),      // round(25.92)=26
+            (200, 36),      // round(36.0)=36 → exactly max
+            (240, 36),      // round(43.2)=43 → clamped to max 36
+        ];
+        for (total, expected) in cases {
+            assert_eq!(
+                state.effective_sidebar_width(total),
+                expected,
+                "total_cols={total}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_sidebar_width_min_clamps_up() {
+        let mut state = AppState::test_new();
+        state.sidebar_width_ratio = 0.10;
+        state.sidebar_min_width = 18;
+        state.sidebar_max_width = 36;
+        state.sidebar_width_source = SidebarWidthSource::ConfigDefault;
+
+        // round(80 * 0.10) = 8 → clamped to min 18
+        assert_eq!(state.effective_sidebar_width(80), 18);
+    }
+
+    #[test]
+    fn effective_sidebar_width_fallback_zero_ratio() {
+        let mut state = AppState::test_new();
+        state.sidebar_width_ratio = 0.0;
+        state.sidebar_width = 30;
+        state.sidebar_min_width = 18;
+        state.sidebar_max_width = 36;
+        state.sidebar_width_source = SidebarWidthSource::ConfigDefault;
+
+        assert_eq!(state.effective_sidebar_width(200), 30);
+    }
+
+    #[test]
+    fn effective_sidebar_width_fallback_nan() {
+        let mut state = AppState::test_new();
+        state.sidebar_width_ratio = f32::NAN;
+        state.sidebar_width = 25;
+        state.sidebar_min_width = 18;
+        state.sidebar_max_width = 36;
+        state.sidebar_width_source = SidebarWidthSource::ConfigDefault;
+
+        assert_eq!(state.effective_sidebar_width(200), 25);
+    }
+
+    #[test]
+    fn effective_sidebar_width_fallback_negative() {
+        let mut state = AppState::test_new();
+        state.sidebar_width_ratio = -0.5;
+        state.sidebar_width = 25;
+        state.sidebar_min_width = 18;
+        state.sidebar_max_width = 36;
+        state.sidebar_width_source = SidebarWidthSource::ConfigDefault;
+
+        assert_eq!(state.effective_sidebar_width(200), 25);
+    }
+
+    #[test]
+    fn effective_sidebar_width_manual_source_pins() {
+        let mut state = AppState::test_new();
+        state.sidebar_width_ratio = 0.18;
+        state.sidebar_width = 30;
+        state.sidebar_min_width = 18;
+        state.sidebar_max_width = 36;
+        state.sidebar_width_source = SidebarWidthSource::Manual;
+
+        // Manual source returns pinned width regardless of ratio
+        assert_eq!(state.effective_sidebar_width(200), 30);
+        assert_eq!(state.effective_sidebar_width(80), 30);
+    }
+
+    #[test]
+    fn effective_sidebar_width_absurd_ratio_clamps() {
+        let mut state = AppState::test_new();
+        state.sidebar_width_ratio = 1e30;
+        state.sidebar_min_width = 18;
+        state.sidebar_max_width = 36;
+        state.sidebar_width_source = SidebarWidthSource::ConfigDefault;
+
+        // Absurd ratio overflows but clamps to max
+        assert_eq!(state.effective_sidebar_width(200), 36);
+    }
+
+    #[test]
+    fn effective_sidebar_width_ratio_above_one_clamps_to_max() {
+        let mut state = AppState::test_new();
+        state.sidebar_width_ratio = 1.5;
+        state.sidebar_min_width = 18;
+        state.sidebar_max_width = 36;
+        state.sidebar_width_source = SidebarWidthSource::ConfigDefault;
+
+        // ratio > 1.0 takes the responsive path: 80 * 1.5 = 120 → clamps to max 36
+        assert_eq!(state.effective_sidebar_width(80), 36);
+    }
+
+    #[test]
+    fn effective_sidebar_width_zero_total_clamps_to_min() {
+        let mut state = AppState::test_new();
+        state.sidebar_width_ratio = 0.18;
+        state.sidebar_min_width = 18;
+        state.sidebar_max_width = 36;
+        state.sidebar_width_source = SidebarWidthSource::ConfigDefault;
+
+        // 0 * 0.18 = 0 → clamps to min 18
+        assert_eq!(state.effective_sidebar_width(0), 18);
     }
 }

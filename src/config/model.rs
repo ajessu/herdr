@@ -486,6 +486,8 @@ pub struct UiConfig {
     pub sidebar_min_width: u16,
     /// Maximum sidebar width (columns) when expanded. Default: 36.
     pub sidebar_max_width: u16,
+    /// Fraction of total terminal width for the sidebar (0.0 disables, uses fixed sidebar_width).
+    pub sidebar_width_ratio: f32,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
@@ -703,6 +705,7 @@ impl Default for UiConfig {
             sidebar_width: 26,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
+            sidebar_width_ratio: 0.18,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
@@ -1021,6 +1024,7 @@ cjk_ime_agents = ["claude", "codex"]
         let default_config = Config::default();
         assert_eq!(default_config.ui.sidebar_min_width, 18);
         assert_eq!(default_config.ui.sidebar_max_width, 36);
+        assert_eq!(default_config.ui.sidebar_width_ratio, 0.18);
         assert_eq!(
             default_config.ui.mobile_width_threshold,
             DEFAULT_MOBILE_WIDTH_THRESHOLD
@@ -1030,11 +1034,13 @@ cjk_ime_agents = ["claude", "codex"]
 [ui]
 sidebar_min_width = 12
 sidebar_max_width = 80
+sidebar_width_ratio = 0.25
 mobile_width_threshold = 96
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.sidebar_min_width, 12);
         assert_eq!(config.ui.sidebar_max_width, 80);
+        assert_eq!(config.ui.sidebar_width_ratio, 0.25);
         assert_eq!(config.ui.mobile_width_threshold, 96);
     }
 

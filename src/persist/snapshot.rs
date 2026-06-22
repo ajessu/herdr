@@ -20,8 +20,10 @@ pub struct SessionSnapshot {
     pub workspaces: Vec<WorkspaceSnapshot>,
     pub active: Option<usize>,
     pub selected: usize,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width_manual: Option<bool>,
     #[serde(default)]
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
@@ -183,6 +185,8 @@ struct RawSessionSnapshot {
     #[serde(default)]
     sidebar_width: Option<u16>,
     #[serde(default)]
+    sidebar_width_manual: Option<bool>,
+    #[serde(default)]
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
@@ -199,6 +203,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         active: raw.active,
         selected: raw.selected,
         sidebar_width: raw.sidebar_width,
+        sidebar_width_manual: raw.sidebar_width_manual,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
     })
@@ -262,9 +267,11 @@ pub fn capture(
     active: Option<usize>,
     selected: usize,
     sidebar_width: u16,
+    sidebar_width_source: crate::app::state::SidebarWidthSource,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
 ) -> SessionSnapshot {
+    let is_manual = sidebar_width_source == crate::app::state::SidebarWidthSource::Manual;
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
@@ -273,7 +280,8 @@ pub fn capture(
             .collect(),
         active,
         selected,
-        sidebar_width: Some(sidebar_width),
+        sidebar_width: if is_manual { Some(sidebar_width) } else { None },
+        sidebar_width_manual: if is_manual { Some(true) } else { None },
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
     }
@@ -547,6 +555,7 @@ mod tests {
             state.active,
             state.selected,
             state.sidebar_width,
+            state.sidebar_width_source,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
         )
@@ -574,6 +583,7 @@ mod tests {
             active: None,
             selected: 0,
             sidebar_width: Some(26),
+            sidebar_width_manual: Some(true),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
         };
@@ -659,6 +669,7 @@ mod tests {
             active: Some(0),
             selected: 0,
             sidebar_width: Some(26),
+            sidebar_width_manual: None,
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
@@ -839,13 +850,21 @@ mod tests {
     fn capture_contract_tracks_sidebar_state() {
         let mut state = state_with_workspaces(&["one"]);
         state.sidebar_width = 31;
+        state.sidebar_width_source = crate::app::state::SidebarWidthSource::Manual;
         state.sidebar_section_split = 0.4;
         state.collapsed_space_keys.insert("repo-key".into());
 
         let snapshot = capture_from_state(&state);
         assert_eq!(snapshot.sidebar_width, Some(31));
+        assert_eq!(snapshot.sidebar_width_manual, Some(true));
         assert_eq!(snapshot.sidebar_section_split, Some(0.4));
         assert!(snapshot.collapsed_space_keys.contains("repo-key"));
+
+        // Non-manual capture emits None for sidebar_width
+        state.sidebar_width_source = crate::app::state::SidebarWidthSource::ConfigDefault;
+        let snap2 = capture_from_state(&state);
+        assert_eq!(snap2.sidebar_width, None);
+        assert_eq!(snap2.sidebar_width_manual, None);
     }
 
     #[test]
@@ -1300,6 +1319,7 @@ mod tests {
             active: Some(0),
             selected: 0,
             sidebar_width: Some(26),
+            sidebar_width_manual: None,
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
         };
@@ -1311,5 +1331,70 @@ mod tests {
             restored.workspaces[0].tabs[0].panes[&0].cwd,
             PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test")
         );
+    }
+
+    #[test]
+    fn persistence_round_trip_manual_pin() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.sidebar_width = 30;
+        state.sidebar_width_source = crate::app::state::SidebarWidthSource::Manual;
+
+        let snapshot = capture_from_state(&state);
+        assert_eq!(snapshot.sidebar_width, Some(30));
+        assert_eq!(snapshot.sidebar_width_manual, Some(true));
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+        assert_eq!(restored.sidebar_width, Some(30));
+        assert_eq!(restored.sidebar_width_manual, Some(true));
+    }
+
+    #[test]
+    fn persistence_round_trip_responsive_emits_none() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.sidebar_width = 26;
+        state.sidebar_width_source = crate::app::state::SidebarWidthSource::ConfigDefault;
+
+        let snapshot = capture_from_state(&state);
+        assert_eq!(snapshot.sidebar_width, None);
+        assert_eq!(snapshot.sidebar_width_manual, None);
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        // sidebar_width_manual is skip_serializing_if None, so absent from JSON
+        assert!(!json.contains("sidebar_width_manual"));
+    }
+
+    #[test]
+    fn legacy_snapshot_without_manual_field_restores_as_config_default() {
+        let json = r#"{
+            "version": 4,
+            "workspaces": [],
+            "active": null,
+            "selected": 0,
+            "sidebar_width": 26,
+            "sidebar_section_split": 0.5,
+            "collapsed_space_keys": []
+        }"#;
+        let restored = parse_snapshot(json).unwrap();
+        // Legacy snapshot has no sidebar_width_manual field → None
+        assert_eq!(restored.sidebar_width_manual, None);
+        assert_eq!(restored.sidebar_width, Some(26));
+    }
+
+    #[test]
+    fn handoff_deserialization_missing_manual_field_defaults_to_none() {
+        let json = r#"{
+            "version": 4,
+            "workspaces": [],
+            "active": null,
+            "selected": 0,
+            "sidebar_width": 26,
+            "sidebar_section_split": 0.5,
+            "collapsed_space_keys": []
+        }"#;
+        // Direct SessionSnapshot deserialization (handoff path uses serde, not parse_snapshot)
+        let snap: SessionSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snap.sidebar_width_manual, None);
+        assert_eq!(snap.sidebar_width, Some(26));
     }
 }

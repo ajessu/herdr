@@ -884,6 +884,7 @@ impl HeadlessServer {
             self.app.state.active,
             self.app.state.selected,
             self.app.state.sidebar_width,
+            self.app.state.sidebar_width_source,
             self.app.state.sidebar_section_split,
             self.app.state.collapsed_space_keys.clone(),
         );
@@ -3625,9 +3626,11 @@ impl HeadlessServer {
             .filter_map(|s| crate::web::origin::normalize_origin(s))
             .collect();
 
-        if let Err(err) =
-            crate::web::validate_web_config(params.trust_proxy, &public_origins, &params.public_origins)
-        {
+        if let Err(err) = crate::web::validate_web_config(
+            params.trust_proxy,
+            &public_origins,
+            &params.public_origins,
+        ) {
             let code = match &err {
                 crate::web::WebConfigError::TrustProxyRequiresPublicOrigin => {
                     "trust_proxy_requires_public_origin"

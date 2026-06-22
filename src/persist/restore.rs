@@ -1242,6 +1242,7 @@ mod tests {
             active: Some(0),
             selected: 0,
             sidebar_width: None,
+            sidebar_width_manual: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
@@ -1331,6 +1332,7 @@ mod tests {
             active: Some(0),
             selected: 0,
             sidebar_width: None,
+            sidebar_width_manual: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
@@ -1436,6 +1438,7 @@ mod tests {
             active: Some(0),
             selected: 0,
             sidebar_width: None,
+            sidebar_width_manual: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
@@ -1547,6 +1550,7 @@ mod tests {
             active: Some(0),
             selected: 0,
             sidebar_width: None,
+            sidebar_width_manual: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
@@ -1838,6 +1842,7 @@ mod tests {
             active: Some(0),
             selected: 0,
             sidebar_width: Some(26),
+            sidebar_width_manual: None,
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
         };

@@ -187,12 +187,18 @@ fn compute_view_internal(
     let sidebar_w = if app.sidebar_collapsed {
         COLLAPSED_WIDTH
     } else {
-        app.sidebar_width
-            .clamp(app.sidebar_min_width, app.sidebar_max_width)
+        app.effective_sidebar_width(area.width)
     };
 
     let [sidebar_area, main_area] =
         Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+
+    // The width fed to the layout must match the width recorded in
+    // view.sidebar_rect, or the divider hit-test (which reads the rect) drifts
+    // from the drawn divider. Assert against the local sidebar_w, not a re-call
+    // of effective_sidebar_width (re-deriving would be tautological and would
+    // fire spuriously on the collapsed branch).
+    debug_assert!(sidebar_area.width == sidebar_w || area.width < sidebar_w);
 
     let has_tabs = app.active.and_then(|i| app.workspaces.get(i)).is_some();
     let hint_enabled = app.hint_bar != crate::config::HintBarStyle::Off;
@@ -1306,5 +1312,68 @@ mod tests {
             .join("");
         assert!(rendered_help.contains("open lazygit"));
         assert!(rendered_help.contains("custom command"));
+    }
+
+    #[test]
+    fn compute_view_responsive_does_not_mutate_sidebar_width() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width_ratio = 0.18;
+        app.sidebar_width = 26;
+        app.sidebar_width_source = crate::app::state::SidebarWidthSource::ConfigDefault;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 20));
+
+        // sidebar_width is NOT mutated by the layout pass
+        assert_eq!(app.sidebar_width, 26);
+        // But the rendered width uses the responsive value: round(120*0.18) = 22
+        assert_eq!(app.view.sidebar_rect.width, 22);
+    }
+
+    #[test]
+    fn compute_view_multi_client_coherence() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width_ratio = 0.18;
+        app.sidebar_width = 26;
+        app.sidebar_width_source = crate::app::state::SidebarWidthSource::ConfigDefault;
+
+        // Simulate two clients with different terminal widths
+        compute_view(&mut app, Rect::new(0, 0, 120, 20));
+        let width_client_1 = app.view.sidebar_rect.width;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        let width_client_2 = app.view.sidebar_rect.width;
+
+        // Each client gets its own computed width
+        assert_eq!(width_client_1, 22); // round(120*0.18)=22
+        assert_eq!(width_client_2, 18); // round(80*0.18)=14 → clamp to min 18
+
+        // Shared state is unchanged by both render passes
+        assert_eq!(app.sidebar_width, 26);
+    }
+
+    #[test]
+    fn compute_view_manual_pin_stable_under_responsive_layout() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width_ratio = 0.18;
+        app.sidebar_width = 30;
+        app.sidebar_width_source = crate::app::state::SidebarWidthSource::Manual;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 20));
+
+        // Manual pin is respected, not overridden by responsive ratio
+        assert_eq!(app.view.sidebar_rect.width, 30);
+        assert_eq!(app.sidebar_width, 30);
     }
 }
