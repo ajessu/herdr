@@ -511,6 +511,10 @@ impl App {
             return;
         }
 
+        if self.handle_tab_double_click(mouse) {
+            return;
+        }
+
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
 
         let previous_agent_panel_sort = self.state.agent_panel_sort;
@@ -704,6 +708,34 @@ impl App {
                 Some(std::time::Instant::now() + super::PANE_COPY_HIGHLIGHT_DURATION);
         }
         copied
+    }
+
+    fn handle_tab_double_click(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+        if self.state.mode != Mode::Terminal {
+            self.last_tab_click = None;
+            return false;
+        }
+        let Some(tab_idx) = self.state.tab_at(mouse.column, mouse.row) else {
+            return false;
+        };
+        let click = super::TabClickState {
+            tab_idx,
+            at: std::time::Instant::now(),
+        };
+        if !self
+            .last_tab_click
+            .is_some_and(|last| last.is_double_click_for(click))
+        {
+            self.last_tab_click = Some(click);
+            return false;
+        }
+        self.last_tab_click = None;
+        self.state.switch_tab(tab_idx);
+        modal::open_rename_active_tab(&mut self.state, false);
+        true
     }
 }
 

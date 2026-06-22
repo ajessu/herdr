@@ -757,6 +757,20 @@ pub(super) fn apply_context_menu_action(
             state.switch_tab(tab_idx);
             open_rename_active_tab(state, false);
         }
+        (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Move left")) => {
+            state.selected = ws_idx;
+            state.active = Some(ws_idx);
+            state.switch_tab(tab_idx);
+            state.move_active_tab_left();
+            state.mode = Mode::Terminal;
+        }
+        (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Move right")) => {
+            state.selected = ws_idx;
+            state.active = Some(ws_idx);
+            state.switch_tab(tab_idx);
+            state.move_active_tab_right();
+            state.mode = Mode::Terminal;
+        }
         (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close")) => {
             state.selected = ws_idx;
             state.active = Some(ws_idx);

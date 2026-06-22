@@ -1168,7 +1168,7 @@ impl ContextMenuState {
                 "Open worktree...",
                 "Collapse",
             ],
-            ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
+            ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Move left", "Move right", "Close"],
             ContextMenuKind::Pane {
                 has_manual_label: true,
                 source_pane_id: Some(_),

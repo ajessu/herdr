@@ -39,6 +39,7 @@ const PENDING_AGENT_RESUME_THEME_WAIT: Duration = Duration::from_millis(750);
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+const TAB_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_COPY_HIGHLIGHT_DURATION: Duration = Duration::from_millis(500);
 const COPY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 
@@ -90,6 +91,19 @@ impl PaneClickState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TabClickState {
+    pub tab_idx: usize,
+    pub at: Instant,
+}
+
+impl TabClickState {
+    fn is_double_click_for(self, next: Self) -> bool {
+        self.tab_idx == next.tab_idx
+            && next.at.duration_since(self.at) <= TAB_DOUBLE_CLICK_WINDOW
+    }
+}
+
 pub struct App {
     pub state: AppState,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
@@ -111,6 +125,7 @@ pub struct App {
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
     pub(crate) last_sidebar_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
+    pub(crate) last_tab_click: Option<TabClickState>,
     pub(crate) next_resize_poll: Instant,
     pub(crate) next_animation_tick: Option<Instant>,
     pub(crate) next_auto_update_check: Option<Instant>,
@@ -640,6 +655,7 @@ impl App {
             git_status_cache: HashMap::new(),
             last_sidebar_divider_click: None,
             last_pane_click: None,
+            last_tab_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_animation_tick: None,
             next_auto_update_check: auto_updates_enabled(no_session)

@@ -892,6 +892,18 @@ impl AppState {
                 }
             }
 
+            MouseEventKind::Down(MouseButton::Middle) if !in_sidebar => {
+                if let Some(tab_idx) = self.tab_at(mouse.column, mouse.row) {
+                    let ws = self.active.and_then(|i| self.workspaces.get(i));
+                    if ws.is_some_and(|ws| tab_idx < ws.tabs.len()) {
+                        self.switch_tab(tab_idx);
+                        self.close_tab();
+                    }
+                } else if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row) {
+                    let _ = self.forward_pane_mouse_button(terminal_runtimes, &info, mouse);
+                }
+            }
+
             MouseEventKind::Up(MouseButton::Middle) | MouseEventKind::Drag(MouseButton::Middle)
                 if !in_sidebar =>
             {
@@ -3513,6 +3525,352 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+
+    #[test]
+    fn middle_click_tab_closes_it() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        ws.test_add_tab(Some("three"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let second_tab = app.state.view.tab_hit_areas[1];
+        assert_eq!(app.state.workspaces[0].tabs.len(), 3);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Middle),
+            second_tab.x + 1,
+            second_tab.y,
+        ));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+    }
+
+    #[test]
+    fn middle_click_stale_tab_is_noop() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        ws.test_add_tab(Some("three"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        assert_eq!(app.state.view.tab_hit_areas.len(), 3);
+        let third_tab = app.state.view.tab_hit_areas[2];
+
+        // Close a tab without refreshing hit areas — simulates stale state.
+        app.state.workspaces[0].close_tab(2);
+        app.state.workspaces[0].close_tab(1);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+
+        // Middle-click on the now-stale third tab area — should be a no-op.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Middle),
+            third_tab.x + 1,
+            third_tab.y,
+        ));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn double_click_tab_opens_rename() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let first_tab = app.state.view.tab_hit_areas[0];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            first_tab.x + 1,
+            first_tab.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            first_tab.x + 1,
+            first_tab.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            first_tab.x + 1,
+            first_tab.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::RenameTab);
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+    }
+
+    #[test]
+    fn single_click_tab_does_not_rename() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let second_tab = app.state.view.tab_hit_areas[1];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            second_tab.x + 1,
+            second_tab.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            second_tab.x + 1,
+            second_tab.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+    }
+
+    #[test]
+    fn tab_drag_works_without_double_click_interference() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        ws.test_add_tab(Some("three"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let first_tab = app.state.view.tab_hit_areas[0];
+        let second_tab = app.state.view.tab_hit_areas[1];
+
+        // A single click-drag (no prior click) works as a reorder without rename.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            first_tab.x + 1,
+            first_tab.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            second_tab.x + second_tab.width - 1,
+            first_tab.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            second_tab.x + second_tab.width - 1,
+            first_tab.y,
+        ));
+
+        assert_ne!(app.state.mode, Mode::RenameTab);
+    }
+
+    #[test]
+    fn tab_context_menu_move_left() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("ws");
+        ws.test_add_tab(Some("two"));
+        ws.test_add_tab(Some("three"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let third_tab = app.state.view.tab_hit_areas[2];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            third_tab.x + 1,
+            third_tab.y,
+        ));
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().unwrap();
+        let move_left_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Move left")
+            .expect("Move left item");
+
+        for _ in 0..move_left_idx {
+            handle_context_menu_key(
+                &mut app.state,
+                &mut app.terminal_runtimes,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+        }
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        assert_eq!(
+            app.state.workspaces[0]
+                .active_tab_display_name()
+                .as_deref(),
+            Some("three")
+        );
+    }
+
+    #[test]
+    fn tab_context_menu_move_right() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("ws");
+        ws.tabs[0].set_custom_name("first".into());
+        ws.test_add_tab(Some("two"));
+        ws.test_add_tab(Some("three"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let first_tab = app.state.view.tab_hit_areas[0];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            first_tab.x + 1,
+            first_tab.y,
+        ));
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().unwrap();
+        let move_right_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Move right")
+            .expect("Move right item");
+
+        for _ in 0..move_right_idx {
+            handle_context_menu_key(
+                &mut app.state,
+                &mut app.terminal_runtimes,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+        }
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        assert_eq!(
+            app.state.workspaces[0]
+                .active_tab_display_name()
+                .as_deref(),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn tab_context_menu_move_left_at_first_is_noop() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("ws");
+        ws.tabs[0].set_custom_name("first".into());
+        ws.test_add_tab(Some("two"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let first_tab = app.state.view.tab_hit_areas[0];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            first_tab.x + 1,
+            first_tab.y,
+        ));
+        let menu = app.state.context_menu.as_ref().unwrap();
+        let move_left_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Move left")
+            .expect("Move left item");
+
+        for _ in 0..move_left_idx {
+            handle_context_menu_key(
+                &mut app.state,
+                &mut app.terminal_runtimes,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+        }
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        assert_eq!(
+            app.state.workspaces[0]
+                .active_tab_display_name()
+                .as_deref(),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn tab_context_menu_move_right_at_last_is_noop() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("ws");
+        ws.test_add_tab(Some("two"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let second_tab = app.state.view.tab_hit_areas[1];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            second_tab.x + 1,
+            second_tab.y,
+        ));
+        let menu = app.state.context_menu.as_ref().unwrap();
+        let move_right_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Move right")
+            .expect("Move right item");
+
+        for _ in 0..move_right_idx {
+            handle_context_menu_key(
+                &mut app.state,
+                &mut app.terminal_runtimes,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+        }
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        assert_eq!(
+            app.state.workspaces[0]
+                .active_tab_display_name()
+                .as_deref(),
+            Some("two")
+        );
     }
 
     mod floating_pane_mouse {
