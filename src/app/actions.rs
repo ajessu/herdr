@@ -1493,7 +1493,7 @@ impl AppState {
         }
     }
 
-    fn refresh_tab_bar_view(&mut self) {
+    pub(crate) fn refresh_tab_bar_view(&mut self) {
         let area = self.view.tab_bar_rect;
         let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
             self.tab_scroll = 0;
@@ -1529,6 +1529,28 @@ impl AppState {
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
         self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;
+
+        // When the bar produced hit areas, there must be exactly one per tab.
+        // A mismatch means a mutation path left the cached layout stale.
+        let tab_count = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .map(|ws| ws.tabs.len());
+        let in_sync =
+            self.view.tab_hit_areas.is_empty() || tab_count == Some(self.view.tab_hit_areas.len());
+        if !in_sync {
+            // debug builds trip the assert; release builds get a log so a
+            // regression in some mutation path is still observable.
+            tracing::warn!(
+                hit_areas = self.view.tab_hit_areas.len(),
+                tab_count = ?tab_count,
+                "tab_hit_areas out of sync with workspace tab count"
+            );
+            debug_assert!(
+                in_sync,
+                "tab_hit_areas out of sync with workspace tab count"
+            );
+        }
     }
 }
 
@@ -1988,6 +2010,9 @@ impl AppState {
             .and_then(|i| self.workspaces.get(i).and_then(|ws| ws.focused_pane_id()))
             .into_iter()
             .collect::<Vec<_>>();
+        let tab_count_before = active
+            .and_then(|i| self.workspaces.get(i))
+            .map(|ws| ws.tabs.len());
         let should_close_workspace = active
             .and_then(|i| self.workspaces.get_mut(i))
             .is_some_and(|ws| ws.close_focused());
@@ -1999,6 +2024,16 @@ impl AppState {
             self.close_selected_workspace();
         } else {
             self.remove_unattached_terminal_ids(terminal_ids);
+            // Closing the last pane in a tab removes that tab without closing
+            // the workspace. `close_focused()` already adjusted the active tab;
+            // refresh the cached bar so hit areas track the new tab count.
+            let tab_count_after = active
+                .and_then(|i| self.workspaces.get(i))
+                .map(|ws| ws.tabs.len());
+            if tab_count_after < tab_count_before {
+                self.tab_scroll_follow_active = true;
+                self.refresh_tab_bar_view();
+            }
         }
         false
     }
@@ -5602,6 +5637,58 @@ mod tests {
         state.move_active_tab_left();
         state.move_active_tab_right();
         assert_eq!(state.workspaces[0].active_tab, 0);
+    }
+
+    /// Pins the invariant that the `AppState`-level tab-mutation methods keep
+    /// the cached tab bar hit areas in sync with the workspace tab count. The
+    /// API and modal rename/close/create paths are pinned by dedicated tests in
+    /// `api/tabs.rs`, `api/layouts.rs`, and `input/modal.rs`. These tests are
+    /// the real guard against a "forgot to refresh" regression — the
+    /// `debug_assert!` inside `refresh_tab_bar_view` only fires when that
+    /// function runs, so it cannot catch a path that drops the refresh call.
+    #[test]
+    fn tab_mutations_keep_hit_areas_in_sync() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("b"));
+        state.workspaces[0].test_add_tab(Some("c"));
+        state.workspaces[0].test_add_tab(Some("d"));
+
+        // A full render populates `tab_bar_rect` so refreshes produce hit areas.
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 120, 30));
+
+        let assert_in_sync = |state: &AppState, label: &str| {
+            let tab_count = state.workspaces[0].tabs.len();
+            assert_eq!(
+                state.view.tab_hit_areas.len(),
+                tab_count,
+                "hit areas out of sync after {label}: {} areas vs {tab_count} tabs",
+                state.view.tab_hit_areas.len()
+            );
+        };
+        assert_in_sync(&state, "initial render");
+
+        // switch_tab
+        state.switch_tab(2);
+        assert_in_sync(&state, "switch_tab");
+
+        // move_tab (via the active-tab reorder helpers)
+        state.move_active_tab_left();
+        assert_in_sync(&state, "move_active_tab_left");
+
+        // close_pane on a single-pane tab removes that tab without closing the
+        // workspace.
+        let before = state.workspaces[0].tabs.len();
+        state.close_pane();
+        assert_eq!(
+            state.workspaces[0].tabs.len(),
+            before - 1,
+            "close_pane should remove the single-pane tab"
+        );
+        assert_in_sync(&state, "close_pane");
+
+        // close_tab
+        state.close_tab();
+        assert_in_sync(&state, "close_tab");
     }
 
     #[test]

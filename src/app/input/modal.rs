@@ -455,6 +455,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         };
                 }
                 Mode::RenameTab => {
+                    let mut renamed = false;
                     if let Some(ws_idx) = state.active {
                         if let Some(ws) = state.workspaces.get_mut(ws_idx) {
                             let workspace_id = ws.id.clone();
@@ -480,9 +481,15 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                                         .unwrap_or_else(|| workspace_id.clone());
                                     crate::logging::tab_renamed(&workspace_id, &tab_id);
                                     state.mark_session_dirty();
+                                    renamed = true;
                                 }
                             }
                         }
+                    }
+                    if renamed {
+                        // Hit areas size to the tab name; refresh so widths
+                        // track the rename.
+                        state.refresh_tab_bar_view();
                     }
                 }
                 Mode::RenamePane => {
@@ -1380,6 +1387,35 @@ mod tests {
         assert_eq!(
             snapshot.workspaces[0].tabs[0].custom_name.as_deref(),
             Some("logs")
+        );
+    }
+
+    #[test]
+    fn tab_rename_via_modal_refreshes_hit_areas() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("b"));
+        // A full render populates tab_bar_rect and seeds the hit areas.
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 30));
+        let width_before = state.view.tab_hit_areas[0].width;
+
+        state.mode = Mode::RenameTab;
+        state.name_input = "a-much-longer-tab-name".into();
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        // The rename must refresh the bar without a render frame: the first
+        // tab's hit area widens to fit the longer name, and the count stays in
+        // sync with the tab count.
+        assert_eq!(
+            state.view.tab_hit_areas.len(),
+            state.workspaces[0].tabs.len()
+        );
+        assert!(
+            state.view.tab_hit_areas[0].width > width_before,
+            "renamed tab hit area should widen: {} <= {width_before}",
+            state.view.tab_hit_areas[0].width
         );
     }
 

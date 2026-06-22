@@ -170,6 +170,8 @@ impl App {
                 self.state.remove_plugin_pane_records(plugin_pane_ids);
                 self.state.remove_unattached_terminal_ids(terminal_ids);
                 self.shutdown_detached_terminal_runtimes();
+                self.state.tab_scroll_follow_active = true;
+                self.state.refresh_tab_bar_view();
                 self.emit_event(EventEnvelope {
                     event: EventKind::TabClosed,
                     data: EventData::TabClosed {
@@ -191,6 +193,11 @@ impl App {
         if params.focus || replace_was_active {
             self.state.switch_workspace_tab(ws_idx, new_tab_idx);
             self.state.mode = Mode::Terminal;
+        } else {
+            // switch_workspace_tab refreshes the bar; the unfocused create path
+            // must refresh explicitly so the new tab appears in the cached hit
+            // areas.
+            self.state.refresh_tab_bar_view();
         }
         self.schedule_session_save();
         if let Some(tab) = self.tab_info(ws_idx, new_tab_idx) {
@@ -544,6 +551,8 @@ impl App {
             self.state.remove_plugin_pane_records(plugin_pane_ids);
             self.state.remove_unattached_terminal_ids(terminal_ids);
             self.shutdown_detached_terminal_runtimes();
+            self.state.tab_scroll_follow_active = true;
+            self.state.refresh_tab_bar_view();
         }
     }
 }
@@ -657,6 +666,7 @@ mod tests {
         config::Config,
         workspace::Workspace,
     };
+    use ratatui::layout::Rect;
 
     fn app_with_workspace() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -793,6 +803,42 @@ mod tests {
         assert_eq!(
             second_pane.command,
             Some(vec!["sh".into(), "-c".into(), "true".into()])
+        );
+    }
+
+    #[tokio::test]
+    async fn layout_apply_unfocused_create_refreshes_hit_areas() {
+        let mut app = app_with_workspace();
+        // A full render seeds tab_bar_rect and the hit areas.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        assert_eq!(
+            app.state.view.tab_hit_areas.len(),
+            app.state.workspaces[0].tabs.len()
+        );
+
+        // Pure create (no tab_id) with focus=false must still refresh so the
+        // new tab appears in the cached hit areas without a render frame.
+        app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: None,
+                tab_id: None,
+                tab_label: Some("created".into()),
+                focus: false,
+                root: LayoutNode::Pane {
+                    pane: LayoutPane {
+                        label: Some("editor".into()),
+                        ..Default::default()
+                    },
+                },
+            },
+        );
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert_eq!(
+            app.state.view.tab_hit_areas.len(),
+            app.state.workspaces[0].tabs.len(),
+            "tab_hit_areas out of sync after unfocused layout create"
         );
     }
 

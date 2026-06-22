@@ -120,6 +120,11 @@ impl App {
                 if focus {
                     self.state.switch_workspace_tab(ws_idx, tab_idx);
                     self.state.mode = Mode::Terminal;
+                } else {
+                    // `switch_workspace_tab` refreshes the bar; the unfocused
+                    // path must refresh explicitly so the new tab appears in
+                    // the cached hit areas.
+                    self.state.refresh_tab_bar_view();
                 }
                 self.schedule_session_save();
                 let tab = self.tab_info(ws_idx, tab_idx).unwrap();
@@ -174,6 +179,8 @@ impl App {
         };
         tab.set_custom_name(params.label.clone());
         crate::logging::tab_renamed(&workspace_id, &tab_id);
+        // Hit areas size to the tab name; refresh so widths track the rename.
+        self.state.refresh_tab_bar_view();
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
             event: EventKind::TabRenamed,
@@ -226,6 +233,10 @@ impl App {
         }
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
+        // `close_tab` shifts the active tab; refresh so the bar re-centers on
+        // it and hit areas drop the closed tab.
+        self.state.tab_scroll_follow_active = true;
+        self.state.refresh_tab_bar_view();
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
             event: EventKind::TabClosed,
@@ -249,4 +260,97 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
 
 fn tab_not_found(id: String, tab_id: &str) -> String {
     encode_error(id, "tab_not_found", format!("tab {tab_id} not found"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::Config, workspace::Workspace};
+    use ratatui::layout::Rect;
+
+    fn app_with_test_workspace() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("tabs")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        // A full render populates tab_bar_rect so handler refreshes produce
+        // hit areas.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        app
+    }
+
+    fn assert_hit_areas_in_sync(app: &App) {
+        assert_eq!(
+            app.state.view.tab_hit_areas.len(),
+            app.state.workspaces[0].tabs.len(),
+            "tab_hit_areas out of sync with tab count"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_tab_create_unfocused_refreshes_hit_areas() {
+        // `handle_tab_create` spawns a PTY child whose reader needs a tokio
+        // runtime, hence `#[tokio::test]`.
+        let mut app = app_with_test_workspace();
+        assert_hit_areas_in_sync(&app);
+
+        app.handle_tab_create(
+            "req".into(),
+            TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: false,
+                label: Some("created".into()),
+                env: Default::default(),
+            },
+        );
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert_hit_areas_in_sync(&app);
+    }
+
+    #[test]
+    fn api_tab_rename_refreshes_hit_areas() {
+        let mut app = app_with_test_workspace();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let width_before = app.state.view.tab_hit_areas[0].width;
+
+        app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id,
+                label: "a-much-longer-tab-name".into(),
+            },
+        );
+
+        assert_hit_areas_in_sync(&app);
+        assert!(
+            app.state.view.tab_hit_areas[0].width > width_before,
+            "renamed tab hit area should widen: {} <= {width_before}",
+            app.state.view.tab_hit_areas[0].width
+        );
+    }
+
+    #[test]
+    fn api_tab_close_refreshes_hit_areas() {
+        let mut app = app_with_test_workspace();
+        app.state.workspaces[0].test_add_tab(Some("b"));
+        app.state.workspaces[0].test_add_tab(Some("c"));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let target = app.public_tab_id(0, 1).unwrap();
+
+        app.handle_tab_close("req".into(), TabTarget { tab_id: target });
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert_hit_areas_in_sync(&app);
+        assert!(app.state.tab_scroll_follow_active);
+    }
 }
