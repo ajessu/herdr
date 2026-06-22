@@ -247,6 +247,197 @@ pub struct CustomCommandKeybind {
     pub description: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Resolved per-mode binding tables
+// ---------------------------------------------------------------------------
+
+/// A single per-mode binding: one or more key combos that trigger it.
+pub type ModeBinding = Vec<KeyCombo>;
+
+fn resolve_binding_config(config: &BindingConfig) -> ModeBinding {
+    config
+        .values()
+        .iter()
+        .filter_map(|raw| {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return None;
+            }
+            parse_key_combo(raw)
+        })
+        .collect()
+}
+
+pub fn mode_binding_matches(binding: &ModeBinding, key: TerminalKey) -> bool {
+    binding
+        .iter()
+        .any(|&combo| terminal_key_matches_combo(key, combo))
+}
+
+/// Resolved Pane mode bindings.
+#[derive(Debug, Clone, Default)]
+pub struct PaneModeBindings {
+    pub focus_left: ModeBinding,
+    pub focus_down: ModeBinding,
+    pub focus_up: ModeBinding,
+    pub focus_right: ModeBinding,
+    pub new_pane: ModeBinding,
+    pub split_down: ModeBinding,
+    pub split_right: ModeBinding,
+    pub stack: ModeBinding,
+    pub close: ModeBinding,
+    pub zoom: ModeBinding,
+    pub toggle_float: ModeBinding,
+    pub rename: ModeBinding,
+    pub cycle: ModeBinding,
+}
+
+impl PaneModeBindings {
+    fn from_config(c: &super::model::PaneModeKeysConfig) -> Self {
+        Self {
+            focus_left: resolve_binding_config(&c.focus_left),
+            focus_down: resolve_binding_config(&c.focus_down),
+            focus_up: resolve_binding_config(&c.focus_up),
+            focus_right: resolve_binding_config(&c.focus_right),
+            new_pane: resolve_binding_config(&c.new_pane),
+            split_down: resolve_binding_config(&c.split_down),
+            split_right: resolve_binding_config(&c.split_right),
+            stack: resolve_binding_config(&c.stack),
+            close: resolve_binding_config(&c.close),
+            zoom: resolve_binding_config(&c.zoom),
+            toggle_float: resolve_binding_config(&c.toggle_float),
+            rename: resolve_binding_config(&c.rename),
+            cycle: resolve_binding_config(&c.cycle),
+        }
+    }
+}
+
+/// Resolved Tab mode bindings.
+#[derive(Debug, Clone, Default)]
+pub struct TabModeBindings {
+    pub previous: ModeBinding,
+    pub next: ModeBinding,
+    pub new: ModeBinding,
+    pub close: ModeBinding,
+    pub rename: ModeBinding,
+    pub break_to_tab: ModeBinding,
+    pub toggle: ModeBinding,
+}
+
+impl TabModeBindings {
+    fn from_config(c: &super::model::TabModeKeysConfig) -> Self {
+        Self {
+            previous: resolve_binding_config(&c.previous),
+            next: resolve_binding_config(&c.next),
+            new: resolve_binding_config(&c.new),
+            close: resolve_binding_config(&c.close),
+            rename: resolve_binding_config(&c.rename),
+            break_to_tab: resolve_binding_config(&c.break_to_tab),
+            toggle: resolve_binding_config(&c.toggle),
+        }
+    }
+}
+
+/// Resolved Resize mode bindings.
+#[derive(Debug, Clone, Default)]
+pub struct ResizeModeBindings {
+    pub increase_left: ModeBinding,
+    pub increase_down: ModeBinding,
+    pub increase_up: ModeBinding,
+    pub increase_right: ModeBinding,
+    pub decrease_left: ModeBinding,
+    pub decrease_down: ModeBinding,
+    pub decrease_up: ModeBinding,
+    pub decrease_right: ModeBinding,
+    pub increase: ModeBinding,
+    pub decrease: ModeBinding,
+}
+
+impl ResizeModeBindings {
+    fn from_config(c: &super::model::ResizeModeKeysConfig) -> Self {
+        Self {
+            increase_left: resolve_binding_config(&c.increase_left),
+            increase_down: resolve_binding_config(&c.increase_down),
+            increase_up: resolve_binding_config(&c.increase_up),
+            increase_right: resolve_binding_config(&c.increase_right),
+            decrease_left: resolve_binding_config(&c.decrease_left),
+            decrease_down: resolve_binding_config(&c.decrease_down),
+            decrease_up: resolve_binding_config(&c.decrease_up),
+            decrease_right: resolve_binding_config(&c.decrease_right),
+            increase: resolve_binding_config(&c.increase),
+            decrease: resolve_binding_config(&c.decrease),
+        }
+    }
+}
+
+/// Resolved Move mode bindings.
+#[derive(Debug, Clone, Default)]
+pub struct MoveModeBindings {
+    pub move_left: ModeBinding,
+    pub move_down: ModeBinding,
+    pub move_up: ModeBinding,
+    pub move_right: ModeBinding,
+    pub cycle_forward: ModeBinding,
+    pub cycle_backward: ModeBinding,
+}
+
+impl MoveModeBindings {
+    fn from_config(c: &super::model::MoveModeKeysConfig) -> Self {
+        Self {
+            move_left: resolve_binding_config(&c.move_left),
+            move_down: resolve_binding_config(&c.move_down),
+            move_up: resolve_binding_config(&c.move_up),
+            move_right: resolve_binding_config(&c.move_right),
+            cycle_forward: resolve_binding_config(&c.cycle_forward),
+            cycle_backward: resolve_binding_config(&c.cycle_backward),
+        }
+    }
+}
+
+/// Resolved Session mode bindings.
+#[derive(Debug, Clone, Default)]
+pub struct SessionModeBindings {
+    pub workspace_up: ModeBinding,
+    pub workspace_down: ModeBinding,
+    pub focus_left: ModeBinding,
+    pub focus_right: ModeBinding,
+    pub cycle: ModeBinding,
+    pub goto: ModeBinding,
+    pub workspace_picker: ModeBinding,
+    pub new_workspace: ModeBinding,
+    pub new_worktree: ModeBinding,
+    pub rename_workspace: ModeBinding,
+    pub close_workspace: ModeBinding,
+    pub settings: ModeBinding,
+    pub help: ModeBinding,
+    pub detach: ModeBinding,
+    pub previous_agent: ModeBinding,
+    pub next_agent: ModeBinding,
+}
+
+impl SessionModeBindings {
+    fn from_config(c: &super::model::SessionModeKeysConfig) -> Self {
+        Self {
+            workspace_up: resolve_binding_config(&c.workspace_up),
+            workspace_down: resolve_binding_config(&c.workspace_down),
+            focus_left: resolve_binding_config(&c.focus_left),
+            focus_right: resolve_binding_config(&c.focus_right),
+            cycle: resolve_binding_config(&c.cycle),
+            goto: resolve_binding_config(&c.goto),
+            workspace_picker: resolve_binding_config(&c.workspace_picker),
+            new_workspace: resolve_binding_config(&c.new_workspace),
+            new_worktree: resolve_binding_config(&c.new_worktree),
+            rename_workspace: resolve_binding_config(&c.rename_workspace),
+            close_workspace: resolve_binding_config(&c.close_workspace),
+            settings: resolve_binding_config(&c.settings),
+            help: resolve_binding_config(&c.help),
+            detach: resolve_binding_config(&c.detach),
+            previous_agent: resolve_binding_config(&c.previous_agent),
+            next_agent: resolve_binding_config(&c.next_agent),
+        }
+    }
+}
+
 /// Parsed keybinds for Herdr actions.
 #[derive(Debug, Clone)]
 pub struct NavigateKeybinds {
@@ -355,6 +546,12 @@ pub struct Keybinds {
     pub default_mode: DefaultMode,
     /// Resolved, validated mode-entry key combos for the modal system.
     pub mode_entry: ModeEntryKeys,
+    /// Resolved per-mode binding tables for the modal system resolvers.
+    pub mode_pane: PaneModeBindings,
+    pub mode_tab: TabModeBindings,
+    pub mode_resize: ResizeModeBindings,
+    pub mode_move: MoveModeBindings,
+    pub mode_session: SessionModeBindings,
 }
 
 impl Default for Keybinds {
@@ -729,6 +926,11 @@ impl Config {
             custom_commands: Vec::new(),
             default_mode: DefaultMode::default(),
             mode_entry: ModeEntryKeys::default(),
+            mode_pane: PaneModeBindings::default(),
+            mode_tab: TabModeBindings::default(),
+            mode_resize: ResizeModeBindings::default(),
+            mode_move: MoveModeBindings::default(),
+            mode_session: SessionModeBindings::default(),
         };
 
         append_legacy_indexed_bindings(
@@ -797,6 +999,13 @@ impl Config {
         let (default_mode, mode_entry) = validate_modal_keys(&self.keys, prefix, &mut diagnostics);
         keybinds.default_mode = default_mode;
         keybinds.mode_entry = mode_entry;
+
+        // Resolve per-mode binding tables for the pure mode-action resolvers.
+        keybinds.mode_pane = PaneModeBindings::from_config(&self.keys.pane);
+        keybinds.mode_tab = TabModeBindings::from_config(&self.keys.tab);
+        keybinds.mode_resize = ResizeModeBindings::from_config(&self.keys.resize);
+        keybinds.mode_move = MoveModeBindings::from_config(&self.keys.move_);
+        keybinds.mode_session = SessionModeBindings::from_config(&self.keys.session);
 
         (prefix_diag, prefix, diagnostics, keybinds)
     }

@@ -209,7 +209,10 @@ mod tests {
         state.active = Some(0);
         state.mode = Mode::Navigate;
 
-        handle_navigate_key(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
 
         assert_eq!(state.mode, Mode::Terminal);
     }
@@ -220,7 +223,10 @@ mod tests {
         state.active = None;
         state.mode = Mode::Navigate;
 
-        handle_navigate_key(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
 
         assert_eq!(state.mode, Mode::Navigate);
     }
@@ -536,6 +542,9 @@ mod tests {
         // With default config and no workspaces, initial mode is either
         // Onboarding (first run) or Navigate (after onboarding dismissed).
         // The exact mode depends on whether onboarding config file exists.
-        assert!(matches!(app.state.mode, Mode::Onboarding | Mode::Navigate | Mode::Locked));
+        assert!(matches!(
+            app.state.mode,
+            Mode::Onboarding | Mode::Navigate | Mode::Locked
+        ));
     }
 }

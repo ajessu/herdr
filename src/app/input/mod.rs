@@ -48,7 +48,8 @@ pub(crate) use self::{
     modal::{
         handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
         handle_keybind_help_key, handle_navigator_key, handle_rename_key, handle_resize_key,
-        insert_navigator_search_text, insert_rename_input_text,
+        insert_navigator_search_text, insert_rename_input_text, move_mode_action, pane_mode_action,
+        resize_mode_action, session_mode_action, tab_mode_action, ModeAction,
     },
     navigate::terminal_direct_navigation_action,
     settings::open_settings_at,
@@ -115,10 +116,7 @@ fn check_mode_entry(state: &AppState, key: TerminalKey) -> Option<Mode> {
 }
 
 /// Shared bindings active in all non-Locked modes (except Copy/Prefix).
-fn resolve_shared_binding(
-    state: &AppState,
-    key: TerminalKey,
-) -> Option<navigate::NavigateAction> {
+fn resolve_shared_binding(state: &AppState, key: TerminalKey) -> Option<navigate::NavigateAction> {
     use navigate::NavigateAction;
     let kb = &state.keybinds;
 
@@ -167,8 +165,6 @@ fn resolve_shared_binding(
     None
 }
 
-fn run_mode_action(_state: &mut AppState, _key: TerminalKey) {}
-
 // ---------------------------------------------------------------------------
 // Key handling
 // ---------------------------------------------------------------------------
@@ -195,23 +191,54 @@ impl App {
 
         // Overlay modes get exclusive dispatch — no shared/mode-entry interception.
         match self.state.mode {
-            Mode::Onboarding => { self.handle_onboarding_key(key_event); return; }
-            Mode::ReleaseNotes => { self.handle_release_notes_key(key_event); return; }
-            Mode::ProductAnnouncement => { self.handle_product_announcement_key(key_event); return; }
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                handle_rename_key(&mut self.state, key_event); return;
+            Mode::Onboarding => {
+                self.handle_onboarding_key(key_event);
+                return;
             }
-            Mode::NewLinkedWorktree => { self.handle_worktree_create_key(key_event); return; }
-            Mode::OpenExistingWorktree => { self.handle_worktree_open_key(key_event); return; }
-            Mode::ConfirmRemoveWorktree => { self.handle_worktree_remove_key(key_event); return; }
-            Mode::ConfirmClose => { handle_confirm_close_key(&mut self.state, key_event); return; }
+            Mode::ReleaseNotes => {
+                self.handle_release_notes_key(key_event);
+                return;
+            }
+            Mode::ProductAnnouncement => {
+                self.handle_product_announcement_key(key_event);
+                return;
+            }
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+                handle_rename_key(&mut self.state, key_event);
+                return;
+            }
+            Mode::NewLinkedWorktree => {
+                self.handle_worktree_create_key(key_event);
+                return;
+            }
+            Mode::OpenExistingWorktree => {
+                self.handle_worktree_open_key(key_event);
+                return;
+            }
+            Mode::ConfirmRemoveWorktree => {
+                self.handle_worktree_remove_key(key_event);
+                return;
+            }
+            Mode::ConfirmClose => {
+                handle_confirm_close_key(&mut self.state, key_event);
+                return;
+            }
             Mode::ContextMenu => {
                 handle_context_menu_key(&mut self.state, &mut self.terminal_runtimes, key_event);
                 return;
             }
-            Mode::Settings => { self.handle_settings_key(key_event); return; }
-            Mode::GlobalMenu => { handle_global_menu_key(&mut self.state, key_event); return; }
-            Mode::KeybindHelp => { handle_keybind_help_key(&mut self.state, key_event); return; }
+            Mode::Settings => {
+                self.handle_settings_key(key_event);
+                return;
+            }
+            Mode::GlobalMenu => {
+                handle_global_menu_key(&mut self.state, key_event);
+                return;
+            }
+            Mode::KeybindHelp => {
+                handle_keybind_help_key(&mut self.state, key_event);
+                return;
+            }
             Mode::Navigator => {
                 handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
                 return;
@@ -242,9 +269,8 @@ impl App {
             Mode::Prefix => self.handle_prefix_key(key),
             Mode::Navigate | Mode::Session => self.handle_navigate_key(key),
             Mode::Copy => self.handle_copy_mode_key(key),
-            Mode::Resize => handle_resize_key(&mut self.state, key),
-            Mode::Pane | Mode::Tab | Mode::Move => {
-                run_mode_action(&mut self.state, key);
+            Mode::Pane | Mode::Tab | Mode::Resize | Mode::Move => {
+                self.run_mode_action(key);
             }
             Mode::Locked => unreachable!(),
             _ => {}
@@ -272,6 +298,55 @@ impl App {
             action,
             navigate::ActionContext::Direct,
         );
+    }
+
+    fn run_mode_action(&mut self, key: TerminalKey) {
+        use crate::layout::NavDirection;
+
+        let action = match self.state.mode {
+            Mode::Pane => pane_mode_action(&self.state, key),
+            Mode::Tab => tab_mode_action(&self.state, key),
+            Mode::Resize => resize_mode_action(&self.state, key),
+            Mode::Move => move_mode_action(&self.state, key),
+            _ => ModeAction::None,
+        };
+
+        match action {
+            ModeAction::ExitToNormal => {
+                self.state.mode = Mode::normal_mode(self.state.active.is_some());
+            }
+            ModeAction::Navigate(nav_action) => {
+                navigate::execute_navigate_action_in_context(
+                    &mut self.state,
+                    &mut self.terminal_runtimes,
+                    nav_action,
+                    navigate::ActionContext::Direct,
+                );
+            }
+            ModeAction::SidebarNavigate(dir) => match dir {
+                NavDirection::Up => {
+                    self.state.move_selected_workspace_by_visible_delta(-1);
+                }
+                NavDirection::Down => {
+                    self.state.move_selected_workspace_by_visible_delta(1);
+                }
+                NavDirection::Left => {
+                    self.state.navigate_pane(NavDirection::Left);
+                }
+                NavDirection::Right => {
+                    self.state.navigate_pane(NavDirection::Right);
+                }
+            },
+            ModeAction::SidebarConfirm => {
+                if !self.state.workspaces.is_empty() {
+                    self.state.switch_workspace(self.state.selected);
+                }
+            }
+            ModeAction::EnterMode(mode) => {
+                self.state.mode = mode;
+            }
+            ModeAction::None => {}
+        }
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {

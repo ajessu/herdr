@@ -5,9 +5,12 @@ use crate::{
     app::state::{
         AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
     },
+    config::mode_binding_matches,
     input::TerminalKey,
     layout::NavDirection,
 };
+
+use super::navigate::NavigateAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModalAction {
@@ -920,6 +923,288 @@ impl AppState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ModeAction and pure per-mode resolvers
+// ---------------------------------------------------------------------------
+
+/// A resolved, mode-agnostic action returned by per-mode key resolvers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModeAction {
+    /// Dispatch through the existing runtime-aware NavigateAction path.
+    Navigate(NavigateAction),
+    /// Sidebar movement (workspace selection up/down, pane focus left/right).
+    SidebarNavigate(NavDirection),
+    /// Confirm sidebar selection (switch to `state.selected` workspace).
+    SidebarConfirm,
+    /// Switch to a different mode.
+    EnterMode(Mode),
+    /// Return to Normal (Terminal or Navigate depending on workspace state).
+    ExitToNormal,
+    /// Unrecognized key — deliberate swallow, no PTY forward.
+    None,
+}
+
+/// Resolve a key press in Pane mode to a `ModeAction`.
+pub(crate) fn pane_mode_action(state: &AppState, key: TerminalKey) -> ModeAction {
+    let ke = key.as_key_event();
+    if ke.code == KeyCode::Esc || ke.code == KeyCode::Enter {
+        return ModeAction::ExitToNormal;
+    }
+    if let Some(combo) = state.keybinds.mode_entry.pane {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return ModeAction::ExitToNormal;
+        }
+    }
+
+    let b = &state.keybinds.mode_pane;
+    if mode_binding_matches(&b.focus_left, key) {
+        return ModeAction::Navigate(NavigateAction::FocusPaneLeft);
+    }
+    if mode_binding_matches(&b.focus_down, key) {
+        return ModeAction::Navigate(NavigateAction::FocusPaneDown);
+    }
+    if mode_binding_matches(&b.focus_up, key) {
+        return ModeAction::Navigate(NavigateAction::FocusPaneUp);
+    }
+    if mode_binding_matches(&b.focus_right, key) {
+        return ModeAction::Navigate(NavigateAction::FocusPaneRight);
+    }
+    if mode_binding_matches(&b.new_pane, key) {
+        return ModeAction::Navigate(NavigateAction::SplitAuto);
+    }
+    if mode_binding_matches(&b.split_down, key) {
+        return ModeAction::Navigate(NavigateAction::SplitHorizontal);
+    }
+    if mode_binding_matches(&b.split_right, key) {
+        return ModeAction::Navigate(NavigateAction::SplitVertical);
+    }
+    if mode_binding_matches(&b.stack, key) {
+        return ModeAction::Navigate(NavigateAction::StackPane);
+    }
+    if mode_binding_matches(&b.close, key) {
+        return ModeAction::Navigate(NavigateAction::ClosePane);
+    }
+    if mode_binding_matches(&b.zoom, key) {
+        return ModeAction::Navigate(NavigateAction::Zoom);
+    }
+    if mode_binding_matches(&b.toggle_float, key) {
+        return ModeAction::Navigate(NavigateAction::ToggleFloating);
+    }
+    if mode_binding_matches(&b.rename, key) {
+        return ModeAction::Navigate(NavigateAction::RenamePane);
+    }
+    if mode_binding_matches(&b.cycle, key) {
+        return ModeAction::Navigate(NavigateAction::CyclePaneNext);
+    }
+    ModeAction::None
+}
+
+/// Resolve a key press in Tab mode to a `ModeAction`.
+pub(crate) fn tab_mode_action(state: &AppState, key: TerminalKey) -> ModeAction {
+    let ke = key.as_key_event();
+    if ke.code == KeyCode::Esc || ke.code == KeyCode::Enter {
+        return ModeAction::ExitToNormal;
+    }
+    if let Some(combo) = state.keybinds.mode_entry.tab {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return ModeAction::ExitToNormal;
+        }
+    }
+
+    // 1-9 jump to tab N
+    if ke.modifiers.is_empty() {
+        if let KeyCode::Char(c @ '1'..='9') = ke.code {
+            let idx = (c as usize) - ('1' as usize);
+            return ModeAction::Navigate(NavigateAction::SwitchTab(idx));
+        }
+    }
+
+    let b = &state.keybinds.mode_tab;
+    if mode_binding_matches(&b.previous, key) {
+        return ModeAction::Navigate(NavigateAction::PreviousTab);
+    }
+    if mode_binding_matches(&b.next, key) {
+        return ModeAction::Navigate(NavigateAction::NextTab);
+    }
+    if mode_binding_matches(&b.new, key) {
+        return ModeAction::Navigate(NavigateAction::NewTab);
+    }
+    if mode_binding_matches(&b.close, key) {
+        return ModeAction::Navigate(NavigateAction::CloseTab);
+    }
+    if mode_binding_matches(&b.rename, key) {
+        return ModeAction::Navigate(NavigateAction::RenameTab);
+    }
+    if mode_binding_matches(&b.break_to_tab, key) {
+        return ModeAction::Navigate(NavigateAction::BreakPaneToTab);
+    }
+    if mode_binding_matches(&b.toggle, key) {
+        return ModeAction::Navigate(NavigateAction::LastPane);
+    }
+    ModeAction::None
+}
+
+/// Resolve a key press in Resize mode to a `ModeAction`.
+pub(crate) fn resize_mode_action(state: &AppState, key: TerminalKey) -> ModeAction {
+    let ke = key.as_key_event();
+    if ke.code == KeyCode::Esc || ke.code == KeyCode::Enter {
+        return ModeAction::ExitToNormal;
+    }
+    if let Some(combo) = state.keybinds.mode_entry.resize {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return ModeAction::ExitToNormal;
+        }
+    }
+
+    let b = &state.keybinds.mode_resize;
+    if mode_binding_matches(&b.increase_left, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeIncrease(NavDirection::Left));
+    }
+    if mode_binding_matches(&b.increase_down, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeIncrease(NavDirection::Down));
+    }
+    if mode_binding_matches(&b.increase_up, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeIncrease(NavDirection::Up));
+    }
+    if mode_binding_matches(&b.increase_right, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeIncrease(NavDirection::Right));
+    }
+    if mode_binding_matches(&b.decrease_left, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeDecrease(NavDirection::Left));
+    }
+    if mode_binding_matches(&b.decrease_down, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeDecrease(NavDirection::Down));
+    }
+    if mode_binding_matches(&b.decrease_up, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeDecrease(NavDirection::Up));
+    }
+    if mode_binding_matches(&b.decrease_right, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeDecrease(NavDirection::Right));
+    }
+    if mode_binding_matches(&b.increase, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeGrow);
+    }
+    if mode_binding_matches(&b.decrease, key) {
+        return ModeAction::Navigate(NavigateAction::ResizeShrink);
+    }
+    ModeAction::None
+}
+
+/// Resolve a key press in Move mode to a `ModeAction`.
+pub(crate) fn move_mode_action(state: &AppState, key: TerminalKey) -> ModeAction {
+    let ke = key.as_key_event();
+    if ke.code == KeyCode::Esc || ke.code == KeyCode::Enter {
+        return ModeAction::ExitToNormal;
+    }
+    if let Some(combo) = state.keybinds.mode_entry.move_ {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return ModeAction::ExitToNormal;
+        }
+    }
+
+    let b = &state.keybinds.mode_move;
+    if mode_binding_matches(&b.move_left, key) {
+        return ModeAction::Navigate(NavigateAction::SwapPaneLeft);
+    }
+    if mode_binding_matches(&b.move_down, key) {
+        return ModeAction::Navigate(NavigateAction::SwapPaneDown);
+    }
+    if mode_binding_matches(&b.move_up, key) {
+        return ModeAction::Navigate(NavigateAction::SwapPaneUp);
+    }
+    if mode_binding_matches(&b.move_right, key) {
+        return ModeAction::Navigate(NavigateAction::SwapPaneRight);
+    }
+    if mode_binding_matches(&b.cycle_forward, key) {
+        return ModeAction::Navigate(NavigateAction::CyclePaneNext);
+    }
+    if mode_binding_matches(&b.cycle_backward, key) {
+        return ModeAction::Navigate(NavigateAction::CyclePanePrevious);
+    }
+    ModeAction::None
+}
+
+/// Resolve a key press in Session/Navigate mode to a `ModeAction`.
+/// Shared between `Mode::Session` and `Mode::Navigate`.
+pub(crate) fn session_mode_action(state: &AppState, key: TerminalKey) -> ModeAction {
+    let ke = key.as_key_event();
+    if ke.code == KeyCode::Esc {
+        return ModeAction::ExitToNormal;
+    }
+    if let Some(combo) = state.keybinds.mode_entry.session {
+        if crate::config::terminal_key_matches_combo(key, combo) {
+            return ModeAction::ExitToNormal;
+        }
+    }
+
+    // Enter confirms selection (the executor interprets per-mode: Navigate
+    // confirms+exits, Session confirms+stays).
+    if ke.code == KeyCode::Enter {
+        return ModeAction::SidebarConfirm;
+    }
+
+    // 1-9 jump to tab N
+    if ke.modifiers.is_empty() {
+        if let KeyCode::Char(c @ '1'..='9') = ke.code {
+            let idx = (c as usize) - ('1' as usize);
+            return ModeAction::Navigate(NavigateAction::SwitchTab(idx));
+        }
+    }
+
+    let b = &state.keybinds.mode_session;
+    // Sidebar navigation (pure — no runtime needed)
+    if mode_binding_matches(&b.workspace_up, key) {
+        return ModeAction::SidebarNavigate(NavDirection::Up);
+    }
+    if mode_binding_matches(&b.workspace_down, key) {
+        return ModeAction::SidebarNavigate(NavDirection::Down);
+    }
+    if mode_binding_matches(&b.focus_left, key) {
+        return ModeAction::SidebarNavigate(NavDirection::Left);
+    }
+    if mode_binding_matches(&b.focus_right, key) {
+        return ModeAction::SidebarNavigate(NavDirection::Right);
+    }
+    if mode_binding_matches(&b.cycle, key) {
+        return ModeAction::Navigate(NavigateAction::CyclePaneNext);
+    }
+    // Runtime-touching actions resolve to Navigate(NavigateAction) for the executor
+    if mode_binding_matches(&b.goto, key) {
+        return ModeAction::Navigate(NavigateAction::OpenNavigator);
+    }
+    if mode_binding_matches(&b.workspace_picker, key) {
+        return ModeAction::Navigate(NavigateAction::WorkspacePicker);
+    }
+    if mode_binding_matches(&b.new_workspace, key) {
+        return ModeAction::Navigate(NavigateAction::NewWorkspace);
+    }
+    if mode_binding_matches(&b.new_worktree, key) {
+        return ModeAction::Navigate(NavigateAction::NewWorktree);
+    }
+    if mode_binding_matches(&b.rename_workspace, key) {
+        return ModeAction::Navigate(NavigateAction::RenameWorkspace);
+    }
+    if mode_binding_matches(&b.close_workspace, key) {
+        return ModeAction::Navigate(NavigateAction::CloseWorkspace);
+    }
+    if mode_binding_matches(&b.settings, key) {
+        return ModeAction::Navigate(NavigateAction::Settings);
+    }
+    if mode_binding_matches(&b.help, key) {
+        return ModeAction::Navigate(NavigateAction::Help);
+    }
+    if mode_binding_matches(&b.detach, key) {
+        return ModeAction::Navigate(NavigateAction::Detach);
+    }
+    if mode_binding_matches(&b.previous_agent, key) {
+        return ModeAction::Navigate(NavigateAction::PreviousAgent);
+    }
+    if mode_binding_matches(&b.next_agent, key) {
+        return ModeAction::Navigate(NavigateAction::NextAgent);
+    }
+    ModeAction::None
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1486,5 +1771,543 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // ModeAction resolver tests
+    // -----------------------------------------------------------------------
+
+    fn key(code: KeyCode) -> TerminalKey {
+        TerminalKey::new(code, KeyModifiers::empty())
+    }
+
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> TerminalKey {
+        TerminalKey::new(code, mods)
+    }
+
+    // -- Pane mode resolver --
+
+    #[test]
+    fn pane_mode_esc_exits() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Esc)),
+            ModeAction::ExitToNormal
+        );
+    }
+
+    #[test]
+    fn pane_mode_enter_exits() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Enter)),
+            ModeAction::ExitToNormal
+        );
+    }
+
+    #[test]
+    fn pane_mode_self_entry_key_exits() {
+        let state = AppState::test_new();
+        // Default entry key for pane is Ctrl+p
+        let k = key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(pane_mode_action(&state, k), ModeAction::ExitToNormal);
+    }
+
+    #[test]
+    fn pane_mode_h_focuses_left() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Char('h'))),
+            ModeAction::Navigate(NavigateAction::FocusPaneLeft)
+        );
+    }
+
+    #[test]
+    fn pane_mode_j_focuses_down() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Char('j'))),
+            ModeAction::Navigate(NavigateAction::FocusPaneDown)
+        );
+    }
+
+    #[test]
+    fn pane_mode_left_arrow_focuses_left() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Left)),
+            ModeAction::Navigate(NavigateAction::FocusPaneLeft)
+        );
+    }
+
+    #[test]
+    fn pane_mode_n_splits_auto() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Char('n'))),
+            ModeAction::Navigate(NavigateAction::SplitAuto)
+        );
+    }
+
+    #[test]
+    fn pane_mode_x_closes() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Char('x'))),
+            ModeAction::Navigate(NavigateAction::ClosePane)
+        );
+    }
+
+    #[test]
+    fn pane_mode_f_zooms() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Char('f'))),
+            ModeAction::Navigate(NavigateAction::Zoom)
+        );
+    }
+
+    #[test]
+    fn pane_mode_z_zooms() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Char('z'))),
+            ModeAction::Navigate(NavigateAction::Zoom)
+        );
+    }
+
+    #[test]
+    fn pane_mode_unrecognized_returns_none() {
+        let state = AppState::test_new();
+        assert_eq!(
+            pane_mode_action(&state, key(KeyCode::Char('q'))),
+            ModeAction::None
+        );
+    }
+
+    // -- Tab mode resolver --
+
+    #[test]
+    fn tab_mode_esc_exits() {
+        let state = AppState::test_new();
+        assert_eq!(
+            tab_mode_action(&state, key(KeyCode::Esc)),
+            ModeAction::ExitToNormal
+        );
+    }
+
+    #[test]
+    fn tab_mode_enter_exits() {
+        let state = AppState::test_new();
+        assert_eq!(
+            tab_mode_action(&state, key(KeyCode::Enter)),
+            ModeAction::ExitToNormal
+        );
+    }
+
+    #[test]
+    fn tab_mode_self_entry_key_exits() {
+        let state = AppState::test_new();
+        let k = key_mod(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(tab_mode_action(&state, k), ModeAction::ExitToNormal);
+    }
+
+    #[test]
+    fn tab_mode_h_previous_tab() {
+        let state = AppState::test_new();
+        assert_eq!(
+            tab_mode_action(&state, key(KeyCode::Char('h'))),
+            ModeAction::Navigate(NavigateAction::PreviousTab)
+        );
+    }
+
+    #[test]
+    fn tab_mode_l_next_tab() {
+        let state = AppState::test_new();
+        assert_eq!(
+            tab_mode_action(&state, key(KeyCode::Char('l'))),
+            ModeAction::Navigate(NavigateAction::NextTab)
+        );
+    }
+
+    #[test]
+    fn tab_mode_digit_switches_tab() {
+        let state = AppState::test_new();
+        assert_eq!(
+            tab_mode_action(&state, key(KeyCode::Char('3'))),
+            ModeAction::Navigate(NavigateAction::SwitchTab(2))
+        );
+    }
+
+    #[test]
+    fn tab_mode_n_new_tab() {
+        let state = AppState::test_new();
+        assert_eq!(
+            tab_mode_action(&state, key(KeyCode::Char('n'))),
+            ModeAction::Navigate(NavigateAction::NewTab)
+        );
+    }
+
+    #[test]
+    fn tab_mode_unrecognized_returns_none() {
+        let state = AppState::test_new();
+        assert_eq!(
+            tab_mode_action(&state, key(KeyCode::Char('q'))),
+            ModeAction::None
+        );
+    }
+
+    // -- Resize mode resolver --
+
+    #[test]
+    fn resize_mode_esc_exits() {
+        let state = AppState::test_new();
+        assert_eq!(
+            resize_mode_action(&state, key(KeyCode::Esc)),
+            ModeAction::ExitToNormal
+        );
+    }
+
+    #[test]
+    fn resize_mode_enter_exits() {
+        let state = AppState::test_new();
+        assert_eq!(
+            resize_mode_action(&state, key(KeyCode::Enter)),
+            ModeAction::ExitToNormal
+        );
+    }
+
+    #[test]
+    fn resize_mode_self_entry_key_exits() {
+        let state = AppState::test_new();
+        let k = key_mod(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_eq!(resize_mode_action(&state, k), ModeAction::ExitToNormal);
+    }
+
+    #[test]
+    fn resize_mode_h_increases_left() {
+        let state = AppState::test_new();
+        assert_eq!(
+            resize_mode_action(&state, key(KeyCode::Char('h'))),
+            ModeAction::Navigate(NavigateAction::ResizeIncrease(NavDirection::Left))
+        );
+    }
+
+    #[test]
+    fn resize_mode_j_increases_down() {
+        let state = AppState::test_new();
+        assert_eq!(
+            resize_mode_action(&state, key(KeyCode::Char('j'))),
+            ModeAction::Navigate(NavigateAction::ResizeIncrease(NavDirection::Down))
+        );
+    }
+
+    #[test]
+    fn resize_mode_shift_h_decreases_left() {
+        let state = AppState::test_new();
+        // 'H' is Shift+h; parse_key_combo("H") produces (Char('h'), SHIFT)
+        let k = key_mod(KeyCode::Char('h'), KeyModifiers::SHIFT);
+        assert_eq!(
+            resize_mode_action(&state, k),
+            ModeAction::Navigate(NavigateAction::ResizeDecrease(NavDirection::Left))
+        );
+    }
+
+    #[test]
+    fn resize_mode_shift_l_decreases_right() {
+        let state = AppState::test_new();
+        let k = key_mod(KeyCode::Char('l'), KeyModifiers::SHIFT);
+        assert_eq!(
+            resize_mode_action(&state, k),
+            ModeAction::Navigate(NavigateAction::ResizeDecrease(NavDirection::Right))
+        );
+    }
+
+    #[test]
+    fn resize_mode_plus_increases() {
+        let state = AppState::test_new();
+        assert_eq!(
+            resize_mode_action(&state, key(KeyCode::Char('+'))),
+            ModeAction::Navigate(NavigateAction::ResizeGrow)
+        );
+    }
+
+    #[test]
+    fn resize_mode_equals_increases() {
+        let state = AppState::test_new();
+        assert_eq!(
+            resize_mode_action(&state, key(KeyCode::Char('='))),
+            ModeAction::Navigate(NavigateAction::ResizeGrow)
+        );
+    }
+
+    #[test]
+    fn resize_mode_minus_decreases() {
+        let state = AppState::test_new();
+        assert_eq!(
+            resize_mode_action(&state, key(KeyCode::Char('-'))),
+            ModeAction::Navigate(NavigateAction::ResizeShrink)
+        );
+    }
+
+    #[test]
+    fn resize_mode_unrecognized_returns_none() {
+        let state = AppState::test_new();
+        assert_eq!(
+            resize_mode_action(&state, key(KeyCode::Char('q'))),
+            ModeAction::None
+        );
+    }
+
+    // -- Move mode resolver --
+
+    #[test]
+    fn move_mode_esc_exits() {
+        let state = AppState::test_new();
+        assert_eq!(
+            move_mode_action(&state, key(KeyCode::Esc)),
+            ModeAction::ExitToNormal
+        );
+    }
+
+    #[test]
+    fn move_mode_enter_exits() {
+        let state = AppState::test_new();
+        assert_eq!(
+            move_mode_action(&state, key(KeyCode::Enter)),
+            ModeAction::ExitToNormal
+        );
+    }
+
+    #[test]
+    fn move_mode_self_entry_key_exits() {
+        let state = AppState::test_new();
+        let k = key_mod(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert_eq!(move_mode_action(&state, k), ModeAction::ExitToNormal);
+    }
+
+    #[test]
+    fn move_mode_h_swaps_left() {
+        let state = AppState::test_new();
+        assert_eq!(
+            move_mode_action(&state, key(KeyCode::Char('h'))),
+            ModeAction::Navigate(NavigateAction::SwapPaneLeft)
+        );
+    }
+
+    #[test]
+    fn move_mode_j_swaps_down() {
+        let state = AppState::test_new();
+        assert_eq!(
+            move_mode_action(&state, key(KeyCode::Char('j'))),
+            ModeAction::Navigate(NavigateAction::SwapPaneDown)
+        );
+    }
+
+    #[test]
+    fn move_mode_n_cycles_forward() {
+        let state = AppState::test_new();
+        assert_eq!(
+            move_mode_action(&state, key(KeyCode::Char('n'))),
+            ModeAction::Navigate(NavigateAction::CyclePaneNext)
+        );
+    }
+
+    #[test]
+    fn move_mode_p_cycles_backward() {
+        let state = AppState::test_new();
+        assert_eq!(
+            move_mode_action(&state, key(KeyCode::Char('p'))),
+            ModeAction::Navigate(NavigateAction::CyclePanePrevious)
+        );
+    }
+
+    #[test]
+    fn move_mode_unrecognized_returns_none() {
+        let state = AppState::test_new();
+        assert_eq!(
+            move_mode_action(&state, key(KeyCode::Char('q'))),
+            ModeAction::None
+        );
+    }
+
+    // -- Session mode resolver --
+
+    #[test]
+    fn session_mode_esc_exits() {
+        let state = AppState::test_new();
+        assert_eq!(
+            session_mode_action(&state, key(KeyCode::Esc)),
+            ModeAction::ExitToNormal
+        );
+    }
+
+    #[test]
+    fn session_mode_self_entry_key_exits() {
+        let state = AppState::test_new();
+        let k = key_mod(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert_eq!(session_mode_action(&state, k), ModeAction::ExitToNormal);
+    }
+
+    #[test]
+    fn session_mode_enter_confirms() {
+        let state = AppState::test_new();
+        assert_eq!(
+            session_mode_action(&state, key(KeyCode::Enter)),
+            ModeAction::SidebarConfirm
+        );
+    }
+
+    #[test]
+    fn session_mode_k_sidebar_up() {
+        let state = AppState::test_new();
+        assert_eq!(
+            session_mode_action(&state, key(KeyCode::Char('k'))),
+            ModeAction::SidebarNavigate(NavDirection::Up)
+        );
+    }
+
+    #[test]
+    fn session_mode_j_sidebar_down() {
+        let state = AppState::test_new();
+        assert_eq!(
+            session_mode_action(&state, key(KeyCode::Char('j'))),
+            ModeAction::SidebarNavigate(NavDirection::Down)
+        );
+    }
+
+    #[test]
+    fn session_mode_h_sidebar_left() {
+        let state = AppState::test_new();
+        assert_eq!(
+            session_mode_action(&state, key(KeyCode::Char('h'))),
+            ModeAction::SidebarNavigate(NavDirection::Left)
+        );
+    }
+
+    #[test]
+    fn session_mode_g_opens_navigator() {
+        let state = AppState::test_new();
+        assert_eq!(
+            session_mode_action(&state, key(KeyCode::Char('g'))),
+            ModeAction::Navigate(NavigateAction::OpenNavigator)
+        );
+    }
+
+    #[test]
+    fn session_mode_digit_switches_tab() {
+        let state = AppState::test_new();
+        assert_eq!(
+            session_mode_action(&state, key(KeyCode::Char('5'))),
+            ModeAction::Navigate(NavigateAction::SwitchTab(4))
+        );
+    }
+
+    #[test]
+    fn session_mode_x_closes_workspace() {
+        let state = AppState::test_new();
+        assert_eq!(
+            session_mode_action(&state, key(KeyCode::Char('x'))),
+            ModeAction::Navigate(NavigateAction::CloseWorkspace)
+        );
+    }
+
+    #[test]
+    fn session_mode_unrecognized_returns_none() {
+        let state = AppState::test_new();
+        assert_eq!(
+            session_mode_action(&state, key(KeyCode::Char('z'))),
+            ModeAction::None
+        );
+    }
+
+    // -- Output contract tests: verify the exact set of variants each resolver can emit --
+
+    #[test]
+    fn pane_resolver_emits_only_expected_variants() {
+        let state = AppState::test_new();
+        let all_keys: Vec<TerminalKey> = "hjklndsxfwcp"
+            .chars()
+            .map(|c| key(KeyCode::Char(c)))
+            .chain([
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                key(KeyCode::Up),
+                key(KeyCode::Down),
+            ])
+            .chain([key(KeyCode::Char('z'))])
+            .collect();
+        for k in all_keys {
+            let action = pane_mode_action(&state, k);
+            match action {
+                ModeAction::Navigate(nav) => {
+                    assert!(
+                        matches!(
+                            nav,
+                            NavigateAction::FocusPaneLeft
+                                | NavigateAction::FocusPaneDown
+                                | NavigateAction::FocusPaneUp
+                                | NavigateAction::FocusPaneRight
+                                | NavigateAction::SplitAuto
+                                | NavigateAction::SplitHorizontal
+                                | NavigateAction::SplitVertical
+                                | NavigateAction::StackPane
+                                | NavigateAction::ClosePane
+                                | NavigateAction::Zoom
+                                | NavigateAction::ToggleFloating
+                                | NavigateAction::RenamePane
+                                | NavigateAction::CyclePaneNext
+                        ),
+                        "unexpected Navigate variant: {nav:?}"
+                    );
+                }
+                ModeAction::ExitToNormal | ModeAction::None => {}
+                other => panic!("unexpected ModeAction from pane resolver: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resize_resolver_emits_only_expected_variants() {
+        let state = AppState::test_new();
+        let all_keys: Vec<TerminalKey> = "hjkl"
+            .chars()
+            .map(|c| key(KeyCode::Char(c)))
+            .chain(
+                "hjkl"
+                    .chars()
+                    .map(|c| key_mod(KeyCode::Char(c), KeyModifiers::SHIFT)),
+            )
+            .chain([
+                key(KeyCode::Char('+')),
+                key(KeyCode::Char('=')),
+                key(KeyCode::Char('-')),
+            ])
+            .chain([
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                key(KeyCode::Up),
+                key(KeyCode::Down),
+            ])
+            .collect();
+        for k in all_keys {
+            let action = resize_mode_action(&state, k);
+            match action {
+                ModeAction::Navigate(nav) => {
+                    assert!(
+                        matches!(
+                            nav,
+                            NavigateAction::ResizeIncrease(_)
+                                | NavigateAction::ResizeDecrease(_)
+                                | NavigateAction::ResizeGrow
+                                | NavigateAction::ResizeShrink
+                        ),
+                        "unexpected Navigate variant: {nav:?}"
+                    );
+                }
+                ModeAction::ExitToNormal | ModeAction::None => {}
+                other => panic!("unexpected ModeAction from resize resolver: {other:?}"),
+            }
+        }
     }
 }

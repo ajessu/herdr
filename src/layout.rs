@@ -66,12 +66,23 @@ pub struct SplitBorder {
 }
 
 /// Cardinal direction for pane navigation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavDirection {
     Left,
     Right,
     Up,
     Down,
+}
+
+impl NavDirection {
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+        }
+    }
 }
 
 /// A node in the BSP tree. Public for serialization.
@@ -591,12 +602,7 @@ fn nearest_resize_split(
 }
 
 fn opposite_direction(nav: NavDirection) -> NavDirection {
-    match nav {
-        NavDirection::Left => NavDirection::Right,
-        NavDirection::Right => NavDirection::Left,
-        NavDirection::Up => NavDirection::Down,
-        NavDirection::Down => NavDirection::Up,
-    }
+    nav.opposite()
 }
 
 fn split_edge_distance(split: &SplitBorder, focused: Rect, nav: NavDirection) -> u32 {

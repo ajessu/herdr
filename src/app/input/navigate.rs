@@ -609,6 +609,8 @@ pub(crate) enum NavigateAction {
     MoveTabRight,
     ResizeGrow,
     ResizeShrink,
+    ResizeIncrease(NavDirection),
+    ResizeDecrease(NavDirection),
     EnterResizeMode,
     ToggleSidebar,
     CyclePaneNext,
@@ -971,6 +973,12 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::ResizeShrink => {
             state.resize_focused_pane(false);
+        }
+        NavigateAction::ResizeIncrease(dir) => {
+            state.resize_pane(dir);
+        }
+        NavigateAction::ResizeDecrease(dir) => {
+            state.resize_pane(dir.opposite());
         }
         NavigateAction::StackPane => {
             state.stack_focused_pane();
