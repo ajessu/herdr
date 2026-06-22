@@ -31,6 +31,9 @@ pub(crate) enum ActionContext {
     Direct,
     Prefix,
     Navigate,
+    /// Dispatched from a sticky mode (Pane/Tab/Resize/Move/Session).
+    /// Actions execute but the mode is NOT automatically exited afterward.
+    Sticky,
 }
 
 impl App {
@@ -1083,13 +1086,17 @@ pub(super) fn execute_navigate_action_in_context(
         }
     }
 
-    finish_action_context(state, context, previous_mode);
+    if context == ActionContext::Sticky {
+        finish_sticky_context(state, Some(action), previous_mode);
+    } else {
+        finish_action_context(state, context, previous_mode);
+    }
 }
 
 fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<usize> {
     let idx = match context {
         ActionContext::Direct | ActionContext::Prefix => state.active.unwrap_or(state.selected),
-        ActionContext::Navigate => state.selected,
+        ActionContext::Navigate | ActionContext::Sticky => state.selected,
     };
     (idx < state.workspaces.len()).then_some(idx)
 }
@@ -1123,10 +1130,48 @@ fn leave_navigate_mode(state: &mut AppState) {
 }
 
 fn finish_action_context(state: &mut AppState, context: ActionContext, previous_mode: Mode) {
-    if matches!(context, ActionContext::Direct | ActionContext::Prefix)
-        && state.mode == previous_mode
-    {
-        leave_command_mode(state);
+    match context {
+        ActionContext::Direct | ActionContext::Prefix => {
+            if state.mode == previous_mode {
+                leave_command_mode(state);
+            }
+        }
+        ActionContext::Sticky => finish_sticky_context(state, None, previous_mode),
+        ActionContext::Navigate => {}
+    }
+}
+
+/// Whether an action dispatched from a sticky mode should drop the user out of
+/// that mode rather than keep it active. Detach and destructive closes are the
+/// design's explicit reset triggers (§7 / R3-4); everything else (focus, split,
+/// swap, resize, zoom, cycle) is "the mode's own navigation" and stays sticky.
+fn action_exits_sticky_mode(action: NavigateAction) -> bool {
+    matches!(
+        action,
+        NavigateAction::Detach
+            | NavigateAction::ClosePane
+            | NavigateAction::CloseTab
+            | NavigateAction::CloseWorkspace
+    )
+}
+
+/// Resolve the final mode after a sticky-mode action.
+///
+/// - An action that opened an overlay (Rename*/Navigator/ConfirmClose/…) leaves
+///   `state.mode` at that overlay and is preserved.
+/// - An exit-intent action (detach, destructive close) lands in Terminal/Navigate.
+/// - Otherwise the action was the mode's own navigation, so restore the sticky
+///   mode (it may have been knocked to Terminal by `leave_navigate_mode`).
+fn finish_sticky_context(
+    state: &mut AppState,
+    action: Option<NavigateAction>,
+    previous_mode: Mode,
+) {
+    if action.is_some_and(action_exits_sticky_mode) {
+        return;
+    }
+    if state.mode == Mode::Terminal || state.mode == previous_mode {
+        state.mode = previous_mode;
     }
 }
 
@@ -1135,10 +1180,9 @@ fn finish_custom_command_context(
     context: ActionContext,
     previous_mode: Mode,
 ) {
-    if context == ActionContext::Navigate {
-        leave_navigate_mode(state);
-    } else {
-        finish_action_context(state, context, previous_mode);
+    match context {
+        ActionContext::Navigate => leave_navigate_mode(state),
+        _ => finish_action_context(state, context, previous_mode),
     }
 }
 

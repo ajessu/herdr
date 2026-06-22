@@ -1501,7 +1501,7 @@ impl App {
             Mode::Prefix => {
                 self.handle_prefix_key(key);
             }
-            Mode::Navigate | Mode::Session => {
+            Mode::Navigate => {
                 self.handle_navigate_key(key);
             }
             Mode::Copy => {
@@ -1520,7 +1520,10 @@ impl App {
                 self.handle_worktree_remove_key(key_event);
             }
             Mode::Resize => {
-                input::handle_resize_key(&mut self.state, key);
+                if self.intercept_mode_entry_and_shared(key) {
+                    return;
+                }
+                self.run_mode_action(key);
             }
             Mode::ConfirmClose => {
                 input::handle_confirm_close_key(&mut self.state, key_event);
@@ -1553,7 +1556,13 @@ impl App {
             Mode::Navigator => {
                 input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
             }
-            Mode::Terminal | Mode::Pane | Mode::Tab | Mode::Move | Mode::Locked => {
+            Mode::Pane | Mode::Tab | Mode::Move | Mode::Session => {
+                if self.intercept_mode_entry_and_shared(key) {
+                    return;
+                }
+                self.run_mode_action(key);
+            }
+            Mode::Terminal | Mode::Locked => {
                 // Not dispatched through this path.
             }
         }

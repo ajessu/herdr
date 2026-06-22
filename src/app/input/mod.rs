@@ -47,7 +47,7 @@ mod terminal;
 pub(crate) use self::{
     modal::{
         handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
-        handle_keybind_help_key, handle_navigator_key, handle_rename_key, handle_resize_key,
+        handle_keybind_help_key, handle_navigator_key, handle_rename_key,
         insert_navigator_search_text, insert_rename_input_text, move_mode_action, pane_mode_action,
         resize_mode_action, session_mode_action, tab_mode_action, ModeAction,
     },
@@ -246,30 +246,21 @@ impl App {
             _ => {}
         }
 
-        // Mode-entry keys: from any non-Locked mode (except Copy and Prefix which
-        // have their own exit semantics), pressing a mode-entry key switches directly.
-        if !matches!(self.state.mode, Mode::Copy | Mode::Prefix) {
-            if let Some(target) = check_mode_entry(&self.state, key) {
-                self.state.mode = target;
-                return;
-            }
-        }
-
-        // Shared bindings: resolve from any non-Locked mode (except Copy/Prefix).
-        if !matches!(self.state.mode, Mode::Copy | Mode::Prefix) {
-            if let Some(action) = resolve_shared_binding(&self.state, key) {
-                self.execute_shared_action(action);
-                return;
-            }
+        // Mode-entry keys and shared bindings resolve from any non-Locked mode
+        // (except Copy/Prefix which have their own exit semantics).
+        if !matches!(self.state.mode, Mode::Copy | Mode::Prefix)
+            && self.intercept_mode_entry_and_shared(key)
+        {
+            return;
         }
 
         // Mode-specific dispatch.
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
             Mode::Prefix => self.handle_prefix_key(key),
-            Mode::Navigate | Mode::Session => self.handle_navigate_key(key),
+            Mode::Navigate => self.handle_navigate_key(key),
             Mode::Copy => self.handle_copy_mode_key(key),
-            Mode::Pane | Mode::Tab | Mode::Resize | Mode::Move => {
+            Mode::Pane | Mode::Tab | Mode::Resize | Mode::Move | Mode::Session => {
                 self.run_mode_action(key);
             }
             Mode::Locked => unreachable!(),
@@ -291,7 +282,7 @@ impl App {
         }
     }
 
-    fn execute_shared_action(&mut self, action: navigate::NavigateAction) {
+    pub(super) fn execute_shared_action(&mut self, action: navigate::NavigateAction) {
         navigate::execute_navigate_action_in_context(
             &mut self.state,
             &mut self.terminal_runtimes,
@@ -300,14 +291,38 @@ impl App {
         );
     }
 
-    fn run_mode_action(&mut self, key: TerminalKey) {
+    /// Resolve mode-entry keys and shared bindings ahead of mode-specific
+    /// dispatch. Returns `true` when the key was consumed.
+    ///
+    /// Pressing the *current* sticky mode's own entry key again toggles it off
+    /// (design §1: a sticky mode exits on its own entry key). Shared with the
+    /// headless dispatch path so both surfaces behave identically.
+    pub(super) fn intercept_mode_entry_and_shared(&mut self, key: TerminalKey) -> bool {
+        if let Some(target) = check_mode_entry(&self.state, key) {
+            if target == self.state.mode && self.state.mode.is_sticky() {
+                self.state.mode = Mode::normal_mode(self.state.active.is_some());
+            } else {
+                self.state.mode = target;
+            }
+            return true;
+        }
+        if let Some(action) = resolve_shared_binding(&self.state, key) {
+            self.execute_shared_action(action);
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn run_mode_action(&mut self, key: TerminalKey) {
         use crate::layout::NavDirection;
 
-        let action = match self.state.mode {
+        let current_mode = self.state.mode;
+        let action = match current_mode {
             Mode::Pane => pane_mode_action(&self.state, key),
             Mode::Tab => tab_mode_action(&self.state, key),
             Mode::Resize => resize_mode_action(&self.state, key),
             Mode::Move => move_mode_action(&self.state, key),
+            Mode::Session => session_mode_action(&self.state, key),
             _ => ModeAction::None,
         };
 
@@ -320,7 +335,7 @@ impl App {
                     &mut self.state,
                     &mut self.terminal_runtimes,
                     nav_action,
-                    navigate::ActionContext::Direct,
+                    navigate::ActionContext::Sticky,
                 );
             }
             ModeAction::SidebarNavigate(dir) => match dir {
@@ -340,6 +355,10 @@ impl App {
             ModeAction::SidebarConfirm => {
                 if !self.state.workspaces.is_empty() {
                     self.state.switch_workspace(self.state.selected);
+                    // Session confirms and stays; all other modes exit.
+                    if current_mode != Mode::Session {
+                        self.state.mode = Mode::normal_mode(self.state.active.is_some());
+                    }
                 }
             }
             ModeAction::EnterMode(mode) => {

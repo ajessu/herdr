@@ -789,9 +789,11 @@ pub enum Mode {
 }
 
 impl Mode {
-    #[allow(dead_code)]
     pub fn is_sticky(self) -> bool {
-        matches!(self, Self::Pane | Self::Tab | Self::Resize | Self::Move | Self::Session)
+        matches!(
+            self,
+            Self::Pane | Self::Tab | Self::Resize | Self::Move | Self::Session
+        )
     }
 
     #[allow(dead_code)]

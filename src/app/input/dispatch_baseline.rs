@@ -547,4 +547,246 @@ mod tests {
             Mode::Onboarding | Mode::Navigate | Mode::Locked
         ));
     }
+
+    // -----------------------------------------------------------------------
+    // Step-4: Sticky lifecycle and runtime executor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_enter_confirms_and_stays_in_session() {
+        use crate::app::input::modal::session_mode_action;
+        use crate::app::input::modal::ModeAction;
+
+        let mut state = state_with_workspaces(&["ws1", "ws2"]);
+        state.active = Some(0);
+        state.selected = 1;
+        state.mode = Mode::Session;
+
+        let action = session_mode_action(
+            &state,
+            TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(action, ModeAction::SidebarConfirm);
+
+        // Simulate the executor: SidebarConfirm in Session confirms+stays.
+        state.switch_workspace(state.selected);
+        // In the executor, Session mode is NOT exited.
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.mode, Mode::Session);
+    }
+
+    #[test]
+    fn navigate_enter_confirms_and_exits() {
+        let mut state = state_with_workspaces(&["ws1", "ws2"]);
+        state.active = Some(0);
+        state.selected = 1;
+        state.mode = Mode::Navigate;
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn session_movement_keys_match_navigate_movement() {
+        use crate::app::input::modal::{session_mode_action, ModeAction};
+        use crate::layout::NavDirection;
+
+        let state = state_with_workspaces(&["ws1", "ws2"]);
+
+        let j_action = session_mode_action(
+            &state,
+            TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()),
+        );
+        assert_eq!(j_action, ModeAction::SidebarNavigate(NavDirection::Down));
+
+        let k_action = session_mode_action(
+            &state,
+            TerminalKey::new(KeyCode::Char('k'), KeyModifiers::empty()),
+        );
+        assert_eq!(k_action, ModeAction::SidebarNavigate(NavDirection::Up));
+    }
+
+    #[test]
+    fn resize_self_entry_key_exits_through_dispatch() {
+        // The real dispatch intercepts mode-entry keys before the resolver, so
+        // the self-key toggle must be honored at the intercept layer (not just
+        // by the resolver). Default mode_resize entry key is Ctrl+n.
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.mode = Mode::Resize;
+
+        let consumed = app.intercept_mode_entry_and_shared(TerminalKey::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ));
+
+        assert!(consumed);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn session_self_entry_key_exits_through_dispatch() {
+        // Pressing the Session entry key (Ctrl+o) while in Session exits to
+        // Normal rather than re-entering Session.
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.mode = Mode::Session;
+
+        let consumed = app.intercept_mode_entry_and_shared(TerminalKey::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        ));
+
+        assert!(consumed);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn cross_mode_entry_key_switches_directly() {
+        // Pressing a *different* mode's entry key from a sticky mode switches
+        // to that mode (does not toggle off).
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.mode = Mode::Pane;
+
+        let consumed = app.intercept_mode_entry_and_shared(TerminalKey::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        ));
+
+        assert!(consumed);
+        assert_eq!(app.state.mode, Mode::Tab);
+    }
+
+    #[test]
+    fn sticky_mode_stays_after_navigate_action() {
+        use crate::app::input::navigate::{execute_navigate_action_in_context, ActionContext};
+
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        state.mode = Mode::Pane;
+
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut runtimes,
+            NavigateAction::FocusPaneLeft,
+            ActionContext::Sticky,
+        );
+
+        assert_eq!(state.mode, Mode::Pane);
+    }
+
+    #[test]
+    fn sticky_mode_yields_to_overlay() {
+        use crate::app::input::navigate::{execute_navigate_action_in_context, ActionContext};
+
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Tab;
+        state.confirm_close = true;
+
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut runtimes,
+            NavigateAction::CloseWorkspace,
+            ActionContext::Sticky,
+        );
+
+        assert_eq!(state.mode, Mode::ConfirmClose);
+    }
+
+    #[test]
+    fn detach_through_executor_resets_sticky_mode() {
+        use crate::app::input::navigate::{execute_navigate_action_in_context, ActionContext};
+
+        // Drive detach through the real dispatch path (sticky context), not
+        // request_detach in isolation — the executor's finish step must NOT
+        // bounce the user back into the sticky mode.
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        state.mode = Mode::Session;
+        state.detach_exits = false;
+
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut runtimes,
+            NavigateAction::Detach,
+            ActionContext::Sticky,
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.detach_requested);
+    }
+
+    #[test]
+    fn destructive_close_through_sticky_lands_in_normal() {
+        use crate::app::input::navigate::{execute_navigate_action_in_context, ActionContext};
+
+        // Session-mode `x` with confirm_close disabled closes directly and must
+        // land in Terminal/Navigate, not back in Session (R3-4).
+        let mut state = state_with_workspaces(&["ws1", "ws2"]);
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Session;
+        state.confirm_close = false;
+
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut runtimes,
+            NavigateAction::CloseWorkspace,
+            ActionContext::Sticky,
+        );
+
+        assert_ne!(state.mode, Mode::Session);
+        assert!(matches!(state.mode, Mode::Terminal | Mode::Navigate));
+    }
+
+    #[test]
+    fn detach_from_non_sticky_does_not_change_mode() {
+        use crate::app::input::modal::request_detach;
+
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        state.mode = Mode::Terminal;
+        state.detach_exits = false;
+
+        request_detach(&mut state);
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.detach_requested);
+    }
+
+    #[test]
+    fn sticky_navigation_action_keeps_mode_through_executor() {
+        use crate::app::input::navigate::{execute_navigate_action_in_context, ActionContext};
+
+        // A plain navigation action (the mode's own movement) keeps the sticky
+        // mode even though it routes through leave_navigate_mode → Terminal.
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        state.mode = Mode::Tab;
+
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut runtimes,
+            NavigateAction::NextTab,
+            ActionContext::Sticky,
+        );
+
+        assert_eq!(state.mode, Mode::Tab);
+    }
 }

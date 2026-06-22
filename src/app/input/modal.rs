@@ -117,6 +117,9 @@ fn open_update_release_notes(state: &mut AppState) {
 }
 
 pub(super) fn request_detach(state: &mut AppState) {
+    if state.mode.is_sticky() {
+        state.mode = Mode::normal_mode(state.active.is_some());
+    }
     if state.detach_exits {
         state.should_quit = true;
     } else {
@@ -618,6 +621,7 @@ pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn handle_resize_key(state: &mut AppState, raw_key: TerminalKey) {
     let key = raw_key.as_key_event();
     if key.code == KeyCode::Esc
@@ -937,6 +941,7 @@ pub(crate) enum ModeAction {
     /// Confirm sidebar selection (switch to `state.selected` workspace).
     SidebarConfirm,
     /// Switch to a different mode.
+    #[allow(dead_code)]
     EnterMode(Mode),
     /// Return to Normal (Terminal or Navigate depending on workspace state).
     ExitToNormal,
