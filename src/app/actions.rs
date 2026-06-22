@@ -1500,6 +1500,7 @@ impl AppState {
             self.view.tab_hit_areas.clear();
             self.view.tab_chrome.clear();
             self.view.tab_status_mode = crate::config::TabStatusMode::Off;
+            self.view.tab_compressed_width = None;
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
             self.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
             self.view.new_tab_hit_area = ratatui::layout::Rect::default();
@@ -1526,6 +1527,7 @@ impl AppState {
         self.view.tab_hit_areas = layout.tab_hit_areas;
         self.view.tab_chrome = layout.tab_chrome;
         self.view.tab_status_mode = layout.tab_status_mode;
+        self.view.tab_compressed_width = layout.compressed_width;
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
         self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;

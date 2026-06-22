@@ -43,7 +43,11 @@ impl TabChrome {
         status_w.saturating_add(name_w).saturating_add(mod_w)
     }
 
-    pub fn to_spans(&self, mode: TabStatusMode, rect_width: u16) -> Vec<Span<'_>> {
+    /// When `truncate` is set (compression mode), the name is shortened with a
+    /// trailing `…` so the whole label fits `rect_width`. The budget is derived
+    /// here from `rect_width` and the same status/zoom column reservations
+    /// `display_width` uses, so the truncation predicate lives in one place.
+    pub fn to_spans(&self, mode: TabStatusMode, rect_width: u16, truncate: bool) -> Vec<Span<'_>> {
         let mut spans: Vec<Span> = Vec::with_capacity(6);
 
         // Leading space
@@ -59,8 +63,24 @@ impl TabChrome {
             }
         }
 
-        // Name
-        spans.push(Span::raw(self.name.as_str()));
+        let status_w: u16 = if matches!(mode, TabStatusMode::Off) {
+            0
+        } else {
+            2
+        };
+        let mod_w: u16 = if self.zoomed { 2 } else { 0 };
+        // 1 col for the leading space, plus the status slot and zoom suffix.
+        let name_budget = rect_width
+            .saturating_sub(1)
+            .saturating_sub(status_w)
+            .saturating_sub(mod_w);
+        let name_cols = u16::try_from(self.name.chars().count()).unwrap_or(u16::MAX);
+        if truncate && name_budget > 0 && name_cols > name_budget {
+            let truncated: String = self.name.chars().take((name_budget - 1) as usize).collect();
+            spans.push(Span::raw(format!("{truncated}…")));
+        } else {
+            spans.push(Span::raw(self.name.as_str()));
+        }
 
         // Zoom modifier
         if self.zoomed {
@@ -240,6 +260,7 @@ pub(crate) struct TabBarView {
     pub tab_hit_areas: Vec<Rect>,
     pub tab_chrome: Vec<TabChrome>,
     pub tab_status_mode: TabStatusMode,
+    pub compressed_width: Option<u16>,
     pub scroll_left_hit_area: Rect,
     pub scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
@@ -273,9 +294,11 @@ fn layout_tab_hit_areas(
         let desired = tab_width(&chromes[idx], mode);
         let remaining = right.saturating_sub(x);
         // No slivers: a tab that can't reach MIN_TAB_WIDTH is hidden (width 0)
-        // and reachable via scroll buttons / `…` indicators — unless nothing has
-        // been placed yet, in which case the first tab at this scroll offset is
-        // rendered clipped (>= 1 col) so the row is never blank.
+        // and reachable via the scroll buttons (which show hidden-tab counts) —
+        // unless nothing has been placed yet, in which case the first tab at this
+        // scroll offset is rendered clipped (>= 1 col) so the row is never blank.
+        // This break (not continue) keeps hidden tabs as a single trailing
+        // zero-width run, which the right-edge hidden-count indicator relies on.
         if remaining < MIN_TAB_WIDTH && placed_any {
             break;
         }
@@ -284,6 +307,75 @@ fn layout_tab_hit_areas(
         placed_any = true;
         x = x.saturating_add(width.saturating_add(1));
     }
+    rects
+}
+
+/// Compute a single uniform tab width that lets all tabs fit `available_width`,
+/// or `None` if they already fit naturally or cannot fit even compressed.
+///
+/// Uniform (every tab the same width) rather than proportional-to-natural: it
+/// keeps click targets stable as names change in this mouse-first TUI and keeps
+/// the apportionment arithmetic exact, avoiding the rounding drift a weighted
+/// split would introduce. See the design's Acknowledged Tradeoffs.
+fn compress_tab_widths(
+    chromes: &[TabChrome],
+    mode: TabStatusMode,
+    available_width: u16,
+) -> Option<u16> {
+    let n = u16::try_from(chromes.len()).unwrap_or(u16::MAX);
+    if n <= 1 {
+        return None;
+    }
+    let total_natural: u16 = chromes
+        .iter()
+        .map(|c| tab_width(c, mode))
+        .fold(0u16, |acc, w| acc.saturating_add(w));
+    let gaps = n.saturating_sub(1);
+    let total_with_gaps = total_natural.saturating_add(gaps);
+    if total_with_gaps <= available_width {
+        return None;
+    }
+    let space_for_tabs = available_width.saturating_sub(gaps);
+    let compressed_width = space_for_tabs / n;
+    if compressed_width < MIN_TAB_WIDTH {
+        return None;
+    }
+    // Guard against integer-division rounding: re-check the exact fit with
+    // saturating arithmetic so absurd tab counts can't wrap the product.
+    if compressed_width.saturating_mul(n).saturating_add(gaps) > available_width {
+        return None;
+    }
+    Some(compressed_width)
+}
+
+/// Lay out `count` tabs at a uniform `uniform_width` with one-column gaps.
+///
+/// Precondition: the caller (only `compute_tab_bar_view` via `compress_tab_widths`)
+/// must have proven `count * uniform_width + (count - 1) <= area.width`, so every
+/// tab fits at full width with no clipping or hidden tab. The debug assertion
+/// below pins that contract: under compression no rect may collapse below
+/// `uniform_width`, which keeps both the no-sliver and active-tab-visible
+/// invariants trivially true.
+fn layout_tab_hit_areas_compressed(count: usize, uniform_width: u16, area: Rect) -> Vec<Rect> {
+    let mut rects = vec![Rect::default(); count];
+    if area.width == 0 || area.height == 0 {
+        return rects;
+    }
+    let mut x = area.x;
+    let right = area.x.saturating_add(area.width);
+    for rect in rects.iter_mut() {
+        if x >= right {
+            break;
+        }
+        let remaining = right.saturating_sub(x);
+        let width = uniform_width.min(remaining);
+        *rect = Rect::new(x, area.y, width, 1);
+        x = x.saturating_add(width.saturating_add(1));
+    }
+    debug_assert!(
+        rects.iter().all(|r| r.width == uniform_width),
+        "compressed layout clipped a tab: precondition count*width+gaps <= area.width violated"
+    );
     rects
 }
 
@@ -353,6 +445,26 @@ pub(crate) fn compute_tab_bar_view(
     }
 
     if !mouse_chrome {
+        if let Some(cw) = compress_tab_widths(&chromes, mode, area.width) {
+            tracing::debug!(
+                area_width = area.width,
+                tab_count = chromes.len(),
+                ?mode,
+                compressed_width = cw,
+                "tab bar compressed"
+            );
+            let tab_hit_areas = layout_tab_hit_areas_compressed(chromes.len(), cw, area);
+            return TabBarView {
+                scroll: 0,
+                tab_hit_areas,
+                tab_chrome: chromes,
+                tab_status_mode: mode,
+                compressed_width: Some(cw),
+                scroll_left_hit_area: Rect::default(),
+                scroll_right_hit_area: Rect::default(),
+                new_tab_hit_area: Rect::default(),
+            };
+        }
         let max_scroll = max_tab_scroll(&chromes, mode, area);
         let scroll = if follow_active {
             centered_tab_scroll(&chromes, active_tab, mode, area).min(max_scroll)
@@ -365,6 +477,7 @@ pub(crate) fn compute_tab_bar_view(
             tab_hit_areas,
             tab_chrome: chromes,
             tab_status_mode: mode,
+            compressed_width: None,
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area: Rect::default(),
@@ -393,6 +506,35 @@ pub(crate) fn compute_tab_bar_view(
             tab_hit_areas: all_tabs,
             tab_chrome: chromes,
             tab_status_mode: mode,
+            compressed_width: None,
+            scroll_left_hit_area: Rect::default(),
+            scroll_right_hit_area: Rect::default(),
+            new_tab_hit_area,
+        };
+    }
+
+    if let Some(cw) = compress_tab_widths(&chromes, mode, all_tabs_area.width) {
+        tracing::debug!(
+            tab_area_width = all_tabs_area.width,
+            tab_count = chromes.len(),
+            ?mode,
+            compressed_width = cw,
+            "tab bar compressed"
+        );
+        let tab_hit_areas = layout_tab_hit_areas_compressed(chromes.len(), cw, all_tabs_area);
+        let new_tab_x = trailing_tab_controls_x(&tab_hit_areas, area.x);
+        let new_tab_hit_area = Rect::new(
+            new_tab_x,
+            area.y,
+            area_right.saturating_sub(new_tab_x).min(NEW_TAB_WIDTH),
+            1,
+        );
+        return TabBarView {
+            scroll: 0,
+            tab_hit_areas,
+            tab_chrome: chromes,
+            tab_status_mode: mode,
+            compressed_width: Some(cw),
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area,
@@ -450,6 +592,7 @@ pub(crate) fn compute_tab_bar_view(
         tab_hit_areas,
         tab_chrome: chromes,
         tab_status_mode: mode,
+        compressed_width: None,
         scroll_left_hit_area: left_hit_area,
         scroll_right_hit_area: right_hit_area,
         new_tab_hit_area,
@@ -537,6 +680,17 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         && last_visible_idx.is_some_and(|idx| idx + 1 < ws.tabs.len());
 
     if app.mouse_capture && app.view.tab_scroll_left_hit_area.width > 0 {
+        // Chevron-first so a rect clipped below 3 cols still shows the affordance.
+        // The hidden count is shown only when that direction can actually scroll;
+        // a disabled button is a neutral dim chevron, not "‹0".
+        let left_hidden = first_visible_idx.unwrap_or(0);
+        let left_label = if !can_scroll_left {
+            " ‹ ".to_string()
+        } else if left_hidden > 9 {
+            "‹9+".to_string()
+        } else {
+            format!("‹{left_hidden} ")
+        };
         let style = if can_scroll_left {
             Style::default().fg(p.overlay1).bg(p.surface0)
         } else {
@@ -546,12 +700,26 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::DIM)
         };
         frame.render_widget(
-            Paragraph::new(" < ").style(style),
+            Paragraph::new(left_label).style(style),
             app.view.tab_scroll_left_hit_area,
         );
     }
 
     if app.mouse_capture && app.view.tab_scroll_right_hit_area.width > 0 {
+        let right_hidden = app
+            .view
+            .tab_hit_areas
+            .iter()
+            .rev()
+            .take_while(|rect| rect.width == 0)
+            .count();
+        let right_label = if !can_scroll_right {
+            " › ".to_string()
+        } else if right_hidden > 9 {
+            "9+›".to_string()
+        } else {
+            format!(" {right_hidden}›")
+        };
         let style = if can_scroll_right {
             Style::default().fg(p.overlay1).bg(p.surface0)
         } else {
@@ -561,7 +729,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::DIM)
         };
         frame.render_widget(
-            Paragraph::new(" > ").style(style),
+            Paragraph::new(right_label).style(style),
             app.view.tab_scroll_right_hit_area,
         );
     }
@@ -590,8 +758,9 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(p.overlay1).bg(p.surface0)
         };
 
+        let truncate = app.view.tab_compressed_width.is_some();
         let spans = if let Some(chrome) = app.view.tab_chrome.get(idx) {
-            chrome.to_spans(app.view.tab_status_mode, rect.width)
+            chrome.to_spans(app.view.tab_status_mode, rect.width, truncate)
         } else {
             vec![Span::raw(" ".repeat(rect.width as usize))]
         };
@@ -621,31 +790,6 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             Paragraph::new(" + ").style(Style::default().fg(p.overlay1)),
             app.view.new_tab_hit_area,
         );
-    }
-
-    if first_visible_idx.is_some_and(|idx| idx > 0) {
-        let x = if app.mouse_capture && app.view.tab_scroll_left_hit_area.width > 0 {
-            app.view.tab_scroll_left_hit_area.x + app.view.tab_scroll_left_hit_area.width
-        } else {
-            area.x
-        };
-        if x < area.x + area.width {
-            frame.buffer_mut()[(x, area.y)]
-                .set_symbol("…")
-                .set_style(Style::default().fg(p.overlay0));
-        }
-    }
-    if last_visible_idx.is_some_and(|idx| idx + 1 < ws.tabs.len()) {
-        let x = if app.mouse_capture && app.view.tab_scroll_right_hit_area.width > 0 {
-            app.view.tab_scroll_right_hit_area.x.saturating_sub(1)
-        } else {
-            area.x + area.width.saturating_sub(1)
-        };
-        if x >= area.x && x < area.x + area.width {
-            frame.buffer_mut()[(x, area.y)]
-                .set_symbol("…")
-                .set_style(Style::default().fg(p.overlay0));
-        }
     }
 }
 
@@ -999,6 +1143,7 @@ mod tests {
         app.view.tab_hit_areas = view.tab_hit_areas.clone();
         app.view.tab_chrome = view.tab_chrome.clone();
         app.view.tab_status_mode = view.tab_status_mode;
+        app.view.tab_compressed_width = view.compressed_width;
         app.view.tab_scroll_left_hit_area = view.scroll_left_hit_area;
         app.view.tab_scroll_right_hit_area = view.scroll_right_hit_area;
         (app, view)
@@ -1194,7 +1339,7 @@ mod tests {
             name: "test".into(),
             zoomed: true,
         };
-        let spans = c.to_spans(TabStatusMode::All, 15);
+        let spans = c.to_spans(TabStatusMode::All, 15, false);
         assert_eq!(spans[0].content.as_ref(), " ");
         assert_eq!(spans[1].content.as_ref(), "●");
         assert_eq!(spans[2].content.as_ref(), " ");
@@ -1208,7 +1353,7 @@ mod tests {
             name: "abc".into(),
             zoomed: false,
         };
-        let spans = c.to_spans(TabStatusMode::All, 10);
+        let spans = c.to_spans(TabStatusMode::All, 10, false);
         assert_eq!(spans[0].content.as_ref(), " ");
         assert_eq!(spans[1].content.as_ref(), "  ");
         assert!(spans[1].style.fg.is_none(), "empty slot must not set fg");
@@ -1221,7 +1366,7 @@ mod tests {
             name: "xyz".into(),
             zoomed: false,
         };
-        let spans = c.to_spans(TabStatusMode::Off, 8);
+        let spans = c.to_spans(TabStatusMode::Off, 8, false);
         assert_eq!(spans[0].content.as_ref(), " ");
         assert_eq!(spans[1].content.as_ref(), "xyz");
         assert_eq!(spans[2].content.len(), 4);
@@ -1605,23 +1750,42 @@ mod tests {
     }
 
     #[test]
-    fn overflow_detected_for_flagship_sliver_scenario() {
+    fn compression_activates_before_scroll_for_flagship_scenario() {
         let ws = make_ws_with_tabs(&["alpha", "alpha", "alpha", "alpha", "alpha"]);
         let chromes = chromes_from_ws(&ws);
         let area = Rect::new(0, 0, 50, 1);
         let view = compute_tab_bar_view(chromes, 0, TabStatusMode::Off, area, 0, true, true);
-        assert!(
-            view.scroll_left_hit_area.width > 0,
-            "scroll buttons must appear"
+        assert_eq!(
+            view.scroll_left_hit_area.width, 0,
+            "compression should prevent scroll buttons"
         );
+        assert!(view.compressed_width.is_some(), "compression must activate");
         assert!(
-            view.scroll_right_hit_area.width > 0,
-            "scroll buttons must appear"
+            view.tab_hit_areas.iter().all(|r| r.width > 0),
+            "all tabs visible under compression"
         );
     }
 
     #[test]
-    fn tab_status_mode_boundary_triggers_overflow() {
+    fn scroll_activates_when_compression_insufficient() {
+        let ws = make_ws_with_tabs(&["alpha", "alpha", "alpha", "alpha", "alpha", "alpha"]);
+        let chromes = chromes_from_ws(&ws);
+        // 6 tabs: compression needs (w-5)/6 >= 8 → w >= 53. all_tabs_area = area-3.
+        // area=40 → all_tabs_area=37 → (37-5)/6 = 5 < 8 → compression fails.
+        let area = Rect::new(0, 0, 40, 1);
+        let view = compute_tab_bar_view(chromes, 0, TabStatusMode::Off, area, 0, true, true);
+        assert!(
+            view.scroll_left_hit_area.width > 0,
+            "scroll buttons must appear when compression insufficient"
+        );
+        assert!(
+            view.compressed_width.is_none(),
+            "compression must not activate"
+        );
+    }
+
+    #[test]
+    fn tab_status_mode_boundary_triggers_compression() {
         let ws = make_ws_with_tabs(&["alpha", "alpha", "alpha"]);
         let chromes_off: Vec<TabChrome> = chromes_from_ws(&ws);
         let chromes_all: Vec<TabChrome> = (0..ws.tabs.len())
@@ -1653,6 +1817,10 @@ mod tests {
             view_off.scroll_left_hit_area.width, 0,
             "Off mode: no overflow"
         );
+        assert!(
+            view_off.compressed_width.is_none(),
+            "Off mode: no compression needed"
+        );
 
         let view_all = compute_tab_bar_view(
             chromes_all.clone(),
@@ -1664,12 +1832,14 @@ mod tests {
             true,
         );
         assert!(
-            view_all.scroll_left_hit_area.width > 0,
-            "All mode: overflow triggered by +2 status columns"
+            view_all.compressed_width.is_some(),
+            "All mode: compression triggered by +2 status columns"
+        );
+        assert_eq!(
+            view_all.scroll_left_hit_area.width, 0,
+            "All mode: compression prevents scroll"
         );
 
-        // Attention reserves the same 2-col status slot as All (see display_width),
-        // so the +2 path that pushes the last tab below threshold applies equally.
         let view_attention = compute_tab_bar_view(
             chromes_all,
             0,
@@ -1680,8 +1850,8 @@ mod tests {
             true,
         );
         assert!(
-            view_attention.scroll_left_hit_area.width > 0,
-            "Attention mode: overflow triggered by +2 status columns"
+            view_attention.compressed_width.is_some(),
+            "Attention mode: compression triggered by +2 status columns"
         );
     }
 
@@ -1717,5 +1887,327 @@ mod tests {
         assert_eq!(rects[0], Rect::new(5, 3, 8, 1));
         assert_eq!(rects[1], Rect::new(14, 3, 8, 1));
         assert_eq!(rects[2], Rect::new(23, 3, 8, 1));
+    }
+
+    // --- Compression tests ---
+
+    #[test]
+    fn compress_tab_widths_returns_none_when_tabs_fit_naturally() {
+        let ws = make_ws_with_tabs(&["ab", "cd"]);
+        let chromes = chromes_from_ws(&ws);
+        assert!(compress_tab_widths(&chromes, TabStatusMode::Off, 30).is_none());
+    }
+
+    #[test]
+    fn compress_tab_widths_returns_none_for_single_tab() {
+        let ws = make_ws_with_tabs(&["a_long_tab_name"]);
+        let chromes = chromes_from_ws(&ws);
+        assert!(compress_tab_widths(&chromes, TabStatusMode::Off, 5).is_none());
+    }
+
+    #[test]
+    fn compress_tab_widths_returns_none_when_result_below_min() {
+        let ws = make_ws_with_tabs(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+        let chromes = chromes_from_ws(&ws);
+        // 10 tabs need (w-9)/10 >= 8, so w >= 89. Test with w=50.
+        assert!(compress_tab_widths(&chromes, TabStatusMode::Off, 50).is_none());
+    }
+
+    #[test]
+    fn compress_tab_widths_succeeds_at_boundary() {
+        let ws = make_ws_with_tabs(&["alpha", "bravo", "charlie"]);
+        let chromes = chromes_from_ws(&ws);
+        // 3 tabs: needs (w-2)/3 >= 8 → w >= 26
+        assert!(compress_tab_widths(&chromes, TabStatusMode::Off, 25).is_none());
+        let cw = compress_tab_widths(&chromes, TabStatusMode::Off, 26);
+        assert_eq!(cw, Some(8));
+    }
+
+    #[test]
+    fn compress_tab_widths_integer_rounding_check() {
+        // 5-char names → width 9; "charlie" is 7 chars → width 11.
+        // Natural with gaps = 9+9+11 + 2 = 31 > 26 → overflow.
+        // Available=26: (26-2)/3 = 8 ≥ 8. Check: 3*8+2 = 26 ≤ 26 → OK.
+        let ws = make_ws_with_tabs(&["alpha", "bravo", "charlie"]);
+        let chromes = chromes_from_ws(&ws);
+        let cw = compress_tab_widths(&chromes, TabStatusMode::Off, 26);
+        assert_eq!(cw, Some(8));
+        let n = 3u16;
+        assert!(n * 8 + (n - 1) <= 26);
+    }
+
+    #[test]
+    fn compression_uses_scroll_zero() {
+        // 5-char names → width 9; "charlie" is 7 chars → width 11.
+        // Natural with gaps = 9+9+11+9 + 3 = 41. all_tabs_area = 40-3 = 37 < 41
+        // → overflow. Compression: (37-3)/4 = 8 ≥ 8 → compresses.
+        let ws = make_ws_with_tabs(&["alpha", "bravo", "charlie", "delta"]);
+        let chromes = chromes_from_ws(&ws);
+        let area = Rect::new(0, 0, 40, 1);
+        let view = compute_tab_bar_view(chromes, 0, TabStatusMode::Off, area, 5, false, true);
+        assert_eq!(view.scroll, 0, "compression must use scroll=0");
+        assert!(view.compressed_width.is_some());
+    }
+
+    #[test]
+    fn compressed_tabs_all_visible() {
+        // 5-char names → width 9; "charli" is 6 chars → width 10.
+        // Natural with gaps = 9+9+10+9+9 + 4 = 50. all_tabs_area = 48-3 = 45 < 50
+        // → overflow. Compression: (45-4)/5 = 8 ≥ 8. 5*8+4 = 44 ≤ 45 → OK.
+        let ws = make_ws_with_tabs(&["alpha", "bravo", "charli", "delta", "echos"]);
+        let chromes = chromes_from_ws(&ws);
+        let area = Rect::new(0, 0, 48, 1);
+        let view = compute_tab_bar_view(chromes, 2, TabStatusMode::Off, area, 0, true, true);
+        assert!(view.compressed_width.is_some(), "compression must activate");
+        assert!(
+            view.tab_hit_areas.iter().all(|r| r.width > 0),
+            "all tabs must be visible under compression"
+        );
+    }
+
+    #[test]
+    fn active_tab_never_hidden_under_compression() {
+        let names = &["alpha", "bravo", "charlie", "delta"];
+        for active in 0..4 {
+            let mut ws = make_ws_with_tabs(names);
+            ws.active_tab = active;
+            let chromes = chromes_from_ws(&ws);
+            let area = Rect::new(0, 0, 40, 1);
+            let view =
+                compute_tab_bar_view(chromes, active, TabStatusMode::Off, area, 0, true, true);
+            // Assert compression actually fires (no vacuous pass) and that the
+            // real contract — every tab visible, active included — holds.
+            assert!(
+                view.compressed_width.is_some(),
+                "active={active}: expected compression at width 40"
+            );
+            assert!(
+                view.tab_hit_areas.iter().all(|r| r.width > 0),
+                "active={active}: all tabs (incl. active) must be visible under compression"
+            );
+        }
+    }
+
+    #[test]
+    fn no_sliver_invariant_under_compression() {
+        let ws = make_ws_with_tabs(&["alpha", "bravo", "charlie", "delta", "echo"]);
+        let chromes = chromes_from_ws(&ws);
+        for width in 44..55 {
+            let area = Rect::new(0, 0, width, 1);
+            let view =
+                compute_tab_bar_view(chromes.clone(), 0, TabStatusMode::Off, area, 0, true, true);
+            for (idx, r) in view.tab_hit_areas.iter().enumerate() {
+                if r.width == 0 {
+                    continue;
+                }
+                if idx == 0 {
+                    continue;
+                }
+                assert!(
+                    r.width >= MIN_TAB_WIDTH,
+                    "width={width} tab {idx}: sliver width {}",
+                    r.width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn to_spans_truncates_to_fit_rect_width() {
+        let c = TabChrome {
+            status: None,
+            name: "longername".into(),
+            zoomed: false,
+        };
+        // mode=Off, no zoom: name_budget = rect_width - 1 = 4 → "lon…".
+        let spans = c.to_spans(TabStatusMode::Off, 5, true);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("lon…"),
+            "expected truncated name, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn to_spans_no_truncation_when_name_fits() {
+        let c = TabChrome {
+            status: None,
+            name: "abc".into(),
+            zoomed: false,
+        };
+        // name_budget = 8 - 1 = 7 ≥ 3 chars → no truncation even with truncate=true.
+        let spans = c.to_spans(TabStatusMode::Off, 8, true);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("abc"),
+            "name should not be truncated: {text:?}"
+        );
+        assert!(!text.contains("…"), "no ellipsis expected: {text:?}");
+    }
+
+    #[test]
+    fn to_spans_does_not_truncate_when_flag_false() {
+        let c = TabChrome {
+            status: None,
+            name: "longername".into(),
+            zoomed: false,
+        };
+        // Even with a tight rect, truncate=false leaves the name intact (scroll
+        // mode clips via the rect rather than inserting an ellipsis).
+        let spans = c.to_spans(TabStatusMode::Off, 5, false);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("longername"),
+            "name must stay intact when truncate=false: {text:?}"
+        );
+        assert!(
+            !text.contains("…"),
+            "no ellipsis when truncate=false: {text:?}"
+        );
+    }
+
+    #[test]
+    fn layout_tab_hit_areas_compressed_uniform_widths() {
+        let rects = layout_tab_hit_areas_compressed(4, 10, Rect::new(0, 0, 50, 1));
+        assert_eq!(rects.len(), 4);
+        for (i, r) in rects.iter().enumerate() {
+            assert_eq!(r.width, 10, "tab {i} should have uniform width");
+        }
+        // Check gaps (1 col between tabs)
+        assert_eq!(rects[0].x, 0);
+        assert_eq!(rects[1].x, 11);
+        assert_eq!(rects[2].x, 22);
+        assert_eq!(rects[3].x, 33);
+    }
+
+    #[test]
+    fn compression_non_mouse_mode() {
+        // 5-char names → width 9; "charlie" is 7 chars → width 11.
+        // Non-mouse mode uses the full area (no new-tab button reserved).
+        // Natural with gaps = 9+9+11+9 + 3 = 41 > 35 → overflow.
+        // Compression: (35-3)/4 = 8 ≥ 8. Check: 4*8+3 = 35 ≤ 35 → OK.
+        let ws = make_ws_with_tabs(&["alpha", "bravo", "charlie", "delta"]);
+        let chromes = chromes_from_ws(&ws);
+        let area = Rect::new(0, 0, 35, 1);
+        let view = compute_tab_bar_view(chromes, 0, TabStatusMode::Off, area, 0, true, false);
+        assert!(view.compressed_width.is_some());
+        assert_eq!(view.scroll, 0);
+        assert!(view.tab_hit_areas.iter().all(|r| r.width > 0));
+    }
+
+    // --- Hidden count indicator tests ---
+
+    #[test]
+    fn hidden_count_left_equals_scroll() {
+        let ws = make_ws_with_tabs(&["a", "b", "c", "d", "e", "f"]);
+        let chromes = chromes_from_ws(&ws);
+        // Force scroll mode: 6 tabs, narrow area. all_tabs_area = 30-3 = 27.
+        // Compression: (27-5)/6 = 3 < 8 → fails → scroll.
+        let area = Rect::new(0, 0, 30, 1);
+        let view = compute_tab_bar_view(chromes, 3, TabStatusMode::Off, area, 0, true, true);
+        assert!(view.scroll_left_hit_area.width > 0);
+        let left_hidden = view
+            .tab_hit_areas
+            .iter()
+            .take_while(|r| r.width == 0)
+            .count();
+        assert_eq!(left_hidden, view.scroll);
+    }
+
+    fn app_in_scroll_mode(names: &[&str], active: usize, area: Rect) -> AppState {
+        let mut app = AppState::test_new();
+        let mut ws = make_ws_with_tabs(names);
+        ws.active_tab = active;
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.mouse_capture = true;
+        app.view.tab_bar_rect = area;
+        let chromes = chromes_from_ws(&app.workspaces[0]);
+        let view = compute_tab_bar_view(chromes, active, TabStatusMode::Off, area, 0, true, true);
+        app.tab_scroll = view.scroll;
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.tab_chrome = view.tab_chrome;
+        app.view.tab_status_mode = view.tab_status_mode;
+        app.view.tab_compressed_width = view.compressed_width;
+        app.view.tab_scroll_left_hit_area = view.scroll_left_hit_area;
+        app.view.tab_scroll_right_hit_area = view.scroll_right_hit_area;
+        app.view.new_tab_hit_area = view.new_tab_hit_area;
+        app
+    }
+
+    #[test]
+    fn render_hidden_count_indicators_show_counts() {
+        // 6 tabs in a narrow bar force scroll mode with hidden tabs on both edges.
+        let area = Rect::new(0, 0, 30, 1);
+        let app = app_in_scroll_mode(&["a", "b", "c", "d", "e", "f"], 3, area);
+        assert!(
+            app.view.tab_scroll_left_hit_area.width > 0,
+            "must be in scroll mode"
+        );
+
+        let buffer = render_to_buffer(&app, area);
+        let row = buffer_row_text(&buffer, area, 0);
+
+        // Left indicator shows count of left-hidden tabs prefixed with ‹.
+        let left_hidden = app.tab_scroll;
+        assert!(
+            row.contains(&format!("‹{left_hidden}")),
+            "left indicator missing in row: {row:?}"
+        );
+        // Right indicator ends with › and shows the right-hidden count.
+        let right_hidden = app
+            .view
+            .tab_hit_areas
+            .iter()
+            .rev()
+            .take_while(|r| r.width == 0)
+            .count();
+        assert!(
+            row.contains(&format!("{right_hidden}›")),
+            "right indicator missing in row: {row:?}"
+        );
+    }
+
+    #[test]
+    fn render_hidden_count_caps_at_nine_plus() {
+        // 12 tabs scrolled so more than 9 are hidden to the left.
+        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
+        let area = Rect::new(0, 0, 30, 1);
+        let app = app_in_scroll_mode(&names, 11, area);
+        assert!(
+            app.view.tab_scroll_left_hit_area.width > 0,
+            "must be in scroll mode"
+        );
+        assert!(
+            app.tab_scroll > 9,
+            "need >9 tabs hidden left, got {}",
+            app.tab_scroll
+        );
+
+        let buffer = render_to_buffer(&app, area);
+        let row = buffer_row_text(&buffer, area, 0);
+        assert!(row.contains("‹9+"), "expected 9+ cap in row: {row:?}");
+    }
+
+    #[test]
+    fn render_disabled_left_indicator_is_neutral_chevron_not_zero() {
+        // Active tab 0: scrolled fully left, so the left button is disabled.
+        // It must show a neutral "‹", never "‹0".
+        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f"];
+        let area = Rect::new(0, 0, 30, 1);
+        let app = app_in_scroll_mode(&names, 0, area);
+        assert!(
+            app.view.tab_scroll_left_hit_area.width > 0,
+            "must be in scroll mode"
+        );
+        assert_eq!(app.tab_scroll, 0, "left must be at the start (disabled)");
+
+        let buffer = render_to_buffer(&app, area);
+        let row = buffer_row_text(&buffer, area, 0);
+        assert!(
+            !row.contains("‹0"),
+            "disabled left button must not show a literal zero count: {row:?}"
+        );
+        assert!(row.contains('‹'), "left chevron must still render: {row:?}");
     }
 }

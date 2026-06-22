@@ -3160,7 +3160,11 @@ mod tests {
         app.state.mode = Mode::Terminal;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
-        assert!(app.state.view.tab_scroll_right_hit_area.width > 0);
+        assert!(
+            app.state.view.tab_scroll_right_hit_area.width > 0
+                || app.state.view.tab_compressed_width.is_some(),
+            "tabs must overflow (compressed or scrolled)"
+        );
         let tab_bar = app.state.view.tab_bar_rect;
 
         app.handle_mouse(mouse(
