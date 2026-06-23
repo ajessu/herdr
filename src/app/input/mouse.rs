@@ -481,12 +481,8 @@ impl AppState {
                     }
                 }
 
-                if self.on_tab_scroll_left_button(mouse.column, mouse.row) {
-                    self.scroll_tabs_left();
-                    return None;
-                }
-                if self.on_tab_scroll_right_button(mouse.column, mouse.row) {
-                    self.scroll_tabs_right();
+                if let Some(jump_to) = self.tab_overflow_indicator_at(mouse.column, mouse.row) {
+                    self.jump_to_tab_indicator(jump_to);
                     return None;
                 }
                 if let (Some(ws_idx), Some(tab_idx)) =
@@ -1255,8 +1251,7 @@ impl AppState {
             && col < area.x + area.width
     }
 
-    pub(super) fn on_tab_scroll_left_button(&self, col: u16, row: u16) -> bool {
-        let area = self.view.tab_scroll_left_hit_area;
+    fn hit(area: ratatui::layout::Rect, col: u16, row: u16) -> bool {
         area.width > 0
             && row >= area.y
             && row < area.y + area.height
@@ -1264,13 +1259,21 @@ impl AppState {
             && col < area.x + area.width
     }
 
-    pub(super) fn on_tab_scroll_right_button(&self, col: u16, row: u16) -> bool {
-        let area = self.view.tab_scroll_right_hit_area;
-        area.width > 0
-            && row >= area.y
-            && row < area.y + area.height
-            && col >= area.x
-            && col < area.x + area.width
+    /// If `(col, row)` falls on an overflow indicator, return the tab index it
+    /// jumps to (the nearest hidden tab on that side). `None` otherwise.
+    pub(super) fn tab_overflow_indicator_at(&self, col: u16, row: u16) -> Option<usize> {
+        let overflow = &self.view.tab_overflow;
+        if let Some(group) = overflow.left {
+            if Self::hit(overflow.left_hit_area, col, row) {
+                return Some(group.jump_to);
+            }
+        }
+        if let Some(group) = overflow.right {
+            if Self::hit(overflow.right_hit_area, col, row) {
+                return Some(group.jump_to);
+            }
+        }
+        None
     }
 
     pub(super) fn tab_drop_index_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -1288,20 +1291,20 @@ impl AppState {
         let (first_idx, first_rect) = *visible_tabs.first()?;
         let (last_idx, last_rect) = *visible_tabs.last()?;
 
-        if self.on_tab_scroll_left_button(col, row) {
-            return Some(0);
+        let overflow = &self.view.tab_overflow;
+        // A click on the left/right overflow indicator means "insert at the
+        // clipped edge": before the first visible tab, or after the last.
+        if overflow.left.is_some() && Self::hit(overflow.left_hit_area, col, row) {
+            return Some(first_idx);
         }
-        if self.on_tab_scroll_right_button(col, row) {
-            return self
-                .active
-                .and_then(|idx| self.workspaces.get(idx))
-                .map(|ws| ws.tabs.len());
+        if overflow.right.is_some() && Self::hit(overflow.right_hit_area, col, row) {
+            return Some(last_idx + 1);
         }
 
         let left_edge = if first_idx == 0 {
             first_rect.x
         } else {
-            self.view.tab_scroll_left_hit_area.x + self.view.tab_scroll_left_hit_area.width
+            overflow.left_hit_area.x + overflow.left_hit_area.width
         };
         let right_edge = if self
             .active
@@ -1310,7 +1313,7 @@ impl AppState {
         {
             last_rect.x + last_rect.width
         } else {
-            self.view.tab_scroll_right_hit_area.x.saturating_sub(1)
+            overflow.right_hit_area.x.saturating_sub(1)
         };
 
         if col <= left_edge {
@@ -3173,9 +3176,9 @@ mod tests {
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
         assert!(
-            app.state.view.tab_scroll_right_hit_area.width > 0
-                || app.state.view.tab_compressed_width.is_some(),
-            "tabs must overflow (compressed or scrolled)"
+            app.state.view.tab_overflow.left.is_some()
+                || app.state.view.tab_overflow.right.is_some(),
+            "tabs must overflow with an indicator"
         );
         let tab_bar = app.state.view.tab_bar_rect;
 
@@ -3720,9 +3723,7 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
-            app.state.workspaces[0]
-                .active_tab_display_name()
-                .as_deref(),
+            app.state.workspaces[0].active_tab_display_name().as_deref(),
             Some("three")
         );
     }
@@ -3771,9 +3772,7 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
-            app.state.workspaces[0]
-                .active_tab_display_name()
-                .as_deref(),
+            app.state.workspaces[0].active_tab_display_name().as_deref(),
             Some("first")
         );
     }
@@ -3819,9 +3818,7 @@ mod tests {
 
         assert_eq!(app.state.workspaces[0].active_tab, 0);
         assert_eq!(
-            app.state.workspaces[0]
-                .active_tab_display_name()
-                .as_deref(),
+            app.state.workspaces[0].active_tab_display_name().as_deref(),
             Some("first")
         );
     }
@@ -3866,9 +3863,7 @@ mod tests {
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
-            app.state.workspaces[0]
-                .active_tab_display_name()
-                .as_deref(),
+            app.state.workspaces[0].active_tab_display_name().as_deref(),
             Some("two")
         );
     }

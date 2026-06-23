@@ -170,7 +170,6 @@ impl App {
                 self.state.remove_plugin_pane_records(plugin_pane_ids);
                 self.state.remove_unattached_terminal_ids(terminal_ids);
                 self.shutdown_detached_terminal_runtimes();
-                self.state.tab_scroll_follow_active = true;
                 self.state.refresh_tab_bar_view();
                 self.emit_event(EventEnvelope {
                     event: EventKind::TabClosed,
@@ -551,7 +550,6 @@ impl App {
             self.state.remove_plugin_pane_records(plugin_pane_ids);
             self.state.remove_unattached_terminal_ids(terminal_ids);
             self.shutdown_detached_terminal_runtimes();
-            self.state.tab_scroll_follow_active = true;
             self.state.refresh_tab_bar_view();
         }
     }

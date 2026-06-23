@@ -736,9 +736,7 @@ pub struct ViewState {
     pub tab_hit_areas: Vec<Rect>,
     pub tab_chrome: Vec<crate::ui::TabChrome>,
     pub tab_status_mode: crate::config::TabStatusMode,
-    pub tab_compressed_width: Option<u16>,
-    pub tab_scroll_left_hit_area: Rect,
-    pub tab_scroll_right_hit_area: Rect,
+    pub tab_overflow: crate::ui::TabBarOverflow,
     pub new_tab_hit_area: Rect,
     pub terminal_area: Rect,
     pub hint_bar_rect: Rect,
@@ -1168,7 +1166,9 @@ impl ContextMenuState {
                 "Open worktree...",
                 "Collapse",
             ],
-            ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Move left", "Move right", "Close"],
+            ContextMenuKind::Tab { .. } => {
+                &["New tab", "Rename", "Move left", "Move right", "Close"]
+            }
             ContextMenuKind::Pane {
                 has_manual_label: true,
                 source_pane_id: Some(_),
@@ -1358,8 +1358,6 @@ pub struct AppState {
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
-    pub tab_scroll: usize,
-    pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
@@ -1412,6 +1410,10 @@ pub struct AppState {
     pub prompt_new_tab_name: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub show_tab_status: crate::config::TabStatusMode,
+    /// Render Powerline arrow separators between tabs (`ui.tabs.powerline`).
+    /// When false, tabs use alternating-background separators with no Powerline
+    /// codepoints, for font-tofu terminals. Default: true.
+    pub tabs_powerline: bool,
     pub hint_bar: crate::config::HintBarStyle,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
@@ -1728,8 +1730,6 @@ impl AppState {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
-            tab_scroll: 0,
-            tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
             view: ViewState {
                 layout: ViewLayout::Desktop,
@@ -1739,9 +1739,7 @@ impl AppState {
                 tab_hit_areas: Vec::new(),
                 tab_chrome: Vec::new(),
                 tab_status_mode: crate::config::TabStatusMode::Off,
-                tab_compressed_width: None,
-                tab_scroll_left_hit_area: Rect::default(),
-                tab_scroll_right_hit_area: Rect::default(),
+                tab_overflow: crate::ui::TabBarOverflow::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
                 hint_bar_rect: Rect::default(),
@@ -1790,6 +1788,7 @@ impl AppState {
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             show_tab_status: crate::config::TabStatusMode::Off,
+            tabs_powerline: true,
             hint_bar: crate::config::HintBarStyle::Off,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,

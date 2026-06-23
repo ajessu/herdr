@@ -235,7 +235,6 @@ impl App {
         self.shutdown_detached_terminal_runtimes();
         // `close_tab` shifts the active tab; refresh so the bar re-centers on
         // it and hit areas drop the closed tab.
-        self.state.tab_scroll_follow_active = true;
         self.state.refresh_tab_bar_view();
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
@@ -351,6 +350,5 @@ mod tests {
 
         assert_eq!(app.state.workspaces[0].tabs.len(), 2);
         assert_hit_areas_in_sync(&app);
-        assert!(app.state.tab_scroll_follow_active);
     }
 }

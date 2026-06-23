@@ -88,7 +88,7 @@ pub(crate) use self::{
         mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
     },
     panes::pane_is_scrolled_back,
-    tabs::{build_tab_bar_inputs, compute_tab_bar_view, TabChrome},
+    tabs::{build_tab_bar_inputs, compute_tab_bar_view, TabBarOverflow, TabChrome},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 use crate::app::state::ViewLayout;
@@ -249,18 +249,9 @@ fn compute_view_internal(
                 app.spinner_tick,
                 &app.palette,
             );
-            compute_tab_bar_view(
-                chromes,
-                active_tab,
-                mode,
-                tab_bar_rect,
-                app.tab_scroll,
-                app.tab_scroll_follow_active,
-                app.mouse_capture,
-            )
+            compute_tab_bar_view(chromes, active_tab, mode, tab_bar_rect, app.mouse_capture)
         })
         .unwrap_or_default();
-    app.tab_scroll = tab_bar_view.scroll;
 
     let split_borders = app
         .active
@@ -314,9 +305,7 @@ fn compute_view_internal(
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_chrome: tab_bar_view.tab_chrome,
         tab_status_mode: tab_bar_view.tab_status_mode,
-        tab_compressed_width: tab_bar_view.compressed_width,
-        tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
-        tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
+        tab_overflow: tab_bar_view.overflow,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
         terminal_area,
         hint_bar_rect,
@@ -388,9 +377,7 @@ fn compute_mobile_view(
         tab_hit_areas: Vec::new(),
         tab_chrome: Vec::new(),
         tab_status_mode: crate::config::TabStatusMode::Off,
-        tab_compressed_width: None,
-        tab_scroll_left_hit_area: Rect::default(),
-        tab_scroll_right_hit_area: Rect::default(),
+        tab_overflow: crate::ui::TabBarOverflow::default(),
         new_tab_hit_area: Rect::default(),
         terminal_area,
         hint_bar_rect: Rect::default(),
@@ -994,50 +981,46 @@ mod tests {
     }
 
     #[test]
-    fn tab_bar_shows_scroll_controls_when_tabs_overflow() {
+    fn tab_bar_shows_overflow_indicators_when_tabs_overflow() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
         for name in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"] {
             ws.test_add_tab(Some(name));
         }
+        // Make a middle tab active so both edges overflow under the centered fill.
+        ws.active_tab = 4;
 
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
         app.mode = Mode::Terminal;
-        app.tab_scroll_follow_active = false;
-        app.tab_scroll = 2;
 
         compute_view(&mut app, Rect::new(0, 0, 65, 20));
 
-        assert!(app.view.tab_scroll_left_hit_area.width > 0);
-        assert!(app.view.tab_scroll_right_hit_area.width > 0);
-        assert_eq!(app.view.tab_hit_areas[0].width, 0);
-        assert_eq!(app.view.tab_hit_areas[1].width, 0);
-        assert!(app.view.tab_hit_areas[2].width > 0);
+        let overflow = &app.view.tab_overflow;
+        assert!(overflow.left.is_some(), "left overflow expected");
+        assert!(overflow.right.is_some(), "right overflow expected");
+        assert!(
+            overflow.left_hit_area.width >= 3,
+            "touch-adequate left zone"
+        );
+        assert!(overflow.right_hit_area.width >= 1);
+        // Active tab is always visible at full (untruncated) width.
+        assert!(app.view.tab_hit_areas[4].width > 0);
         assert!(app.view.new_tab_hit_area.width > 0);
 
-        let last_visible = app
-            .view
-            .tab_hit_areas
-            .iter()
-            .rev()
-            .find(|rect| rect.width > 0)
-            .copied()
-            .expect("last visible tab");
-
-        assert_eq!(
-            app.view.tab_scroll_right_hit_area.x,
-            last_visible.x + last_visible.width
-        );
-        assert_eq!(
-            app.view.new_tab_hit_area.x,
-            app.view.tab_scroll_right_hit_area.x + app.view.tab_scroll_right_hit_area.width
-        );
+        // Jump targets are in-range tab indices pointing at hidden tabs.
+        let left = overflow.left.unwrap();
+        let right = overflow.right.unwrap();
+        let tab_count = app.workspaces[0].tabs.len();
+        assert!(left.jump_to < tab_count);
+        assert!(right.jump_to < tab_count);
+        assert_eq!(app.view.tab_hit_areas[left.jump_to].width, 0);
+        assert_eq!(app.view.tab_hit_areas[right.jump_to].width, 0);
     }
 
     #[test]
-    fn tab_bar_clamps_manual_scroll_at_last_visible_tab() {
+    fn tab_bar_indicator_jump_reveals_next_batch() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
         for name in [
@@ -1045,24 +1028,27 @@ mod tests {
         ] {
             ws.test_add_tab(Some(name));
         }
+        ws.active_tab = 0;
 
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
         app.mode = Mode::Terminal;
-        app.tab_scroll_follow_active = false;
-        app.tab_scroll = usize::MAX;
 
         compute_view(&mut app, Rect::new(0, 0, 65, 20));
 
-        let last_idx = app.workspaces[0].tabs.len() - 1;
-        assert!(app.view.tab_hit_areas[last_idx].width > 0);
-        let clamped_scroll = app.tab_scroll;
+        // Active tab 0, so only the right side overflows.
+        let right = app.view.tab_overflow.right.expect("right overflow");
+        let jump_to = right.jump_to;
+        assert_eq!(app.view.tab_hit_areas[jump_to].width, 0, "target hidden");
 
-        app.scroll_tabs_right();
+        app.switch_tab(jump_to);
+        compute_view(&mut app, Rect::new(0, 0, 65, 20));
 
-        assert_eq!(app.tab_scroll, clamped_scroll);
-        assert!(app.view.tab_hit_areas[last_idx].width > 0);
+        assert!(
+            app.view.tab_hit_areas[jump_to].width > 0,
+            "jump target should be revealed after switching to it"
+        );
     }
 
     #[test]
