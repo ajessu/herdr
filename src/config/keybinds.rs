@@ -217,6 +217,17 @@ impl ActionKeybinds {
             Some(labels.join(" / "))
         }
     }
+
+    pub fn alt_direct_label(&self) -> Option<String> {
+        self.bindings.iter().find_map(|binding| {
+            if let BindingTrigger::Direct((_code, mods)) = binding.trigger {
+                if mods.contains(KeyModifiers::ALT) {
+                    return Some(binding.label.clone());
+                }
+            }
+            None
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2129,6 +2140,31 @@ mod tests {
             parse_key_combo("v"),
             Some((KeyCode::Char('v'), KeyModifiers::empty()))
         );
+    }
+
+    #[test]
+    fn alt_direct_label_finds_alt_modified_direct_binding() {
+        let mut binds = ActionKeybinds::prefix("h");
+        if let ParsedBinding::Single(alt) = parse_binding_string("alt+h").unwrap() {
+            binds.bindings.push(alt);
+        }
+        // Prefix binding comes first but carries no ALT; the Alt-modified Direct
+        // alternative is selected regardless of ordering.
+        assert_eq!(binds.alt_direct_label().as_deref(), Some("alt+h"));
+    }
+
+    #[test]
+    fn alt_direct_label_none_without_alt_alternative() {
+        let binds = ActionKeybinds::prefix("h");
+        assert_eq!(binds.alt_direct_label(), None);
+        let empty = ActionKeybinds::default();
+        assert_eq!(empty.alt_direct_label(), None);
+    }
+
+    #[test]
+    fn alt_direct_label_ignores_non_alt_direct_binding() {
+        let binds = ActionKeybinds::direct("ctrl+h");
+        assert_eq!(binds.alt_direct_label(), None);
     }
 
     #[test]
