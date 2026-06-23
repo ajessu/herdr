@@ -1503,7 +1503,7 @@ impl App {
     ///
     /// Uses the standalone handler functions that work on `&mut AppState`
     /// since the server doesn't have the async context of the monolithic App.
-    fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
+    pub(crate) fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
         let key_event = key.as_key_event();
         if input::modal_paste_target_active(&self.state)
             && input::is_modal_paste_shortcut(&key_event)
@@ -1579,8 +1579,29 @@ impl App {
                 }
                 self.run_mode_action(key);
             }
-            Mode::Terminal | Mode::Locked => {
-                // Not dispatched through this path.
+            Mode::Terminal => {
+                // Not dispatched through this path (Terminal goes to the terminal handler).
+            }
+            Mode::Locked => {
+                if input::check_mode_entry_locked(&self.state, key) {
+                    self.state.mode = Mode::normal_mode(self.state.active.is_some());
+                } else {
+                    self.forward_key_to_focused_pty_headless(key);
+                }
+            }
+        }
+    }
+
+    fn forward_key_to_focused_pty_headless(&mut self, key: crate::input::TerminalKey) {
+        if let Some(ws_idx) = self.state.active {
+            if let Some(rt) = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            {
+                let bytes = rt.encode_terminal_key(key);
+                if !bytes.is_empty() {
+                    let _ = rt.try_send_bytes(bytes::Bytes::from(bytes));
+                }
             }
         }
     }

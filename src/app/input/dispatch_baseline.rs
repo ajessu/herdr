@@ -789,4 +789,52 @@ mod tests {
 
         assert_eq!(state.mode, Mode::Tab);
     }
+
+    #[tokio::test]
+    async fn terminal_headless_mode_entry_matches_intercept_mode_entry_and_shared() {
+        // All six mode-entry keys, driven from Mode::Terminal. From Terminal the
+        // resolved target never equals the current mode, so intercept_mode_entry_and_shared
+        // takes its switch branch (not the sticky self-toggle), matching the headless path.
+        let cases: &[(KeyCode, KeyModifiers)] = &[
+            (KeyCode::Char('t'), KeyModifiers::CONTROL),
+            (KeyCode::Char('p'), KeyModifiers::CONTROL),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL),
+            (KeyCode::Char('h'), KeyModifiers::CONTROL),
+            (KeyCode::Char('o'), KeyModifiers::CONTROL),
+            (KeyCode::Char('g'), KeyModifiers::CONTROL),
+        ];
+
+        for (code, mods) in cases {
+            let mut app = app_for_mouse_test();
+            let mut ws = Workspace::test_new("test");
+            let pane_id = ws.tabs[0].root_pane;
+            let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+            let info = pane_infos[0].clone();
+            let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(
+                info.inner_rect.width,
+                info.inner_rect.height,
+            );
+            ws.tabs[0].runtimes.insert(pane_id, runtime);
+            app.state.workspaces = vec![ws];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.view.pane_infos = pane_infos;
+
+            let key = TerminalKey::new(*code, *mods);
+            app.handle_terminal_key_headless(key);
+            let headless_mode = app.state.mode;
+
+            app.state.mode = Mode::Terminal;
+            let consumed = app.intercept_mode_entry_and_shared(key);
+            assert!(consumed);
+            let reference_mode = app.state.mode;
+
+            assert_eq!(
+                headless_mode, reference_mode,
+                "parity mismatch for {:?}+{:?}: headless={:?}, reference={:?}",
+                mods, code, headless_mode, reference_mode
+            );
+        }
+    }
 }

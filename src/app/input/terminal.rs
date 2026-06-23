@@ -80,6 +80,26 @@ impl App {
             return None;
         }
 
+        // Mode-entry keys switch herdr's mode from a focused terminal pane
+        // instead of reaching the shell. The is_prefix_key block above owns
+        // the prefix combo, so a Mode::Prefix result is excluded here.
+        // Safe to match kind-agnostically: Release events never reach this
+        // function and post-switch Repeats are suppressed upstream
+        // (route_client_events, src/app/mod.rs:1421-1432).
+        if let Some(target) = super::check_mode_entry(&self.state, key) {
+            if target != Mode::Prefix {
+                debug!(
+                    code = ?key_event.code,
+                    modifiers = ?key_event.modifiers,
+                    kind = ?key_event.kind,
+                    target = ?target,
+                    "intercepted mode-entry key before forwarding to pane"
+                );
+                self.state.mode = target;
+                return None;
+            }
+        }
+
         if is_modifier_only_key(&key_event.code) {
             debug!(
                 code = ?key_event.code,
@@ -1251,5 +1271,154 @@ mod tests {
             .expect("scroll metrics after PageUp");
         // Forwarded to pane, so test runtime doesn't process it — scroll stays at bottom.
         assert_eq!(end_metrics.offset_from_bottom, 0);
+    }
+
+    #[tokio::test]
+    async fn mode_entry_keys_switch_mode_instead_of_forwarding_to_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let info = pane_infos[0].clone();
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            info.inner_rect.width,
+            info.inner_rect.height,
+        );
+        ws.tabs[0].runtimes.insert(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        let cases: &[(KeyCode, KeyModifiers, Mode)] = &[
+            (KeyCode::Char('p'), KeyModifiers::CONTROL, Mode::Pane),
+            (KeyCode::Char('t'), KeyModifiers::CONTROL, Mode::Tab),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL, Mode::Resize),
+            (KeyCode::Char('h'), KeyModifiers::CONTROL, Mode::Move),
+            (KeyCode::Char('o'), KeyModifiers::CONTROL, Mode::Session),
+            (KeyCode::Char('g'), KeyModifiers::CONTROL, Mode::Locked),
+        ];
+
+        for (code, mods, expected_mode) in cases {
+            app.state.mode = Mode::Terminal;
+            app.handle_terminal_key_headless(TerminalKey::new(*code, *mods));
+            assert_eq!(
+                app.state.mode, *expected_mode,
+                "expected {:?} for {:?}+{:?}",
+                expected_mode, mods, code
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "bytes were forwarded to pane for {:?}+{:?}",
+                mods,
+                code
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prefix_key_still_enters_prefix_mode_from_terminal() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let info = pane_infos[0].clone();
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            info.inner_rect.width,
+            info.inner_rect.height,
+        );
+        ws.tabs[0].runtimes.insert(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Prefix);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn headless_locked_mode_is_escapable() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let info = pane_infos[0].clone();
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            info.inner_rect.width,
+            info.inner_rect.height,
+        );
+        ws.tabs[0].runtimes.insert(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        // Enter Locked via terminal path
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.state.mode, Mode::Locked);
+
+        // Non-exit key in Locked forwards to PTY
+        app.handle_non_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('a'),
+            KeyModifiers::empty(),
+        ));
+        assert_eq!(app.state.mode, Mode::Locked);
+        let bytes = rx.try_recv().expect("non-exit key should forward to PTY");
+        assert_eq!(bytes.as_ref(), b"a");
+
+        // mode_locked key exits Locked
+        app.handle_non_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(matches!(app.state.mode, Mode::Terminal | Mode::Navigate));
+    }
+
+    #[tokio::test]
+    async fn async_terminal_key_mode_entry_switches_mode() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let info = pane_infos[0].clone();
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            info.inner_rect.width,
+            info.inner_rect.height,
+        );
+        ws.tabs[0].runtimes.insert(pane_id, runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        app.handle_terminal_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await;
+
+        assert_eq!(app.state.mode, Mode::Tab);
+        assert!(rx.try_recv().is_err());
     }
 }

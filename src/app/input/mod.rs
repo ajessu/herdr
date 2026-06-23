@@ -67,7 +67,7 @@ use super::App;
 // Modal dispatch helpers
 // ---------------------------------------------------------------------------
 
-fn check_mode_entry_locked(state: &AppState, key: TerminalKey) -> bool {
+pub(super) fn check_mode_entry_locked(state: &AppState, key: TerminalKey) -> bool {
     if let Some(combo) = state.keybinds.mode_entry.locked {
         crate::config::terminal_key_matches_combo(key, combo)
     } else {
