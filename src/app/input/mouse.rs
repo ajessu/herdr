@@ -523,11 +523,26 @@ impl AppState {
                             return None;
                         }
 
-                        if let Some((ws_idx, _tab_idx, pane_id)) =
+                        if let Some((ws_idx, tab_idx, pane_id)) =
                             self.collapsed_agent_detail_target_at(mouse.row)
                         {
-                            self.focus_pane_in_workspace(ws_idx, pane_id);
-                            self.mode = Mode::Terminal;
+                            let has_attention = self
+                                .workspaces
+                                .get(ws_idx)
+                                .and_then(|ws| ws.tabs.get(tab_idx))
+                                .and_then(|tab| tab.panes.get(&pane_id))
+                                .map(|pane| {
+                                    let state = self
+                                        .terminals
+                                        .get(&pane.attached_terminal_id)
+                                        .map_or(crate::detect::AgentState::Unknown, |t| t.state);
+                                    crate::ui::is_attention_state(state, pane.seen)
+                                })
+                                .unwrap_or(false);
+                            if has_attention {
+                                self.focus_pane_in_workspace(ws_idx, pane_id);
+                                self.mode = Mode::Terminal;
+                            }
                         }
                         return None;
                     }
@@ -3720,9 +3735,7 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
-            app.state.workspaces[0]
-                .active_tab_display_name()
-                .as_deref(),
+            app.state.workspaces[0].active_tab_display_name().as_deref(),
             Some("three")
         );
     }
@@ -3771,9 +3784,7 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
-            app.state.workspaces[0]
-                .active_tab_display_name()
-                .as_deref(),
+            app.state.workspaces[0].active_tab_display_name().as_deref(),
             Some("first")
         );
     }
@@ -3819,9 +3830,7 @@ mod tests {
 
         assert_eq!(app.state.workspaces[0].active_tab, 0);
         assert_eq!(
-            app.state.workspaces[0]
-                .active_tab_display_name()
-                .as_deref(),
+            app.state.workspaces[0].active_tab_display_name().as_deref(),
             Some("first")
         );
     }
@@ -3866,9 +3875,7 @@ mod tests {
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
-            app.state.workspaces[0]
-                .active_tab_display_name()
-                .as_deref(),
+            app.state.workspaces[0].active_tab_display_name().as_deref(),
             Some("two")
         );
     }

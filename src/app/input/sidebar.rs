@@ -928,12 +928,124 @@ mod tests {
             .get_mut(&second_terminal_id)
             .unwrap()
             .detected_agent = Some(Agent::Claude);
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .state = crate::detect::AgentState::Blocked;
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.sidebar_collapsed = true;
-        app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
-        app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
+        app.state.view.sidebar_rect = Rect::new(0, 0, 7, 20);
+        app.state.view.terminal_area = Rect::new(7, 0, 80, 20);
+
+        let (_, _, detail_area) =
+            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x,
+            detail_area.y + 1,
+        ));
+
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        assert_eq!(
+            app.state.workspaces[0].tabs[1].layout.focused(),
+            second_pane
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn clicking_collapsed_non_attention_agent_row_does_not_switch() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_tab = ws.test_add_tab(Some("logs"));
+        let second_pane = ws.tabs[second_tab].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[0].tabs[second_tab].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .state = crate::detect::AgentState::Working;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_collapsed = true;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 7, 20);
+        app.state.view.terminal_area = Rect::new(7, 0, 80, 20);
+
+        let (_, _, detail_area) =
+            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x,
+            detail_area.y + 1,
+        ));
+
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), first_pane);
+    }
+
+    #[test]
+    fn clicking_collapsed_idle_unseen_agent_row_switches() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_tab = ws.test_add_tab(Some("logs"));
+        let second_pane = ws.tabs[second_tab].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[0].tabs[second_tab].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .state = crate::detect::AgentState::Idle;
+        app.state.workspaces[0].tabs[second_tab]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .seen = false;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_collapsed = true;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 7, 20);
+        app.state.view.terminal_area = Rect::new(7, 0, 80, 20);
 
         let (_, _, detail_area) =
             crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
@@ -955,8 +1067,8 @@ mod tests {
     fn clicking_collapsed_sidebar_toggle_expands_sidebar() {
         let mut app = app_for_mouse_test();
         app.state.sidebar_collapsed = true;
-        app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
-        app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
+        app.state.view.sidebar_rect = Rect::new(0, 0, 7, 20);
+        app.state.view.terminal_area = Rect::new(7, 0, 80, 20);
 
         let toggle = crate::ui::collapsed_sidebar_toggle_rect(app.state.view.sidebar_rect);
         app.handle_mouse(mouse(
