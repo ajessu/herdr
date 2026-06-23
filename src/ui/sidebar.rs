@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::scrollbar::{render_scrollbar, should_show_scrollbar};
+use super::scrollbar::{render_scrollbar, should_show_scrollbar, SCROLLBAR_THUMB};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, Mode};
@@ -985,7 +985,14 @@ fn render_workspace_list(
     }
 
     if let Some(track) = scrollbar_rect {
-        render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
+        render_scrollbar(
+            frame,
+            metrics,
+            track,
+            p.surface_dim,
+            p.overlay0,
+            SCROLLBAR_THUMB,
+        );
     }
 
     if app.mouse_capture && list_bottom > area.y {
@@ -1133,7 +1140,14 @@ fn render_agent_detail(
     }
 
     if let Some(track) = scrollbar_rect {
-        render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
+        render_scrollbar(
+            frame,
+            metrics,
+            track,
+            p.surface_dim,
+            p.overlay0,
+            SCROLLBAR_THUMB,
+        );
     }
 }
 

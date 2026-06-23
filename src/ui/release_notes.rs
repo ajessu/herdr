@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::scrollbar::{release_notes_scrollbar_rect, render_scrollbar};
+use super::scrollbar::{release_notes_scrollbar_rect, render_scrollbar, SCROLLBAR_THUMB};
 use super::widgets::{
     action_button_width, modal_stack_areas, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell,
@@ -118,7 +118,7 @@ pub(super) fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, ar
             track,
             app.palette.overlay0,
             app.palette.overlay1,
-            "▐",
+            SCROLLBAR_THUMB,
         );
     }
 
@@ -229,7 +229,7 @@ pub(super) fn render_product_announcement_overlay(app: &AppState, frame: &mut Fr
             track,
             app.palette.overlay0,
             app.palette.overlay1,
-            "▐",
+            SCROLLBAR_THUMB,
         );
     }
 
