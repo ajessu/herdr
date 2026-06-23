@@ -658,6 +658,259 @@ pub(crate) fn is_attention_state(state: AgentState, seen: bool) -> bool {
     matches!(state, AgentState::Blocked) || (matches!(state, AgentState::Idle) && !seen)
 }
 
+/// Which workspace anchors the collapsed rail's window — the selected one while
+/// navigating, else the active one. Always kept visible by the anchored window.
+fn collapsed_ws_anchor(app: &AppState) -> usize {
+    if matches!(app.mode, Mode::Navigate) {
+        app.selected
+    } else {
+        app.active.unwrap_or(app.selected)
+    }
+}
+
+/// Stateless visible window over the collapsed rail's workspace section.
+pub(crate) fn collapsed_ws_window(app: &AppState, ws_area: Rect) -> super::overflow::ListWindow {
+    super::overflow::anchored_window(
+        app.workspaces.len(),
+        ws_area.height as usize,
+        collapsed_ws_anchor(app),
+    )
+}
+
+/// The workspace index a collapsed detail section is showing panes for.
+fn collapsed_detail_ws_idx(app: &AppState) -> Option<usize> {
+    if matches!(app.mode, Mode::Navigate) {
+        Some(app.selected)
+    } else {
+        app.active
+    }
+}
+
+/// Pane details for the collapsed detail section, with the focused-pane anchor
+/// index (so the focused pane stays visible in the window).
+fn collapsed_detail_details(
+    app: &AppState,
+) -> Option<(usize, Vec<crate::workspace::PaneDetail>, usize)> {
+    let ws_idx = collapsed_detail_ws_idx(app)?;
+    let ws = app.workspaces.get(ws_idx)?;
+    let details = ws.pane_details(&app.terminals);
+    if details.is_empty() {
+        return None;
+    }
+    let anchor = ws
+        .active_tab()
+        .map(|tab| tab.focused_pane_id())
+        .and_then(|pid| details.iter().position(|d| d.pane_id == pid))
+        .unwrap_or(0);
+    Some((ws_idx, details, anchor))
+}
+
+/// The collapsed detail section's window mapping for the input layer: the
+/// workspace index it shows, its pane details, and the anchored visible window.
+/// Mirrors what the rail renders so a clicked row resolves to the same pane.
+pub(crate) fn collapsed_detail_window(
+    app: &AppState,
+    detail_area: Rect,
+) -> Option<(
+    usize,
+    Vec<crate::workspace::PaneDetail>,
+    super::overflow::ListWindow,
+)> {
+    let content = collapsed_detail_content_area(detail_area);
+    if content == Rect::default() {
+        return None;
+    }
+    let (ws_idx, details, anchor) = collapsed_detail_details(app)?;
+    let win = super::overflow::anchored_window(details.len(), content.height as usize, anchor);
+    Some((ws_idx, details, win))
+}
+
+/// The detail-content area (detail_area minus its trailing toggle row) for the
+/// collapsed rail, matching the render carve-out.
+pub(crate) fn collapsed_detail_content_area(detail_area: Rect) -> Rect {
+    Rect::new(
+        detail_area.x,
+        detail_area.y,
+        detail_area.width,
+        detail_area.height.saturating_sub(1),
+    )
+}
+
+/// Place an overflow badge on a single row, right-anchored within `width` so the
+/// `+N ●ᵏ` reads at the row's end. Hit zone is the whole row (touch-adequate,
+/// NFR5). Returns a zero rect when the side is empty.
+fn place_row_badge(
+    x: u16,
+    y: u16,
+    width: u16,
+    side: super::overflow::OverflowSide,
+) -> super::overflow::OverflowBadgeRect {
+    if side.is_empty() || width == 0 {
+        return super::overflow::OverflowBadgeRect::default();
+    }
+    super::overflow::OverflowBadgeRect {
+        rect: Rect::new(x, y, width, 1),
+        side,
+    }
+}
+
+/// Compute all four sidebar overflow badge rects (collapsed rail + expanded
+/// surfaces) for the current frame. Pure: reads `AppState`, mutates nothing.
+/// Render and the mouse layer both consume these rects so draw-rect == hit-rect.
+pub(crate) fn compute_sidebar_overflow(
+    app: &AppState,
+    sidebar_area: Rect,
+) -> crate::app::state::SidebarOverflowRects {
+    use super::overflow::{scrolled_window, side_above, side_below};
+    let mut rects = crate::app::state::SidebarOverflowRects::default();
+    if sidebar_area == Rect::default() {
+        return rects;
+    }
+
+    if app.sidebar_collapsed {
+        let layout = compute_collapsed_rail_layout(sidebar_area);
+        // Workspace section.
+        if layout.ws_area != Rect::default() {
+            let ws_area = layout.ws_area;
+            let win = collapsed_ws_window(app, ws_area);
+            let attn = |i: usize| {
+                app.workspaces
+                    .get(i)
+                    .map(|ws| {
+                        let (s, seen) = ws.aggregate_state(&app.terminals);
+                        is_attention_state(s, seen)
+                    })
+                    .unwrap_or(false)
+            };
+            let above = side_above(win, attn);
+            let below = side_below(win, app.workspaces.len(), attn);
+            rects.collapsed_ws_above = place_row_badge(ws_area.x, ws_area.y, ws_area.width, above);
+            rects.collapsed_ws_below = place_row_badge(
+                ws_area.x,
+                ws_area.y + ws_area.height.saturating_sub(1),
+                ws_area.width,
+                below,
+            );
+        }
+        // Detail section.
+        let content = collapsed_detail_content_area(layout.detail_area);
+        if content != Rect::default() {
+            if let Some((_, details, anchor)) = collapsed_detail_details(app) {
+                let win = super::overflow::anchored_window(
+                    details.len(),
+                    content.height as usize,
+                    anchor,
+                );
+                let attn = |i: usize| {
+                    details
+                        .get(i)
+                        .map(|d| is_attention_state(d.state, d.seen))
+                        .unwrap_or(false)
+                };
+                let above = side_above(win, attn);
+                let below = side_below(win, details.len(), attn);
+                rects.collapsed_detail_above =
+                    place_row_badge(content.x, content.y, content.width, above);
+                rects.collapsed_detail_below = place_row_badge(
+                    content.x,
+                    content.y + content.height.saturating_sub(1),
+                    content.width,
+                    below,
+                );
+            }
+        }
+        return rects;
+    }
+
+    // Expanded surfaces reuse their existing top-anchored scroll offsets.
+    let (ws_area, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
+
+    // Expanded workspace list.
+    let ws_metrics = workspace_list_scroll_metrics(app, ws_area);
+    let ws_body = workspace_list_body_rect(ws_area, should_show_scrollbar(ws_metrics));
+    if ws_body != Rect::default() {
+        let entries = workspace_list_entries(app);
+        let win = scrolled_window(
+            entries.len(),
+            ws_metrics.viewport_rows,
+            app.workspace_scroll,
+        );
+        let attn = |i: usize| entry_is_attention(app, &entries, i);
+        let above = side_above(win, attn);
+        let below = side_below(win, entries.len(), attn);
+        rects.expanded_ws_above = place_row_badge(ws_body.x, ws_body.y, ws_body.width, above);
+        rects.expanded_ws_below = place_row_badge(
+            ws_body.x,
+            ws_body.y + ws_body.height.saturating_sub(1),
+            ws_body.width,
+            below,
+        );
+    }
+
+    // Expanded agent panel.
+    let ag_metrics = agent_panel_scroll_metrics(app, detail_area);
+    let ag_body = agent_panel_body_rect(detail_area, should_show_scrollbar(ag_metrics));
+    if ag_body != Rect::default() {
+        let entries = agent_panel_entries(app);
+        let win = scrolled_window(
+            entries.len(),
+            ag_metrics.viewport_rows,
+            app.agent_panel_scroll,
+        );
+        let attn = |i: usize| {
+            entries
+                .get(i)
+                .map(|e| is_attention_state(e.state, e.seen))
+                .unwrap_or(false)
+        };
+        let above = side_above(win, attn);
+        let below = side_below(win, entries.len(), attn);
+        rects.expanded_agents_above = place_row_badge(ag_body.x, ag_body.y, ag_body.width, above);
+        rects.expanded_agents_below = place_row_badge(
+            ag_body.x,
+            ag_body.y + ag_body.height.saturating_sub(1),
+            ag_body.width,
+            below,
+        );
+    }
+
+    rects
+}
+
+/// Render an overflow badge onto its pre-computed rect: a dim `+N` count plus an
+/// accent `●ᵏ` attention badge, right-aligned within the row. No-op for an
+/// inactive (zero-area / empty) rect.
+fn render_overflow_badge(
+    frame: &mut Frame,
+    badge: super::overflow::OverflowBadgeRect,
+    p: &crate::app::state::Palette,
+) {
+    if !badge.is_active() {
+        return;
+    }
+    let spans = super::overflow::badge_spans(badge.side.hidden, badge.side.hidden_attention, p);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+        badge.rect,
+    );
+}
+
+/// Attention predicate for a workspace-list entry by index (resolves the
+/// underlying workspace's aggregate state).
+fn entry_is_attention(app: &AppState, entries: &[WorkspaceListEntry], idx: usize) -> bool {
+    match entries.get(idx) {
+        Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => app
+            .workspaces
+            .get(*ws_idx)
+            .map(|ws| {
+                let (s, seen) = ws.aggregate_state(&app.terminals);
+                is_attention_state(s, seen)
+            })
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
 /// Collapsed sidebar: workspace glance on top, compact agent list below.
 /// Renders button-like rows with full-row background on active/selected, a
 /// leading 1-col attention marker, the row number, and a trailing state icon.
@@ -685,8 +938,20 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
 
     let content_w = layout.ws_area.width;
 
-    for (visible_idx, ws) in app.workspaces.iter().enumerate() {
-        let y = layout.ws_area.y + visible_idx as u16;
+    // Stateless anchored window: the selected/active workspace stays visible and
+    // overflow rows count hidden spaces (FR8). Indicator rows are drawn from the
+    // pre-computed `sidebar_overflow` rects so render-rect == hit-rect.
+    let ws_win = collapsed_ws_window(app, layout.ws_area);
+    let ws_above = app.view.sidebar_overflow.collapsed_ws_above;
+    let ws_below = app.view.sidebar_overflow.collapsed_ws_below;
+    let ws_first_row = layout.ws_area.y + u16::from(ws_above.is_active());
+
+    for slot in 0..ws_win.count {
+        let visible_idx = ws_win.first + slot;
+        let Some(ws) = app.workspaces.get(visible_idx) else {
+            break;
+        };
+        let y = ws_first_row + slot as u16;
         if y >= layout.ws_area.y + layout.ws_area.height {
             break;
         }
@@ -742,6 +1007,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         );
     }
 
+    render_overflow_badge(frame, ws_above, p);
+    render_overflow_badge(frame, ws_below, p);
+
     if let Some(divider_y) = layout.divider_y {
         let buf = frame.buffer_mut();
         for x in layout.ws_area.x..layout.ws_area.x + content_w {
@@ -750,22 +1018,24 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         }
     }
 
-    let detail_ws_idx = if is_navigating {
-        Some(app.selected)
-    } else {
-        app.active
-    };
-    let detail_content_area = Rect::new(
-        layout.detail_area.x,
-        layout.detail_area.y,
-        layout.detail_area.width,
-        layout.detail_area.height.saturating_sub(1),
-    );
+    let detail_content_area = collapsed_detail_content_area(layout.detail_area);
+    let detail_above = app.view.sidebar_overflow.collapsed_detail_above;
+    let detail_below = app.view.sidebar_overflow.collapsed_detail_below;
     if detail_content_area != Rect::default() {
-        if let Some(ws_idx) = detail_ws_idx {
+        if let Some((ws_idx, details, anchor)) = collapsed_detail_details(app) {
             if let Some(ws) = app.workspaces.get(ws_idx) {
-                for (detail_idx, detail) in ws.pane_details(&app.terminals).iter().enumerate() {
-                    let y = detail_content_area.y + detail_idx as u16;
+                let win = super::overflow::anchored_window(
+                    details.len(),
+                    detail_content_area.height as usize,
+                    anchor,
+                );
+                let first_row = detail_content_area.y + u16::from(detail_above.is_active());
+                for slot in 0..win.count {
+                    let detail_idx = win.first + slot;
+                    let Some(detail) = details.get(detail_idx) else {
+                        break;
+                    };
+                    let y = first_row + slot as u16;
                     if y >= detail_content_area.y + detail_content_area.height {
                         break;
                     }
@@ -815,6 +1085,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         Rect::new(detail_content_area.x, y, content_w, 1),
                     );
                 }
+
+                render_overflow_badge(frame, detail_above, p);
+                render_overflow_badge(frame, detail_below, p);
             }
         }
     }
@@ -878,6 +1151,15 @@ pub(super) fn render_sidebar(
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
+
+    // Attention-aware overflow badges (FR8) overlaid on the first/last body row
+    // of each expanded section, from the pre-computed rects (render == hit-test).
+    let ov = &app.view.sidebar_overflow;
+    render_overflow_badge(frame, ov.expanded_ws_above, p);
+    render_overflow_badge(frame, ov.expanded_ws_below, p);
+    render_overflow_badge(frame, ov.expanded_agents_above, p);
+    render_overflow_badge(frame, ov.expanded_agents_below, p);
+
     render_sidebar_toggle(app, frame, area, false, p);
 }
 
@@ -1976,6 +2258,52 @@ mod tests {
         let active_row = layout.ws_area.y;
         let active_bg = buf[(layout.ws_area.x, active_row)].style().bg;
         assert_eq!(active_bg, Some(app.palette.surface_dim));
+    }
+
+    #[test]
+    fn collapsed_rail_renders_attention_overflow_badge() {
+        // Many short workspaces so some are hidden; a hidden one is Blocked, so
+        // the bottom badge must paint a `●` attention glyph (FR8).
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = (0..12)
+            .map(|i| Workspace::test_new(&format!("ws{i}")))
+            .collect();
+        app.ensure_test_terminals();
+        // Force workspace 9 (hidden below) Blocked.
+        let pane = app.workspaces[9].tabs[0].root_pane;
+        let tid = app.workspaces[9].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&tid).unwrap().state = crate::detect::AgentState::Blocked;
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_collapsed = true;
+
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 16));
+        // compute_view recomputes sidebar_rect; render with the real rect.
+        let sidebar_rect = app.view.sidebar_rect;
+        let mut terminal = Terminal::new(TestBackend::new(
+            sidebar_rect.width.max(7),
+            sidebar_rect.height.max(16),
+        ))
+        .expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, sidebar_rect))
+            .expect("collapsed sidebar should render");
+
+        let below = app.view.sidebar_overflow.collapsed_ws_below;
+        assert!(below.is_active(), "spaces hidden below");
+        assert!(below.side.hidden_attention >= 1, "blocked space counted");
+        let buf = terminal.backend().buffer();
+        let row_text: String = (below.rect.x..below.rect.x + below.rect.width)
+            .map(|x| buf[(x, below.rect.y)].symbol())
+            .collect();
+        assert!(
+            row_text.contains('●'),
+            "attention glyph drawn: {row_text:?}"
+        );
+        assert!(row_text.contains('+'), "hidden count drawn: {row_text:?}");
     }
 
     #[test]

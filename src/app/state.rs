@@ -746,6 +746,25 @@ pub struct ViewState {
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
     pub floating_pane_infos: Vec<FloatingPaneInfo>,
+    /// Attention-aware overflow badge rects for the sidebar surfaces (FR8).
+    /// Computed compute-side; hit-tested by the mouse layer.
+    pub sidebar_overflow: SidebarOverflowRects,
+}
+
+/// Overflow badge rects for the four sidebar list sections (FR8). Each side is
+/// `OverflowBadgeRect::default()` (zero area) when not shown. The collapsed rail
+/// uses a stateless anchored window; the expanded surfaces reuse their existing
+/// scroll offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SidebarOverflowRects {
+    pub collapsed_ws_above: crate::ui::OverflowBadgeRect,
+    pub collapsed_ws_below: crate::ui::OverflowBadgeRect,
+    pub collapsed_detail_above: crate::ui::OverflowBadgeRect,
+    pub collapsed_detail_below: crate::ui::OverflowBadgeRect,
+    pub expanded_ws_above: crate::ui::OverflowBadgeRect,
+    pub expanded_ws_below: crate::ui::OverflowBadgeRect,
+    pub expanded_agents_above: crate::ui::OverflowBadgeRect,
+    pub expanded_agents_below: crate::ui::OverflowBadgeRect,
 }
 
 #[derive(Debug, Clone)]
@@ -1749,6 +1768,7 @@ impl AppState {
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
                 floating_pane_infos: Vec::new(),
+                sidebar_overflow: SidebarOverflowRects::default(),
             },
             drag: None,
             workspace_press: None,

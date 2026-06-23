@@ -513,6 +513,13 @@ impl AppState {
                     }
 
                     if self.sidebar_collapsed {
+                        // Overflow badge clicks (FR8) take priority over the row
+                        // beneath them: jump to the nearest hidden attention item.
+                        if self.on_collapsed_overflow_badge(mouse.column, mouse.row) {
+                            self.mode = Mode::Terminal;
+                            return None;
+                        }
+
                         if let Some(idx) = self.collapsed_workspace_at_row(mouse.row) {
                             self.switch_workspace(idx);
                             self.mode = Mode::Terminal;
@@ -540,6 +547,14 @@ impl AppState {
                                 self.mode = Mode::Terminal;
                             }
                         }
+                        return None;
+                    }
+
+                    // Overflow badge clicks (FR8) on the expanded surfaces jump to
+                    // the nearest hidden attention item, taking priority over the
+                    // row beneath them.
+                    if self.on_expanded_overflow_badge(mouse.column, mouse.row) {
+                        self.mode = Mode::Terminal;
                         return None;
                     }
 
@@ -1275,17 +1290,19 @@ impl AppState {
     }
 
     /// If `(col, row)` falls on an overflow indicator, return the tab index it
-    /// jumps to (the nearest hidden tab on that side). `None` otherwise.
+    /// jumps to. When the indicator carries an attention badge, the jump targets
+    /// the nearest hidden *attention* tab; otherwise the nearest hidden tab
+    /// (FR8). `None` otherwise.
     pub(super) fn tab_overflow_indicator_at(&self, col: u16, row: u16) -> Option<usize> {
         let overflow = &self.view.tab_overflow;
         if let Some(group) = overflow.left {
             if Self::hit(overflow.left_hit_area, col, row) {
-                return Some(group.jump_to);
+                return Some(group.attention_jump_to.unwrap_or(group.jump_to));
             }
         }
         if let Some(group) = overflow.right {
             if Self::hit(overflow.right_hit_area, col, row) {
-                return Some(group.jump_to);
+                return Some(group.attention_jump_to.unwrap_or(group.jump_to));
             }
         }
         None

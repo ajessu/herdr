@@ -12,6 +12,7 @@ mod menus;
 mod mobile;
 mod navigator;
 mod onboarding;
+mod overflow;
 mod panes;
 mod release_notes;
 mod scrollbar;
@@ -73,8 +74,9 @@ pub(crate) use self::{
     },
     sidebar::{
         agent_panel_body_rect, agent_panel_entries, agent_panel_scroll_metrics,
-        agent_panel_scrollbar_rect, agent_panel_toggle_rect, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
+        agent_panel_scrollbar_rect, agent_panel_toggle_rect, collapsed_detail_content_area,
+        collapsed_detail_window, collapsed_sidebar_sections, collapsed_sidebar_toggle_rect,
+        collapsed_ws_window, compute_workspace_card_areas, expanded_sidebar_sections,
         expanded_sidebar_toggle_rect, is_attention_state, normalized_workspace_scroll,
         sidebar_section_divider_rect, workspace_drop_indicator_row, workspace_list_entries,
         workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
@@ -87,10 +89,12 @@ pub(crate) use self::{
         mobile_switcher_areas, mobile_switcher_max_scroll, mobile_switcher_target_at,
         mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
     },
+    overflow::{resolve_jump as resolve_overflow_jump, OverflowBadgeRect},
     panes::pane_is_scrolled_back,
     tabs::{build_tab_bar_inputs, compute_tab_bar_view, TabBarOverflow, TabChrome},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
+pub(crate) use crate::app::state::SidebarOverflowRects;
 use crate::app::state::ViewLayout;
 use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
@@ -242,6 +246,8 @@ fn compute_view_internal(
         compute_workspace_card_areas(app, sidebar_area)
     };
 
+    let sidebar_overflow = sidebar::compute_sidebar_overflow(app, sidebar_area);
+
     let tab_bar_view = app
         .active
         .and_then(|i| app.workspaces.get(i))
@@ -319,6 +325,7 @@ fn compute_view_internal(
         pane_infos,
         split_borders,
         floating_pane_infos,
+        sidebar_overflow,
     };
 }
 
@@ -391,6 +398,7 @@ fn compute_mobile_view(
         pane_infos,
         split_borders,
         floating_pane_infos: Vec::new(),
+        sidebar_overflow: crate::ui::SidebarOverflowRects::default(),
     };
 }
 

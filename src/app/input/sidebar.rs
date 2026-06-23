@@ -1,8 +1,17 @@
 use ratatui::layout::Rect;
 
-use crate::app::state::{AppState, Mode, ViewLayout};
+use crate::app::state::{AppState, ViewLayout};
 
 use super::ScrollbarClickTarget;
+
+/// True when `(col, row)` lands inside an active overflow badge's rect.
+fn badge_hit(badge: crate::ui::OverflowBadgeRect, col: u16, row: u16) -> bool {
+    badge.is_active()
+        && col >= badge.rect.x
+        && col < badge.rect.x + badge.rect.width
+        && row >= badge.rect.y
+        && row < badge.rect.y + badge.rect.height
+}
 
 impl AppState {
     pub(super) fn workspace_list_rect(&self) -> Rect {
@@ -326,26 +335,21 @@ impl AppState {
             return None;
         }
 
-        let idx = (row - ws_area.y) as usize;
-        (idx < self.workspaces.len()).then_some(idx)
-    }
-
-    fn collapsed_detail_workspace_idx(&self) -> Option<usize> {
-        if matches!(
-            self.mode,
-            Mode::Navigate
-                | Mode::RenameWorkspace
-                | Mode::Resize
-                | Mode::ConfirmClose
-                | Mode::ContextMenu
-                | Mode::Settings
-                | Mode::GlobalMenu
-                | Mode::KeybindHelp
-        ) {
-            Some(self.selected)
-        } else {
-            self.active
+        // Rows are placed through the same anchored window the rail renders, with
+        // a reserved top-indicator row when spaces are hidden above. Map the
+        // clicked row back to the workspace index (skipping indicator rows).
+        let win = crate::ui::collapsed_ws_window(self, ws_area);
+        let above_active = self.view.sidebar_overflow.collapsed_ws_above.is_active();
+        let first_row = ws_area.y + u16::from(above_active);
+        if row < first_row {
+            return None; // top indicator row, not a workspace
         }
+        let slot = (row - first_row) as usize;
+        if slot >= win.count {
+            return None; // bottom indicator row or empty space
+        }
+        let idx = win.first + slot;
+        (idx < self.workspaces.len()).then_some(idx)
     }
 
     pub(super) fn collapsed_agent_detail_target_at(
@@ -357,12 +361,7 @@ impl AppState {
         }
 
         let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
-        let detail_content_area = Rect::new(
-            detail_area.x,
-            detail_area.y,
-            detail_area.width,
-            detail_area.height.saturating_sub(1),
-        );
+        let detail_content_area = crate::ui::collapsed_detail_content_area(detail_area);
         if detail_content_area == Rect::default()
             || row < detail_content_area.y
             || row >= detail_content_area.y + detail_content_area.height
@@ -370,12 +369,132 @@ impl AppState {
             return None;
         }
 
-        let ws_idx = self.collapsed_detail_workspace_idx()?;
-        let ws = self.workspaces.get(ws_idx)?;
-        let detail_idx = (row - detail_content_area.y) as usize;
-        let details = ws.pane_details(&self.terminals);
-        let detail = details.get(detail_idx)?;
+        // Map the clicked row through the same anchored window the rail renders,
+        // skipping a reserved top-indicator row when details are hidden above.
+        let (ws_idx, details, win) = crate::ui::collapsed_detail_window(self, detail_area)?;
+        let above_active = self
+            .view
+            .sidebar_overflow
+            .collapsed_detail_above
+            .is_active();
+        let first_row = detail_content_area.y + u16::from(above_active);
+        if row < first_row {
+            return None; // top indicator row
+        }
+        let slot = (row - first_row) as usize;
+        if slot >= win.count {
+            return None; // bottom indicator row or empty space
+        }
+        let detail = details.get(win.first + slot)?;
         Some((ws_idx, detail.tab_idx, detail.pane_id))
+    }
+
+    /// Handle a click on a collapsed-rail overflow badge (FR8). Resolves the
+    /// nearest hidden attention item (fallback: nearest hidden) and jumps:
+    /// workspace badges switch workspace, detail badges focus the pane. Both
+    /// route through drag-clearing chokepoints (`switch_workspace` /
+    /// `focus_pane_in_workspace` → `switch_workspace_tab`). Returns true when a
+    /// badge was hit (whether or not the jump resolved to a valid target).
+    pub(super) fn on_collapsed_overflow_badge(&mut self, col: u16, row: u16) -> bool {
+        let ov = self.view.sidebar_overflow;
+
+        // Workspace section badges → switch_workspace.
+        for badge in [ov.collapsed_ws_above, ov.collapsed_ws_below] {
+            if badge_hit(badge, col, row) {
+                if let Some(target) = crate::ui::resolve_overflow_jump(badge.side) {
+                    if target < self.workspaces.len() {
+                        self.switch_workspace(target);
+                    } else {
+                        tracing::warn!(target, "collapsed ws overflow jump out of range");
+                    }
+                }
+                return true;
+            }
+        }
+
+        // Detail section badges → focus the resolved pane.
+        for badge in [ov.collapsed_detail_above, ov.collapsed_detail_below] {
+            if badge_hit(badge, col, row) {
+                self.jump_to_collapsed_detail_index(crate::ui::resolve_overflow_jump(badge.side));
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Handle a click on an expanded-surface overflow badge (FR8). Workspace-list
+    /// badges switch workspace; agent-panel badges focus the resolved pane.
+    pub(super) fn on_expanded_overflow_badge(&mut self, col: u16, row: u16) -> bool {
+        let ov = self.view.sidebar_overflow;
+
+        for badge in [ov.expanded_ws_above, ov.expanded_ws_below] {
+            if badge_hit(badge, col, row) {
+                if let Some(entry_idx) = crate::ui::resolve_overflow_jump(badge.side) {
+                    self.jump_to_workspace_list_entry(entry_idx);
+                }
+                return true;
+            }
+        }
+
+        for badge in [ov.expanded_agents_above, ov.expanded_agents_below] {
+            if badge_hit(badge, col, row) {
+                if let Some(entry_idx) = crate::ui::resolve_overflow_jump(badge.side) {
+                    self.jump_to_agent_panel_entry(entry_idx);
+                }
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Focus the pane at `detail_idx` within the collapsed rail's current detail
+    /// workspace. Range-asserted; out-of-range is a logged no-op.
+    fn jump_to_collapsed_detail_index(&mut self, detail_idx: Option<usize>) {
+        let Some(detail_idx) = detail_idx else {
+            return;
+        };
+        let detail_area = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect).2;
+        // collapsed_detail_window resolves the same ws + details the rail renders.
+        let Some((ws_idx, details, _win)) = crate::ui::collapsed_detail_window(self, detail_area)
+        else {
+            return;
+        };
+        if let Some(detail) = details.get(detail_idx) {
+            let pane_id = detail.pane_id;
+            self.focus_pane_in_workspace(ws_idx, pane_id);
+        } else {
+            tracing::warn!(detail_idx, "collapsed detail overflow jump out of range");
+        }
+    }
+
+    /// Switch to the workspace behind workspace-list entry `entry_idx`. The
+    /// expanded list's `switch_workspace` auto-scrolls the target into view.
+    fn jump_to_workspace_list_entry(&mut self, entry_idx: usize) {
+        let entries = crate::ui::workspace_list_entries(self);
+        match entries.get(entry_idx) {
+            Some(crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. }) => {
+                let ws_idx = *ws_idx;
+                if ws_idx < self.workspaces.len() {
+                    self.switch_workspace(ws_idx);
+                } else {
+                    tracing::warn!(ws_idx, "expanded ws overflow jump out of range");
+                }
+            }
+            None => tracing::warn!(entry_idx, "expanded ws overflow entry out of range"),
+        }
+    }
+
+    /// Focus the pane behind agent-panel entry `entry_idx`. Routes through
+    /// `focus_agent_entry`, which range-asserts, clears drag (via
+    /// `focus_pane_in_workspace` → `switch_workspace_tab`), and scrolls the
+    /// panel so the focused entry is visible — the badge jump must advance the
+    /// window, not just focus.
+    fn jump_to_agent_panel_entry(&mut self, entry_idx: usize) {
+        if !self.focus_agent_entry(entry_idx) {
+            tracing::warn!(entry_idx, "expanded agent overflow jump did not resolve");
+        }
     }
 
     pub(super) fn workspace_drop_index_at_row(&self, row: u16) -> Option<usize> {
@@ -494,9 +613,9 @@ mod tests {
     use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
 
-    use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
+    use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path, App};
     use crate::{
-        app::state::{AgentPanelSort, DragTarget, Mode},
+        app::state::{AgentPanelSort, DragState, DragTarget, Mode},
         detect::Agent,
         workspace::Workspace,
     };
@@ -1714,5 +1833,283 @@ mod tests {
         app.state.sidebar_width_ratio = 0.18;
         crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 20));
         assert_eq!(app.state.view.sidebar_rect.width, 22);
+    }
+
+    // -----------------------------------------------------------------------
+    // FR8: attention-aware overflow badges — sidebar surfaces
+    // -----------------------------------------------------------------------
+
+    /// Build an app with `n` single-pane workspaces and test terminals. The
+    /// workspaces at `blocked` are forced into Blocked (an attention state).
+    fn app_with_attention_workspaces(n: usize, blocked: &[usize]) -> App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = (0..n)
+            .map(|i| Workspace::test_new(&format!("ws{i}")))
+            .collect();
+        app.state.ensure_test_terminals();
+        for &i in blocked {
+            let pane = app.state.workspaces[i].tabs[0].root_pane;
+            let tid = app.state.workspaces[i].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.state.terminals.get_mut(&tid).unwrap().state = crate::detect::AgentState::Blocked;
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app
+    }
+
+    #[test]
+    fn collapsed_rail_overflow_badge_counts_hidden_attention_spaces() {
+        // Many workspaces, short rail: some are hidden. A hidden blocked space
+        // makes the bottom badge carry an attention count.
+        let mut app = app_with_attention_workspaces(12, &[9]);
+        app.state.sidebar_collapsed = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 16));
+
+        let below = app.state.view.sidebar_overflow.collapsed_ws_below;
+        assert!(below.is_active(), "spaces are hidden below");
+        assert!(
+            below.side.hidden_attention >= 1,
+            "hidden blocked space counted"
+        );
+        assert_eq!(below.side.attention_jump_to, Some(9));
+    }
+
+    #[test]
+    fn collapsed_rail_overflow_badge_click_jumps_to_hidden_attention_space() {
+        let mut app = app_with_attention_workspaces(12, &[9]);
+        app.state.sidebar_collapsed = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 16));
+
+        let below = app.state.view.sidebar_overflow.collapsed_ws_below;
+        assert!(below.is_active());
+        let rect = below.rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 1,
+            rect.y,
+        ));
+        // Jumped to the hidden attention workspace (index 9), not a neighbor.
+        assert_eq!(app.state.active, Some(9));
+    }
+
+    #[test]
+    fn collapsed_rail_overflow_badge_no_attention_falls_back_to_nearest_hidden() {
+        // Hidden spaces but none in attention: badge still clickable, jumps to
+        // the nearest hidden space (plain `+N`, no attention target).
+        let mut app = app_with_attention_workspaces(12, &[]);
+        app.state.sidebar_collapsed = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 16));
+
+        let below = app.state.view.sidebar_overflow.collapsed_ws_below;
+        assert!(below.is_active());
+        assert_eq!(below.side.hidden_attention, 0);
+        assert_eq!(below.side.attention_jump_to, None);
+        let rect = below.rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 1,
+            rect.y,
+        ));
+        // Fell back to the nearest hidden space (the one just below the window).
+        assert_eq!(app.state.active, Some(below.side.jump_to));
+    }
+
+    #[test]
+    fn no_overflow_badge_when_everything_fits() {
+        let mut app = app_with_attention_workspaces(3, &[1]);
+        app.state.sidebar_collapsed = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 20));
+        let ov = app.state.view.sidebar_overflow;
+        assert!(!ov.collapsed_ws_above.is_active());
+        assert!(!ov.collapsed_ws_below.is_active());
+    }
+
+    #[test]
+    fn expanded_workspace_overflow_badge_click_jumps_and_scrolls() {
+        // Tall list of workspaces in the expanded sidebar; a hidden blocked
+        // workspace below the fold. Clicking the bottom badge switches to it.
+        let mut app = app_with_attention_workspaces(30, &[25]);
+        app.state.sidebar_collapsed = false;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 16));
+
+        let below = app.state.view.sidebar_overflow.expanded_ws_below;
+        assert!(
+            below.is_active(),
+            "workspaces hidden below the expanded list"
+        );
+        let rect = below.rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + rect.width.saturating_sub(1),
+            rect.y,
+        ));
+        assert_eq!(app.state.active, Some(25));
+        // After the switch, a fresh layout must REVEAL the target — resolving the
+        // index alone is insufficient; the scroll-aware window has to advance so
+        // the target is within the visible window, not still hidden.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 16));
+        assert_eq!(app.state.selected, 25);
+        let ws_area = crate::ui::workspace_list_rect(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let metrics = crate::ui::workspace_list_scroll_metrics(&app.state, ws_area);
+        let scroll = app.state.workspace_scroll;
+        assert!(
+            scroll <= 25 && 25 < scroll + metrics.viewport_rows,
+            "target 25 must be inside the visible window [{scroll}, {}) after the jump",
+            scroll + metrics.viewport_rows,
+        );
+    }
+
+    #[test]
+    fn collapsed_rail_drag_latch_cleared_on_badge_jump() {
+        // A stranded drag latch must not survive a badge-jump (step-3 chokepoint).
+        let mut app = app_with_attention_workspaces(12, &[9]);
+        app.state.sidebar_collapsed = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 16));
+        // Synthesize an active drag.
+        app.state.drag = Some(DragState {
+            target: DragTarget::WorkspaceListScrollbar { grab_row_offset: 0 },
+        });
+        let rect = app.state.view.sidebar_overflow.collapsed_ws_below.rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 1,
+            rect.y,
+        ));
+        assert!(app.state.drag.is_none(), "badge jump must clear drag latch");
+    }
+
+    /// Build a single workspace with `n` panes (each its own tab) and test
+    /// terminals; the panes at `blocked` are forced Blocked. Returns the app and
+    /// the blocked panes' `(tab_idx, pane_id)`.
+    fn app_with_many_panes(
+        n: usize,
+        blocked: &[usize],
+    ) -> (App, Vec<(usize, crate::layout::PaneId)>) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("w");
+        for i in 1..n {
+            ws.test_add_tab(Some(&format!("t{i}")));
+        }
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        // A pane only appears in pane_details / agent_panel_entries when its
+        // terminal has a detected agent, so give every pane one.
+        let tab_count = app.state.workspaces[0].tabs.len();
+        for i in 0..tab_count {
+            let pane = app.state.workspaces[0].tabs[i].root_pane;
+            let tid = app.state.workspaces[0].tabs[i].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.state.terminals.get_mut(&tid).unwrap().detected_agent = Some(Agent::Claude);
+        }
+        let mut blocked_panes = Vec::new();
+        for &i in blocked {
+            let pane = app.state.workspaces[0].tabs[i].root_pane;
+            let tid = app.state.workspaces[0].tabs[i].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.state.terminals.get_mut(&tid).unwrap().state = crate::detect::AgentState::Blocked;
+            blocked_panes.push((i, pane));
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        (app, blocked_panes)
+    }
+
+    #[test]
+    fn expanded_agent_panel_overflow_badge_click_focuses_and_scrolls() {
+        // Many panes so the agent panel overflows; a hidden Blocked pane below.
+        // Clicking the bottom badge focuses it AND scrolls it into view.
+        let (mut app, blocked) = app_with_many_panes(20, &[15]);
+        app.state.sidebar_collapsed = false;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 16));
+
+        let below = app.state.view.sidebar_overflow.expanded_agents_below;
+        assert!(below.is_active(), "agents hidden below the panel");
+        assert!(below.side.hidden_attention >= 1);
+        let rect = below.rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + rect.width.saturating_sub(1),
+            rect.y,
+        ));
+
+        // Focused the hidden Blocked pane (tab 15), not a neighbor.
+        let (tab_idx, pane_id) = blocked[0];
+        assert_eq!(app.state.workspaces[0].active_tab, tab_idx);
+        assert_eq!(
+            app.state.workspaces[0].tabs[tab_idx].layout.focused(),
+            pane_id
+        );
+
+        // The panel scroll advanced so the focused entry is within the window.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 16));
+        let detail_area = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        )
+        .1;
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
+        let scroll = app.state.agent_panel_scroll;
+        // Entry index of the focused pane in the (Spaces-sorted) entry list is 15.
+        assert!(
+            scroll <= 15 && 15 < scroll + metrics.viewport_rows,
+            "focused entry 15 must be inside the panel window [{scroll}, {}) after the jump",
+            scroll + metrics.viewport_rows,
+        );
+    }
+
+    #[test]
+    fn expanded_agent_panel_badge_jump_clears_drag_latch() {
+        let (mut app, _) = app_with_many_panes(20, &[15]);
+        app.state.sidebar_collapsed = false;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 16));
+        app.state.drag = Some(DragState {
+            target: DragTarget::AgentPanelScrollbar { grab_row_offset: 0 },
+        });
+        let rect = app.state.view.sidebar_overflow.expanded_agents_below.rect;
+        assert!(rect.width > 0, "agent panel badge present");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + rect.width.saturating_sub(1),
+            rect.y,
+        ));
+        assert!(
+            app.state.drag.is_none(),
+            "agent-panel badge jump must clear drag latch via switch_workspace_tab"
+        );
+    }
+
+    #[test]
+    fn collapsed_detail_overflow_badge_click_focuses_hidden_attention_pane() {
+        // Collapsed rail, one workspace with many panes; a hidden Blocked pane in
+        // the detail section. Clicking the detail bottom badge focuses it.
+        let (mut app, blocked) = app_with_many_panes(20, &[15]);
+        app.state.sidebar_collapsed = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 20));
+
+        let below = app.state.view.sidebar_overflow.collapsed_detail_below;
+        assert!(below.is_active(), "detail panes hidden below");
+        assert!(below.side.hidden_attention >= 1);
+        let rect = below.rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 1,
+            rect.y,
+        ));
+
+        let (tab_idx, pane_id) = blocked[0];
+        assert_eq!(app.state.workspaces[0].active_tab, tab_idx);
+        assert_eq!(
+            app.state.workspaces[0].tabs[tab_idx].layout.focused(),
+            pane_id
+        );
     }
 }

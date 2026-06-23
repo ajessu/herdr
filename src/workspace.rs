@@ -19,6 +19,8 @@ pub mod floating;
 mod git;
 mod tab;
 
+pub use self::aggregate::PaneDetail;
+
 // Geometry/z-order types are re-exported for the input and render layers landing
 // in steps 3-5; they have no in-crate consumer yet.
 #[allow(unused_imports)]
