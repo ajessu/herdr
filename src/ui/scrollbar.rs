@@ -7,6 +7,13 @@ use ratatui::{
 use crate::app::AppState;
 use crate::layout::PaneInfo;
 
+/// Scrollbar track glyph: a heavy vertical line (U+2503), centered in the cell.
+pub(super) const SCROLLBAR_TRACK: &str = "┃";
+/// Scrollbar thumb glyph: a full block (U+2588), filling the whole cell so it
+/// stays aligned over the centered track at any position. Focus is conveyed by
+/// color, not by thumb shape.
+pub(super) const SCROLLBAR_THUMB: &str = "█";
+
 pub(crate) fn pane_scrollbar_rect(info: &PaneInfo) -> Option<Rect> {
     info.scrollbar_rect
 }
@@ -151,7 +158,7 @@ pub(super) fn render_scrollbar(
     let buf = frame.buffer_mut();
     for y in track.y..track.y + track.height {
         let cell = &mut buf[(track.x, y)];
-        cell.set_symbol("▕");
+        cell.set_symbol(SCROLLBAR_TRACK);
         cell.set_style(Style::default().fg(track_color));
     }
     for y in thumb.top..thumb.top + thumb.len {
@@ -174,10 +181,10 @@ pub(super) fn render_pane_scrollbar(
         return;
     };
 
-    let (track_color, thumb_color, thumb_symbol) = if info.is_focused {
-        (app.palette.overlay0, app.palette.overlay1, "▐")
+    let (track_color, thumb_color) = if info.is_focused {
+        (app.palette.overlay0, app.palette.overlay1)
     } else {
-        (app.palette.surface_dim, app.palette.overlay0, "▕")
+        (app.palette.surface_dim, app.palette.overlay0)
     };
 
     render_scrollbar(
@@ -186,6 +193,89 @@ pub(super) fn render_pane_scrollbar(
         track,
         track_color,
         thumb_color,
-        thumb_symbol,
+        SCROLLBAR_THUMB,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn metrics_with_scroll() -> crate::pane::ScrollMetrics {
+        crate::pane::ScrollMetrics {
+            offset_from_bottom: 10,
+            max_offset_from_bottom: 50,
+            viewport_rows: 20,
+        }
+    }
+
+    #[test]
+    fn glyph_constants_are_fuller_than_the_old_thin_glyphs() {
+        // Regression guard: the scrollbar must not revert to the thin
+        // one-eighth-block track or thumb it replaced.
+        assert_eq!(SCROLLBAR_TRACK, "┃");
+        assert_eq!(SCROLLBAR_THUMB, "█");
+        assert_ne!(SCROLLBAR_TRACK, "▕");
+        assert_ne!(SCROLLBAR_THUMB, "▕");
+    }
+
+    #[test]
+    fn thumb_renders_full_block() {
+        let backend = TestBackend::new(1, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let track = Rect::new(0, 0, 1, 10);
+        let metrics = metrics_with_scroll();
+
+        terminal
+            .draw(|frame| {
+                render_scrollbar(
+                    frame,
+                    metrics,
+                    track,
+                    Color::Gray,
+                    Color::White,
+                    SCROLLBAR_THUMB,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let thumb = scrollbar_thumb(metrics, track).unwrap();
+        for y in thumb.top..thumb.top + thumb.len {
+            let symbol = buffer[(0, y)].symbol();
+            assert_eq!(symbol, "█", "thumb at y={y} should be the full block '█'");
+        }
+    }
+
+    #[test]
+    fn track_cells_outside_thumb_use_heavy_vertical() {
+        let backend = TestBackend::new(1, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let track = Rect::new(0, 0, 1, 10);
+        let metrics = metrics_with_scroll();
+
+        terminal
+            .draw(|frame| {
+                render_scrollbar(
+                    frame,
+                    metrics,
+                    track,
+                    Color::Gray,
+                    Color::White,
+                    SCROLLBAR_THUMB,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let thumb = scrollbar_thumb(metrics, track).unwrap();
+        for y in 0..10u16 {
+            if y < thumb.top || y >= thumb.top + thumb.len {
+                let symbol = buffer[(0, y)].symbol();
+                assert_eq!(symbol, "┃", "track cell at y={y} should be '┃'");
+                assert_ne!(symbol, "▕", "track must not use the old thin glyph '▕'");
+            }
+        }
+    }
 }
