@@ -770,15 +770,27 @@ fn tab_drop_indicator_x(
 }
 
 /// Background color for a visible tab, used both to paint the tab and to color
-/// the Powerline arrow transition. Inactive tabs alternate `surface0`/`surface1`
-/// by tab index (zellij-style banding); the active tab uses the accent.
-fn tab_bg(p: &crate::app::state::Palette, idx: usize, active: bool) -> ratatui::style::Color {
+/// the Powerline arrow transition. Under `SeparatorStyle::Powerline` (default),
+/// all inactive tabs share a uniform `surface0` background — the arrow glyph
+/// provides visual separation. Under `AlternatingBg`, inactive tabs alternate
+/// `surface0`/`surface1` by index (the only separation without arrows). The
+/// active tab always uses the accent.
+fn tab_bg(
+    p: &crate::app::state::Palette,
+    idx: usize,
+    active: bool,
+    separator: SeparatorStyle,
+) -> ratatui::style::Color {
     if active {
         p.accent
-    } else if idx.is_multiple_of(2) {
-        p.surface0
+    } else if separator == SeparatorStyle::AlternatingBg {
+        if idx.is_multiple_of(2) {
+            p.surface0
+        } else {
+            p.surface1
+        }
     } else {
-        p.surface1
+        p.surface0
     }
 }
 
@@ -900,7 +912,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             continue;
         }
         let active = idx == ws.active_tab;
-        let bg = tab_bg(p, idx, active);
+        let bg = tab_bg(p, idx, active, separator);
         let style = if active {
             let base = Style::default().fg(panel_contrast_fg(p)).bg(bg);
             if tab.is_auto_named() {
@@ -920,13 +932,16 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         // Powerline arrow in the gap between the previous visible tab and this
         // one. Only emitted under `SeparatorStyle::Powerline`; `AlternatingBg`
         // relies on the banded backgrounds alone and emits no Powerline glyph.
+        // When both sides share the same uniform inactive bg, use `surface1` as
+        // the arrow fg so the glyph stays visible.
         if separator == SeparatorStyle::Powerline {
             if let Some((prev_rect, prev_bg)) = prev {
                 let gap_x = prev_rect.x + prev_rect.width;
                 if gap_x < rect.x && gap_x < area.x + area.width {
+                    let arrow_fg = if prev_bg == bg { p.surface1 } else { prev_bg };
                     frame.buffer_mut()[(gap_x, area.y)]
                         .set_symbol(POWERLINE_ARROW)
-                        .set_style(Style::default().fg(prev_bg).bg(bg));
+                        .set_style(Style::default().fg(arrow_fg).bg(bg));
                 }
             }
         }
@@ -1671,14 +1686,63 @@ mod tests {
 
     #[test]
     fn render_inactive_tabs_alternate_background() {
-        // Banding: even-index inactive tabs use surface0, odd use surface1.
-        let app = app_with_tab_bar(&["aa", "bb", "cc"], 0, Rect::new(0, 0, 60, 1), false);
+        // AlternatingBg (powerline OFF): even-index inactive tabs use surface0,
+        // odd use surface1, providing visual separation without arrows.
+        let mut app = app_with_tab_bar(&["aa", "bb", "cc"], 0, Rect::new(0, 0, 60, 1), false);
+        app.tabs_powerline = false;
         let p = &app.palette;
         let r1 = app.view.tab_hit_areas[1];
         let r2 = app.view.tab_hit_areas[2];
         let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
         assert_eq!(buffer[(r1.x, 0)].bg, p.surface1, "tab 1 should be surface1");
         assert_eq!(buffer[(r2.x, 0)].bg, p.surface0, "tab 2 should be surface0");
+    }
+
+    #[test]
+    fn render_inactive_tabs_uniform_bg_when_powerline_on() {
+        // Powerline ON: all inactive tabs share the same surface0 background;
+        // the powerline arrow provides visual separation.
+        let mut app = app_with_tab_bar(&["aa", "bb", "cc"], 0, Rect::new(0, 0, 60, 1), false);
+        app.tabs_powerline = true;
+        let p = &app.palette;
+        let r1 = app.view.tab_hit_areas[1];
+        let r2 = app.view.tab_hit_areas[2];
+        let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+        assert_eq!(
+            buffer[(r1.x, 0)].bg,
+            p.surface0,
+            "tab 1 should be uniform surface0"
+        );
+        assert_eq!(
+            buffer[(r2.x, 0)].bg,
+            p.surface0,
+            "tab 2 should be uniform surface0"
+        );
+    }
+
+    #[test]
+    fn render_powerline_arrow_visible_between_inactive_tabs() {
+        // With uniform inactive bg (powerline on), the arrow between two inactive
+        // tabs must use a distinct fg (surface1) so it's visible against the
+        // shared surface0 background.
+        let mut app = app_with_tab_bar(&["aa", "bb", "cc"], 0, Rect::new(0, 0, 60, 1), false);
+        app.tabs_powerline = true;
+        let p = &app.palette;
+        let r1 = app.view.tab_hit_areas[1];
+        let r2 = app.view.tab_hit_areas[2];
+        let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+        // The arrow sits in the gap between tab 1 and tab 2.
+        let gap_x = r1.x + r1.width;
+        if gap_x < r2.x {
+            let cell = &buffer[(gap_x, 0)];
+            assert_eq!(cell.symbol(), POWERLINE_ARROW);
+            assert_ne!(
+                cell.fg, cell.bg,
+                "arrow between same-bg inactive tabs must be visible (fg != bg)"
+            );
+            assert_eq!(cell.fg, p.surface1);
+            assert_eq!(cell.bg, p.surface0);
+        }
     }
 
     #[test]
