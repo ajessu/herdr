@@ -13,8 +13,13 @@ use super::widgets::panel_contrast_fg;
 use crate::app::AppState;
 use crate::config::TabStatusMode;
 
-const MIN_TAB_WIDTH: u16 = 8;
+const MIN_TAB_WIDTH: u16 = 10;
 const NEW_TAB_WIDTH: u16 = 3;
+/// Each tab owns its own left + right separator columns (zellij convention).
+/// Adjacent tabs abut directly: the right separator of T<sub>N</sub> sits next
+/// to the left separator of T<sub>N+1</sub>, producing two back-to-back wedges
+/// that blend against `panel_bg` from both sides.
+const TAB_SEPARATOR_OVERHEAD: u16 = 2;
 /// Width of a collapsed `←+N` / `+N→` overflow indicator. Four cells keeps a
 /// touch-adequate hit zone (NFR5) — never a 1-cell target — and fits the widest
 /// label (`←+9+` / `+9+→`) without clipping.
@@ -405,9 +410,13 @@ fn tab_indicator_width(count: usize, attention: usize, mouse_chrome: bool) -> u1
 }
 
 fn tab_width(chrome: &TabChrome, mode: TabStatusMode) -> u16 {
+    // Interior (text + " name " padding) + 2 separator cols owned by the tab
+    // (left arrow + right arrow under Powerline, equivalent padding under
+    // AlternatingBg). Adjacent tabs abut, so there is no extra inter-tab gap.
     chrome
         .display_width(mode)
         .saturating_add(4)
+        .saturating_add(TAB_SEPARATOR_OVERHEAD)
         .max(MIN_TAB_WIDTH)
 }
 
@@ -450,16 +459,16 @@ fn centered_active_fill(
     }
     let active = active_tab.min(n - 1);
 
-    // Total columns the window [lo, hi] would occupy: tab widths + inter-tab
-    // gaps + an indicator reservation on each side that still hides tabs (a
-    // fully-shown side reclaims its reserved columns).
+    // Total columns the window [lo, hi] would occupy: tab widths (each tab
+    // already includes its own separator columns) + an indicator reservation
+    // on each side that still hides tabs (a fully-shown side reclaims its
+    // reserved columns). Adjacent tabs abut directly, so there is no inter-
+    // tab gap.
     let footprint = |lo: usize, hi: usize| -> u16 {
         let mut total: u16 = 0;
         for chrome in &chromes[lo..=hi] {
             total = total.saturating_add(tab_width(chrome, mode));
         }
-        let gaps = u16::try_from(hi - lo).unwrap_or(u16::MAX);
-        total = total.saturating_add(gaps);
         if lo > 0 {
             total = total.saturating_add(reserve_left);
         }
@@ -510,10 +519,11 @@ fn centered_active_fill(
         }
     }
 
-    // Lay the window [lo, hi] left-to-right starting at area.x (after the left
-    // indicator reservation when present), with 1-col gaps. A single active tab
-    // wider than the bar is clipped to the remaining width so the row is never
-    // blank.
+    // Lay the window [lo, hi] left-to-right starting at area.x (after the
+    // left indicator reservation when present). Adjacent tabs abut directly
+    // (each tab carries its own separator cols, no inter-tab gap). A single
+    // active tab wider than the bar is clipped to the remaining width so the
+    // row is never blank.
     let left_gutter = if lo > 0 { reserve_left } else { 0 };
     let mut x = area.x.saturating_add(left_gutter);
     let right_limit = area.x.saturating_add(area.width);
@@ -525,7 +535,7 @@ fn centered_active_fill(
         }
         let width = desired.min(remaining);
         rects[idx] = Rect::new(x, area.y, width, 1);
-        x = x.saturating_add(width).saturating_add(1);
+        x = x.saturating_add(width);
     }
 
     rects
@@ -781,6 +791,14 @@ fn tab_bg(
     active: bool,
     separator: SeparatorStyle,
 ) -> ratatui::style::Color {
+    // Under Powerline, the inactive tab bg must differ from panel_bg or the
+    // per-tile arrows would collapse to fg=bg. Fall back to `surface_dim` when
+    // `surface0 == panel_bg` (low-color palettes where both default to Reset).
+    let inactive_bg = if separator == SeparatorStyle::Powerline && p.surface0 == p.panel_bg {
+        p.surface_dim
+    } else {
+        p.surface0
+    };
     if active {
         p.accent
     } else if separator == SeparatorStyle::AlternatingBg {
@@ -790,7 +808,7 @@ fn tab_bg(
             p.surface1
         }
     } else {
-        p.surface0
+        inactive_bg
     }
 }
 
@@ -900,9 +918,14 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     }
 
-    // Track the previous visible tab's rect + bg to paint a Powerline arrow in
-    // the inter-tab gap (fg = left tab bg, bg = right tab bg).
-    let mut prev: Option<(Rect, ratatui::style::Color)> = None;
+    // Each visible tab owns its own left + right Powerline arrows. Both arrows
+    // blend against `panel_bg` (NOT against the adjacent tab's bg) — this is
+    // the zellij convention: adjacent tabs each paint a wedge back-to-back,
+    // giving the signature "two facing arrows" look instead of a single
+    // transition glyph. Under `SeparatorStyle::AlternatingBg`, the two
+    // separator cols become extra tab-bg padding so the banding still
+    // visually separates adjacent tabs without any Powerline codepoint.
+    let panel_bg = p.panel_bg;
 
     for (idx, tab) in ws.tabs.iter().enumerate() {
         let Some(rect) = app.view.tab_hit_areas.get(idx).copied() else {
@@ -913,7 +936,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
         let active = idx == ws.active_tab;
         let bg = tab_bg(p, idx, active, separator);
-        let style = if active {
+        let interior_style = if active {
             let base = Style::default().fg(panel_contrast_fg(p)).bg(bg);
             if tab.is_auto_named() {
                 base.add_modifier(Modifier::DIM)
@@ -929,30 +952,49 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(p.overlay1).bg(bg)
         };
 
-        // Powerline arrow in the gap between the previous visible tab and this
-        // one. Only emitted under `SeparatorStyle::Powerline`; `AlternatingBg`
-        // relies on the banded backgrounds alone and emits no Powerline glyph.
-        // When both sides share the same uniform inactive bg, use `surface1` as
-        // the arrow fg so the glyph stays visible.
-        if separator == SeparatorStyle::Powerline {
-            if let Some((prev_rect, prev_bg)) = prev {
-                let gap_x = prev_rect.x + prev_rect.width;
-                if gap_x < rect.x && gap_x < area.x + area.width {
-                    let arrow_fg = if prev_bg == bg { p.surface1 } else { prev_bg };
-                    frame.buffer_mut()[(gap_x, area.y)]
-                        .set_symbol(POWERLINE_ARROW)
-                        .set_style(Style::default().fg(arrow_fg).bg(bg));
-                }
+        let area_right = area.x + area.width;
+        if separator == SeparatorStyle::Powerline && rect.width >= TAB_SEPARATOR_OVERHEAD {
+            // Left arrow: fg = panel_bg, bg = tab bg (panel→tab wedge)
+            if rect.x < area_right {
+                frame.buffer_mut()[(rect.x, area.y)]
+                    .set_symbol(POWERLINE_ARROW)
+                    .set_style(Style::default().fg(panel_bg).bg(bg));
             }
-        }
-
-        let spans = if let Some(chrome) = app.view.tab_chrome.get(idx) {
-            chrome.to_spans(app.view.tab_status_mode, rect.width)
+            // Right arrow: fg = tab bg, bg = panel_bg (tab→panel wedge)
+            let right_x = rect.x + rect.width - 1;
+            if right_x < area_right {
+                frame.buffer_mut()[(right_x, area.y)]
+                    .set_symbol(POWERLINE_ARROW)
+                    .set_style(Style::default().fg(bg).bg(panel_bg));
+            }
+            // Interior: between the two arrows.
+            let interior_x = rect.x + 1;
+            let interior_w = rect.width.saturating_sub(2);
+            if interior_w > 0 {
+                let interior_rect = Rect::new(interior_x, area.y, interior_w, 1);
+                let spans = if let Some(chrome) = app.view.tab_chrome.get(idx) {
+                    chrome.to_spans(app.view.tab_status_mode, interior_w)
+                } else {
+                    vec![Span::raw(" ".repeat(interior_w as usize))]
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)).style(interior_style),
+                    interior_rect,
+                );
+            }
         } else {
-            vec![Span::raw(" ".repeat(rect.width as usize))]
-        };
-        frame.render_widget(Paragraph::new(Line::from(spans)).style(style), rect);
-        prev = Some((rect, bg));
+            // AlternatingBg path (or rect too narrow for arrows): full-width
+            // interior with tab bg. The 2 separator cols become extra padding.
+            let spans = if let Some(chrome) = app.view.tab_chrome.get(idx) {
+                chrome.to_spans(app.view.tab_status_mode, rect.width)
+            } else {
+                vec![Span::raw(" ".repeat(rect.width as usize))]
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)).style(interior_style),
+                rect,
+            );
+        }
     }
 
     if let Some(crate::app::state::DragState {
@@ -1473,13 +1515,15 @@ mod tests {
 
     #[test]
     fn zoom_marker_counts_toward_tab_width() {
+        // tab_width = display_width (8 name + 2 zoom) + 4 interior padding
+        //           + 2 separator overhead (zellij left+right arrow cols).
         let chrome = TabChrome {
             status: None,
             name: "abcdefgh".into(),
             zoomed: true,
             is_attention: false,
         };
-        assert_eq!(tab_width(&chrome, TabStatusMode::Off), 14);
+        assert_eq!(tab_width(&chrome, TabStatusMode::Off), 16);
     }
 
     #[test]
@@ -1671,15 +1715,22 @@ mod tests {
 
     #[test]
     fn render_active_tab_paints_accent_bg() {
+        // Active tab's interior (between its own left and right arrows) is
+        // painted accent. Under Powerline, the rightmost column carries the
+        // right-arrow glyph whose bg is panel_bg (the wedge transitioning back
+        // to the outer panel), so iterate strictly over the interior.
         let mut app = app_with_tab_bar(&["ab", "cd", "ef"], 0, Rect::new(0, 0, 40, 1), false);
         app.show_tab_status = TabStatusMode::All;
         let active_rect = app.view.tab_hit_areas[0];
         let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
-        for x in active_rect.x..active_rect.x + active_rect.width {
+        // Left arrow cell at rect.x: bg = accent (panel→accent wedge).
+        assert_eq!(buffer[(active_rect.x, 0)].bg, app.palette.accent);
+        // Interior columns: bg = accent.
+        for x in (active_rect.x + 1)..(active_rect.x + active_rect.width - 1) {
             assert_eq!(
                 buffer[(x, 0)].bg,
                 app.palette.accent,
-                "active tab cell at x={x} should have accent bg"
+                "active tab interior cell at x={x} should have accent bg"
             );
         }
     }
@@ -1687,62 +1738,76 @@ mod tests {
     #[test]
     fn render_inactive_tabs_alternate_background() {
         // AlternatingBg (powerline OFF): even-index inactive tabs use surface0,
-        // odd use surface1, providing visual separation without arrows.
+        // odd use surface1, providing visual separation without arrows. The
+        // 2 separator cols at each tab edge become extra tab-bg padding.
         let mut app = app_with_tab_bar(&["aa", "bb", "cc"], 0, Rect::new(0, 0, 60, 1), false);
         app.tabs_powerline = false;
         let p = &app.palette;
         let r1 = app.view.tab_hit_areas[1];
         let r2 = app.view.tab_hit_areas[2];
         let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
-        assert_eq!(buffer[(r1.x, 0)].bg, p.surface1, "tab 1 should be surface1");
-        assert_eq!(buffer[(r2.x, 0)].bg, p.surface0, "tab 2 should be surface0");
+        // Interior bg (any column strictly inside the rect) is the tab bg.
+        assert_eq!(
+            buffer[(r1.x + 1, 0)].bg,
+            p.surface1,
+            "tab 1 interior should be surface1"
+        );
+        assert_eq!(
+            buffer[(r2.x + 1, 0)].bg,
+            p.surface0,
+            "tab 2 interior should be surface0"
+        );
     }
 
     #[test]
     fn render_inactive_tabs_uniform_bg_when_powerline_on() {
         // Powerline ON: all inactive tabs share the same surface0 background;
-        // the powerline arrow provides visual separation.
+        // each tab owns its left+right arrow blending against panel_bg.
         let mut app = app_with_tab_bar(&["aa", "bb", "cc"], 0, Rect::new(0, 0, 60, 1), false);
         app.tabs_powerline = true;
         let p = &app.palette;
         let r1 = app.view.tab_hit_areas[1];
         let r2 = app.view.tab_hit_areas[2];
         let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+        // Interior columns are the tab bg (surface0 for both inactive tabs).
         assert_eq!(
-            buffer[(r1.x, 0)].bg,
+            buffer[(r1.x + 1, 0)].bg,
             p.surface0,
-            "tab 1 should be uniform surface0"
+            "tab 1 interior should be uniform surface0"
         );
         assert_eq!(
-            buffer[(r2.x, 0)].bg,
+            buffer[(r2.x + 1, 0)].bg,
             p.surface0,
-            "tab 2 should be uniform surface0"
+            "tab 2 interior should be uniform surface0"
         );
     }
 
     #[test]
-    fn render_powerline_arrow_visible_between_inactive_tabs() {
-        // With uniform inactive bg (powerline on), the arrow between two inactive
-        // tabs must use a distinct fg (surface1) so it's visible against the
-        // shared surface0 background.
+    fn render_powerline_arrow_two_wedge_separator_between_tabs() {
+        // Zellij convention: each tab carries its own left+right arrow, both
+        // blending against panel_bg. Two adjacent tabs produce back-to-back
+        // wedges: the right arrow of tab N (fg=tab_bg, bg=panel_bg) abuts the
+        // left arrow of tab N+1 (fg=panel_bg, bg=tab_bg).
         let mut app = app_with_tab_bar(&["aa", "bb", "cc"], 0, Rect::new(0, 0, 60, 1), false);
         app.tabs_powerline = true;
         let p = &app.palette;
         let r1 = app.view.tab_hit_areas[1];
         let r2 = app.view.tab_hit_areas[2];
         let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
-        // The arrow sits in the gap between tab 1 and tab 2.
-        let gap_x = r1.x + r1.width;
-        if gap_x < r2.x {
-            let cell = &buffer[(gap_x, 0)];
-            assert_eq!(cell.symbol(), POWERLINE_ARROW);
-            assert_ne!(
-                cell.fg, cell.bg,
-                "arrow between same-bg inactive tabs must be visible (fg != bg)"
-            );
-            assert_eq!(cell.fg, p.surface1);
-            assert_eq!(cell.bg, p.surface0);
-        }
+
+        // Tab 1 right arrow at the last column of r1.
+        let r1_right_x = r1.x + r1.width - 1;
+        let r1_right = &buffer[(r1_right_x, 0)];
+        assert_eq!(r1_right.symbol(), POWERLINE_ARROW);
+        assert_eq!(r1_right.fg, p.surface0, "tab 1 right arrow fg = tab_bg");
+        assert_eq!(r1_right.bg, p.panel_bg, "tab 1 right arrow bg = panel_bg");
+
+        // Tab 2 left arrow at the first column of r2 — abuts r1's right arrow.
+        assert_eq!(r2.x, r1.x + r1.width, "tabs must abut directly");
+        let r2_left = &buffer[(r2.x, 0)];
+        assert_eq!(r2_left.symbol(), POWERLINE_ARROW);
+        assert_eq!(r2_left.fg, p.panel_bg, "tab 2 left arrow fg = panel_bg");
+        assert_eq!(r2_left.bg, p.surface0, "tab 2 left arrow bg = tab_bg");
     }
 
     #[test]

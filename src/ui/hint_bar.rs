@@ -652,51 +652,29 @@ fn strip_key_modifier(key: &str, display_prefix: &str) -> String {
         .join("/")
 }
 
-/// Shared color bundle for ribbon rendering. Computed once per `build_hint_line`
-/// call. `separator_fg` is the arrow fg used when both sides of an arrow share a
-/// background (otherwise the glyph would be invisible).
+/// Shared color bundle for hint-bar tile rendering. The `key_fg`/`label_fg`/
+/// `tile_bg` triple styles the interior of each `<key> LABEL` tile; the
+/// `arrow_fg_outside`/`arrow_bg_outside` are always the panel background — each
+/// tile owns its own left+right arrow that blends against that outer bg (zellij
+/// convention).
 #[derive(Clone, Copy)]
-struct RibbonColors {
-    segment_bg: ratatui::style::Color,
+struct TileColors {
+    tile_bg: ratatui::style::Color,
     key_fg: ratatui::style::Color,
     label_fg: ratatui::style::Color,
-    separator_fg: ratatui::style::Color,
+    /// Outer bg that the per-tile arrows blend against (`panel_bg`).
+    outer_bg: ratatui::style::Color,
 }
 
-/// A single ribbon section to render: its hints, whether to use short labels,
-/// the detected modifier prefix, the prefix-ribbon background and matching
-/// label fg (paired with the bg so contrast stays legible across palettes),
-/// and the backgrounds the leading/trailing transition arrows blend from/to.
-struct SectionLayout<'a> {
-    hints: &'a [&'a Hint],
-    use_short: bool,
-    prefix: Option<&'a str>,
-    prefix_bg: ratatui::style::Color,
-    prefix_fg: ratatui::style::Color,
-    incoming_bg: ratatui::style::Color,
-    outgoing_bg: ratatui::style::Color,
-}
+/// The Powerline "right arrow" used between hint-bar tiles (same glyph as
+/// `tabs::POWERLINE_ARROW`). Each tile carries its own left and right arrow,
+/// both blending against `outer_bg`.
+const POWERLINE_ARROW: &str = "\u{e0b0}";
 
-/// A Powerline transition arrow that stays visible even when both sides share a
-/// background: the glyph fg blends from `from_bg` normally, but falls back to
-/// `separator_fg` when `from_bg == to_bg` (mirrors the tab-bar arrow fix).
-fn arrow_span(
-    from_bg: ratatui::style::Color,
-    to_bg: ratatui::style::Color,
-    separator_fg: ratatui::style::Color,
-) -> Span<'static> {
-    let fg = if from_bg == to_bg {
-        separator_fg
-    } else {
-        from_bg
-    };
-    Span::styled(POWERLINE_ARROW, Style::default().fg(fg).bg(to_bg))
-}
-
-/// Width of a ribbon section's content: prefix segment (if any) + hint
-/// segments + internal arrows between them. Does NOT include an external
-/// leading or trailing transition arrow — the caller accounts for those.
-fn compute_ribbon_width(
+/// Width of a hint section: the modifier prefix text (when present) + each
+/// tile's full footprint (2 arrows + ` <key> LABEL `). Tiles abut directly —
+/// there is no inter-tile gap.
+fn compute_section_width(
     hints: &[&Hint],
     use_short: bool,
     prefix: Option<&str>,
@@ -705,11 +683,13 @@ fn compute_ribbon_width(
     if hints.is_empty() && prefix.is_none() {
         return 0;
     }
-    let arrow_w: usize = if powerline { 1 } else { 0 };
+    let arrow_w: usize = if powerline { 2 } else { 0 };
     let mut total = 0usize;
 
     if let Some(pfx) = prefix {
-        total += 1 + pfx.width() + 1; // " Ctrl + " or " Alt + "
+        // Plain-text prefix ` Ctrl + ` (no colored bg). One leading space, the
+        // text itself, and one trailing space before the first tile's arrow.
+        total += 1 + pfx.width() + 1;
     }
 
     for hint in hints {
@@ -720,73 +700,80 @@ fn compute_ribbon_width(
         } else {
             key.into_owned()
         };
-        // Segment: " <bare_key> label"
-        total += 1 + 1 + bare_key.width() + 1 + 1 + label.width();
-    }
-
-    // Internal arrows between adjacent segments within this section (not the
-    // external leading arrow from the previous element).
-    let n_segments = hints.len() + usize::from(prefix.is_some());
-    if n_segments > 1 {
-        total += (n_segments - 1) * arrow_w;
+        // Tile = [left arrow][ <key> label ][right arrow]
+        //       = arrow_w + (1 + 1 + bare_key + 1 + 1 + label + 1) = arrow_w + 5 + key + label
+        total += arrow_w + 5 + bare_key.width() + label.width();
     }
 
     total
 }
 
-/// Append a single ` <key> label` filled segment to `spans`.
-fn push_hint_segment(
+/// Append a single `<key> LABEL` tile (including its left+right arrows when
+/// powerline is on) to `spans`.
+fn push_tile(
     spans: &mut Vec<Span<'static>>,
     bare_key: &str,
     label: &str,
-    colors: &RibbonColors,
+    colors: &TileColors,
+    powerline: bool,
 ) {
+    if powerline {
+        // Left arrow: outer_bg → tile_bg
+        spans.push(Span::styled(
+            POWERLINE_ARROW,
+            Style::default().fg(colors.outer_bg).bg(colors.tile_bg),
+        ));
+    }
+    // Interior: " <key> label "
     spans.push(Span::styled(
         String::from(" "),
-        Style::default().bg(colors.segment_bg),
+        Style::default().bg(colors.tile_bg),
     ));
     spans.push(Span::styled(
         format!("<{bare_key}>"),
         Style::default()
             .fg(colors.key_fg)
-            .bg(colors.segment_bg)
+            .bg(colors.tile_bg)
             .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(
-        format!(" {label}"),
-        Style::default().fg(colors.label_fg).bg(colors.segment_bg),
+        format!(" {label} "),
+        Style::default().fg(colors.label_fg).bg(colors.tile_bg),
     ));
+    if powerline {
+        // Right arrow: tile_bg → outer_bg
+        spans.push(Span::styled(
+            POWERLINE_ARROW,
+            Style::default().fg(colors.tile_bg).bg(colors.outer_bg),
+        ));
+    }
 }
 
-/// Render a ribbon section's internal content as styled spans. Does NOT emit
-/// a leading arrow — the caller adds that. Emits internal arrows between the
-/// prefix and hint segments, kept visible via `arrow_span` when adjacent
-/// backgrounds match.
-fn build_ribbon_spans(
+/// Append a section (optional plain-text modifier prefix + sequence of tiles)
+/// to `spans`. The prefix renders as bold plain text on `outer_bg` (zellij's
+/// `superkey` convention — NOT a colored ribbon segment); each tile abuts the
+/// next directly so adjacent right+left arrows produce zellij's back-to-back
+/// wedge separators.
+fn emit_section(
+    spans: &mut Vec<Span<'static>>,
     hints: &[&Hint],
     use_short: bool,
     prefix: Option<&str>,
-    prefix_bg: ratatui::style::Color,
     prefix_fg: ratatui::style::Color,
-    colors: &RibbonColors,
+    colors: &TileColors,
     powerline: bool,
-) -> Vec<Span<'static>> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut cur_bg = prefix_bg; // tracks last segment's bg for internal arrows
-
+) {
     if let Some(pfx) = prefix {
-        // Prefix segment (no leading arrow — caller provides it)
         spans.push(Span::styled(
             format!(" {pfx} "),
             Style::default()
                 .fg(prefix_fg)
-                .bg(prefix_bg)
+                .bg(colors.outer_bg)
                 .add_modifier(Modifier::BOLD),
         ));
-        cur_bg = prefix_bg;
     }
 
-    for (i, hint) in hints.iter().enumerate() {
+    for hint in hints {
         let label = if use_short { hint.short } else { hint.label };
         let key = sanitize_key(&hint.key);
         let bare_key = if let Some(pfx) = prefix {
@@ -794,24 +781,9 @@ fn build_ribbon_spans(
         } else {
             key.into_owned()
         };
-
-        // Internal arrow between segments (skip for the very first element when
-        // there's no prefix — that transition is the caller's leading arrow).
-        let needs_internal_arrow = i > 0 || prefix.is_some();
-        if powerline && needs_internal_arrow {
-            spans.push(arrow_span(cur_bg, colors.segment_bg, colors.separator_fg));
-        }
-
-        push_hint_segment(&mut spans, &bare_key, label, colors);
-        cur_bg = colors.segment_bg;
+        push_tile(spans, &bare_key, label, colors, powerline);
     }
-
-    spans
 }
-
-/// The Powerline "right arrow" used between hint-bar ribbon segments (same
-/// glyph as `tabs::POWERLINE_ARROW`).
-const POWERLINE_ARROW: &str = "\u{e0b0}";
 
 pub fn build_hint_line(
     hint_set: &HintSet,
@@ -864,66 +836,63 @@ pub fn build_hint_line(
         None
     };
 
-    // Colors for ribbon segments. `separator_fg` (surface1) is the fallback
-    // arrow fg for same-bg adjacencies (e.g. hint→hint sharing surface0).
-    let colors = RibbonColors {
-        segment_bg: palette.surface0,
+    // Each tile carries its own left+right Powerline arrows blending against
+    // panel_bg (zellij convention). The `Ctrl +`/`Alt +` prefix renders as
+    // plain bold text on panel_bg (zellij's `superkey_prefix`), not a colored
+    // ribbon. Tiles abut directly so adjacent right+left arrows produce zellij's
+    // signature back-to-back wedge separator. When `surface0 == panel_bg` (low-
+    // color palettes where both default to `Reset`), fall back to `surface_dim`
+    // so the per-tile arrows stay visible.
+    let tile_bg = if palette.surface0 == palette.panel_bg {
+        palette.surface_dim
+    } else {
+        palette.surface0
+    };
+    let colors = TileColors {
+        tile_bg,
         key_fg: palette.accent,
         label_fg: palette.overlay1,
-        separator_fg: palette.surface1,
+        outer_bg: palette.panel_bg,
     };
-    // Per-section prefix backgrounds and their paired contrast foregrounds.
-    // The dim `surface1` Ctrl ribbon needs the bright body fg; the bright
-    // `peach` Alt ribbon needs the dark contrast (mirrors the badge's pairing
-    // of `panel_contrast_fg` against an accent-colored bg).
-    let left_prefix_bg = palette.surface1;
-    let left_prefix_fg = palette.text;
-    let right_prefix_bg = palette.peach;
-    let right_prefix_fg = panel_contrast_fg(palette);
-
-    // Each section costs: leading_arrow + content + trailing_arrow.
-    // The leading arrow transitions from outside (badge or gap) into the first
-    // segment. The trailing arrow transitions from the last segment back to
-    // panel_bg.
-    let arrow_w: usize = if powerline { 1 } else { 0 };
+    // Prefix `Ctrl +`/`Alt +` foregrounds. Both must differ from `panel_bg`
+    // so the text stays visible — on the low-color terminal palette where
+    // `text == panel_bg == Reset`, fall back to `overlay1` (the bold fg used
+    // by tile labels) so the prefix reads.
+    let left_prefix_fg = if palette.text == palette.panel_bg {
+        palette.overlay1
+    } else {
+        palette.text
+    };
+    let right_prefix_fg = if palette.peach == palette.panel_bg {
+        palette.overlay1
+    } else {
+        palette.peach
+    };
 
     if has_right {
-        let left_content_full = compute_ribbon_width(&left_hints, false, left_prefix, powerline);
-        let right_content_full = compute_ribbon_width(&right_hints, false, right_prefix, powerline);
-        // Total per section = leading + content + trailing
-        let left_full = arrow_w + left_content_full + arrow_w;
-        let right_full = arrow_w + right_content_full + arrow_w;
+        let left_full = compute_section_width(&left_hints, false, left_prefix, powerline);
+        let right_full = compute_section_width(&right_hints, false, right_prefix, powerline);
         let gap = MIN_SECTION_GAP;
 
         // Tier 1: both full labels
         if !force_short && left_full + gap + right_full <= remaining {
             let whitespace = remaining - left_full - right_full;
-            emit_section_with_arrows(
+            emit_section(
                 &mut spans,
-                &SectionLayout {
-                    hints: &left_hints,
-                    use_short: false,
-                    prefix: left_prefix,
-                    prefix_bg: left_prefix_bg,
-                    prefix_fg: left_prefix_fg,
-                    incoming_bg: badge_color,
-                    outgoing_bg: palette.panel_bg,
-                },
+                &left_hints,
+                false,
+                left_prefix,
+                left_prefix_fg,
                 &colors,
                 powerline,
             );
             spans.push(Span::raw(" ".repeat(whitespace)));
-            emit_section_with_arrows(
+            emit_section(
                 &mut spans,
-                &SectionLayout {
-                    hints: &right_hints,
-                    use_short: false,
-                    prefix: right_prefix,
-                    prefix_bg: right_prefix_bg,
-                    prefix_fg: right_prefix_fg,
-                    incoming_bg: palette.panel_bg,
-                    outgoing_bg: palette.panel_bg,
-                },
+                &right_hints,
+                false,
+                right_prefix,
+                right_prefix_fg,
                 &colors,
                 powerline,
             );
@@ -931,38 +900,26 @@ pub fn build_hint_line(
         }
 
         // Tier 2: both short labels
-        let left_content_short = compute_ribbon_width(&left_hints, true, left_prefix, powerline);
-        let right_content_short = compute_ribbon_width(&right_hints, true, right_prefix, powerline);
-        let left_short = arrow_w + left_content_short + arrow_w;
-        let right_short = arrow_w + right_content_short + arrow_w;
+        let left_short = compute_section_width(&left_hints, true, left_prefix, powerline);
+        let right_short = compute_section_width(&right_hints, true, right_prefix, powerline);
         if left_short + gap + right_short <= remaining {
             let whitespace = remaining - left_short - right_short;
-            emit_section_with_arrows(
+            emit_section(
                 &mut spans,
-                &SectionLayout {
-                    hints: &left_hints,
-                    use_short: true,
-                    prefix: left_prefix,
-                    prefix_bg: left_prefix_bg,
-                    prefix_fg: left_prefix_fg,
-                    incoming_bg: badge_color,
-                    outgoing_bg: palette.panel_bg,
-                },
+                &left_hints,
+                true,
+                left_prefix,
+                left_prefix_fg,
                 &colors,
                 powerline,
             );
             spans.push(Span::raw(" ".repeat(whitespace)));
-            emit_section_with_arrows(
+            emit_section(
                 &mut spans,
-                &SectionLayout {
-                    hints: &right_hints,
-                    use_short: true,
-                    prefix: right_prefix,
-                    prefix_bg: right_prefix_bg,
-                    prefix_fg: right_prefix_fg,
-                    incoming_bg: palette.panel_bg,
-                    outgoing_bg: palette.panel_bg,
-                },
+                &right_hints,
+                true,
+                right_prefix,
+                right_prefix_fg,
                 &colors,
                 powerline,
             );
@@ -970,21 +927,15 @@ pub fn build_hint_line(
         }
     }
 
-    // Tier 3 (or no right section): left only ribbon.
-    let left_content_w = compute_ribbon_width(&left_hints, force_short, left_prefix, powerline);
-    let left_total_w = arrow_w + left_content_w + arrow_w;
-    if left_total_w <= remaining {
-        emit_section_with_arrows(
+    // Tier 3 (or no right section): left only.
+    let left_w = compute_section_width(&left_hints, force_short, left_prefix, powerline);
+    if left_w <= remaining {
+        emit_section(
             &mut spans,
-            &SectionLayout {
-                hints: &left_hints,
-                use_short: force_short,
-                prefix: left_prefix,
-                prefix_bg: left_prefix_bg,
-                prefix_fg: left_prefix_fg,
-                incoming_bg: badge_color,
-                outgoing_bg: palette.panel_bg,
-            },
+            &left_hints,
+            force_short,
+            left_prefix,
+            left_prefix_fg,
             &colors,
             powerline,
         );
@@ -992,15 +943,17 @@ pub fn build_hint_line(
     }
 
     // Tier 4: progressive ellipsis on left section (flat fallback for very
-    // narrow). No prefix ribbon fits here, so keep the FULL sanitized key
+    // narrow). No prefix renders here, so keep the FULL sanitized key
     // (`<ctrl+p>`) rather than the stripped `<p>` — otherwise the modifier the
-    // prefix ribbon would have shown is silently lost.
+    // prefix would have shown is silently lost. Tiles still use their own
+    // arrows so the visual pattern stays consistent with the wider tiers.
     let dim_style = Style::default().fg(palette.overlay0);
     let mut used = badge_width;
+    let arrow_cost: usize = if powerline { 2 } else { 0 };
     for hint in &left_hints {
         let label = if force_short { hint.short } else { hint.label };
         let bare_key = sanitize_key(&hint.key).into_owned();
-        let entry_width = 1 + 1 + bare_key.width() + 1 + 1 + label.width();
+        let entry_width = arrow_cost + 5 + bare_key.width() + label.width();
 
         let ellipsis_width = 2; // " …"
         if used + entry_width + ellipsis_width > width && used + entry_width > width {
@@ -1010,62 +963,11 @@ pub fn build_hint_line(
             return Line::from(spans);
         }
 
-        push_hint_segment(&mut spans, &bare_key, label, &colors);
+        push_tile(&mut spans, &bare_key, label, &colors, powerline);
         used += entry_width;
     }
 
     Line::from(spans)
-}
-
-/// Emit a complete ribbon section: leading arrow + content + trailing arrow.
-/// Arrows stay visible via `arrow_span` when adjacent backgrounds match.
-fn emit_section_with_arrows(
-    spans: &mut Vec<Span<'static>>,
-    section: &SectionLayout,
-    colors: &RibbonColors,
-    powerline: bool,
-) {
-    let first_bg = if section.prefix.is_some() {
-        section.prefix_bg
-    } else {
-        colors.segment_bg
-    };
-    let last_bg = if section.hints.is_empty() && section.prefix.is_some() {
-        section.prefix_bg
-    } else if section.hints.is_empty() {
-        section.incoming_bg
-    } else {
-        colors.segment_bg
-    };
-
-    // Leading arrow
-    if powerline {
-        spans.push(arrow_span(
-            section.incoming_bg,
-            first_bg,
-            colors.separator_fg,
-        ));
-    }
-
-    // Section content
-    spans.extend(build_ribbon_spans(
-        section.hints,
-        section.use_short,
-        section.prefix,
-        section.prefix_bg,
-        section.prefix_fg,
-        colors,
-        powerline,
-    ));
-
-    // Trailing arrow
-    if powerline {
-        spans.push(arrow_span(
-            last_bg,
-            section.outgoing_bg,
-            colors.separator_fg,
-        ));
-    }
 }
 
 pub fn hint_bar_active(app: &AppState) -> bool {
@@ -1486,15 +1388,10 @@ mod tests {
         let right_hints: Vec<&Hint> = set.alt_hints.iter().collect();
         let left_prefix = detect_section_prefix(&left_hints);
         let right_prefix = detect_section_prefix(&right_hints);
-        let arrow_w: usize = 1; // powerline on
-        let left_full =
-            arrow_w + compute_ribbon_width(&left_hints, false, left_prefix, true) + arrow_w;
-        let right_full =
-            arrow_w + compute_ribbon_width(&right_hints, false, right_prefix, true) + arrow_w;
-        let left_short =
-            arrow_w + compute_ribbon_width(&left_hints, true, left_prefix, true) + arrow_w;
-        let right_short =
-            arrow_w + compute_ribbon_width(&right_hints, true, right_prefix, true) + arrow_w;
+        let left_full = compute_section_width(&left_hints, false, left_prefix, true);
+        let right_full = compute_section_width(&right_hints, false, right_prefix, true);
+        let left_short = compute_section_width(&left_hints, true, left_prefix, true);
+        let right_short = compute_section_width(&right_hints, true, right_prefix, true);
         let badge_width = format!(" {} ", set.badge.label).width();
         let gap = MIN_SECTION_GAP;
         let too_small_for_full = badge_width + left_full + gap + right_full;
@@ -1528,11 +1425,8 @@ mod tests {
         let right_hints: Vec<&Hint> = set.alt_hints.iter().collect();
         let left_prefix = detect_section_prefix(&left_hints);
         let right_prefix = detect_section_prefix(&right_hints);
-        let arrow_w: usize = 1; // powerline on
-        let left_short =
-            arrow_w + compute_ribbon_width(&left_hints, true, left_prefix, true) + arrow_w;
-        let right_short =
-            arrow_w + compute_ribbon_width(&right_hints, true, right_prefix, true) + arrow_w;
+        let left_short = compute_section_width(&left_hints, true, left_prefix, true);
+        let right_short = compute_section_width(&right_hints, true, right_prefix, true);
         let badge_width = format!(" {} ", set.badge.label).width();
         let gap = MIN_SECTION_GAP;
         let fits_both_short = badge_width + left_short + gap + right_short;
@@ -1769,39 +1663,62 @@ mod tests {
     }
 
     #[test]
-    fn ribbon_internal_arrow_between_hints_uses_separator_fg() {
-        // catppuccin: adjacent hint segments share surface0; the internal arrow
-        // must use the separator fg (surface1) over surface0 so it stays visible.
+    fn ribbon_tiles_produce_back_to_back_wedge_separators() {
+        // Zellij convention: each tile owns its own left+right Powerline arrow,
+        // both blending against panel_bg. Two adjacent tiles produce a
+        // back-to-back wedge pattern: `[right arrow: tile_bg→panel_bg]
+        // [left arrow: panel_bg→tile_bg]`. The arrow spans alternate fg/bg
+        // direction across consecutive arrow spans.
         let kb = default_keybinds();
         let set = hints(Mode::Terminal, &kb);
         let palette = Palette::catppuccin();
         let line = build_hint_line(&set, HintBarStyle::Full, &palette, 200, true);
-        let internal_arrow_present = line.spans.iter().any(|span| {
-            span.content.as_ref().contains(POWERLINE_ARROW)
-                && span.style.fg == Some(palette.surface1)
-                && span.style.bg == Some(palette.surface0)
-        });
-        assert!(
-            internal_arrow_present,
-            "internal hint→hint arrow must render surface1-on-surface0 to stay visible"
-        );
-        // And no arrow anywhere may collapse to fg == bg.
-        for span in &line.spans {
-            if span.content.as_ref().contains(POWERLINE_ARROW) {
-                assert_ne!(span.style.fg, span.style.bg, "arrow fg == bg (invisible)");
-            }
+
+        // Collect arrow spans in render order.
+        let arrows: Vec<_> = line
+            .spans
+            .iter()
+            .filter(|s| s.content.as_ref() == POWERLINE_ARROW)
+            .collect();
+        assert!(arrows.len() >= 4, "expected multiple tile arrows");
+
+        // Each tile contributes 2 arrows. Walk pairs and assert the back-to-back
+        // pattern: arrow[i] (left arrow of a tile, panel→tile) followed by
+        // arrow[i+1] (right arrow of the same tile, tile→panel).
+        let mut i = 0;
+        while i + 1 < arrows.len() {
+            let left = arrows[i];
+            let right = arrows[i + 1];
+            assert_eq!(
+                left.style.fg,
+                Some(palette.panel_bg),
+                "left arrow fg = panel_bg"
+            );
+            assert_eq!(
+                left.style.bg,
+                Some(palette.surface0),
+                "left arrow bg = tile_bg"
+            );
+            assert_eq!(
+                right.style.fg,
+                Some(palette.surface0),
+                "right arrow fg = tile_bg"
+            );
+            assert_eq!(
+                right.style.bg,
+                Some(palette.panel_bg),
+                "right arrow bg = panel_bg"
+            );
+            i += 2;
         }
     }
 
     #[test]
-    fn ribbon_prefix_label_uses_per_section_contrast_fg() {
-        // The Ctrl + ribbon sits on `surface1` (dim) and must use `palette.text`
-        // (bright) as its label fg — not `panel_contrast_fg`, which contrasts
-        // against panel_bg and produces dark-on-dark in standard dark palettes.
-        // The Alt + ribbon sits on `peach` (bright) and uses `panel_contrast_fg`
-        // (dark) to match the badge's contrast pattern. Verified by walking
-        // every built-in palette so a future palette change cannot silently
-        // regress legibility.
+    fn ribbon_prefix_is_plain_text_not_colored_ribbon() {
+        // Zellij's superkey (Ctrl+/Alt+) renders as plain bold text on
+        // panel_bg, NOT as a colored ribbon segment. Verified across every
+        // built-in palette so a future palette change cannot silently
+        // reintroduce a colored prefix ribbon.
         let kb = default_keybinds();
         let set = hints(Mode::Terminal, &kb);
         for palette in [
@@ -1818,13 +1735,17 @@ mod tests {
             Palette::terminal(),
         ] {
             let line = build_hint_line(&set, HintBarStyle::Full, &palette, 200, true);
-            // Find the `Ctrl + ` and `Alt + ` spans; each must have fg != bg.
             for needle in [" Ctrl + ", " Alt + "] {
                 let span = line
                     .spans
                     .iter()
                     .find(|s| s.content.as_ref() == needle)
                     .unwrap_or_else(|| panic!("missing {needle:?} prefix span"));
+                assert_eq!(
+                    span.style.bg,
+                    Some(palette.panel_bg),
+                    "{needle:?} prefix must sit on panel_bg (zellij superkey convention)"
+                );
                 assert_ne!(
                     span.style.fg, span.style.bg,
                     "{needle:?} prefix fg/bg collision"
