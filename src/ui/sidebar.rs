@@ -633,7 +633,34 @@ pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect
     (ws_area, Some(divider_y), detail_area)
 }
 
+pub(crate) struct CollapsedRailLayout {
+    pub ws_area: Rect,
+    pub divider_y: Option<u16>,
+    pub detail_area: Rect,
+    // Kept on the struct so the rail layout is single-sourced; read by the
+    // layout-bounds tests. render_sidebar_toggle resolves the same rect.
+    #[allow(dead_code)]
+    pub toggle: Rect,
+}
+
+pub(crate) fn compute_collapsed_rail_layout(area: Rect) -> CollapsedRailLayout {
+    let (ws_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
+    let toggle = collapsed_sidebar_toggle_rect(area);
+    CollapsedRailLayout {
+        ws_area,
+        divider_y,
+        detail_area,
+        toggle,
+    }
+}
+
+pub(crate) fn is_attention_state(state: AgentState, seen: bool) -> bool {
+    matches!(state, AgentState::Blocked) || (matches!(state, AgentState::Idle) && !seen)
+}
+
 /// Collapsed sidebar: workspace glance on top, compact agent list below.
+/// Renders button-like rows with full-row background on active/selected, a
+/// leading 1-col attention marker, the row number, and a trailing state icon.
 pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
     let is_navigating = matches!(app.mode, Mode::Navigate);
 
@@ -650,56 +677,74 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
-    if ws_area == Rect::default() {
+    let layout = compute_collapsed_rail_layout(area);
+    if layout.ws_area == Rect::default() {
         render_sidebar_toggle(app, frame, area, true, p);
         return;
     }
 
+    let content_w = layout.ws_area.width;
+
     for (visible_idx, ws) in app.workspaces.iter().enumerate() {
-        let y = ws_area.y + visible_idx as u16;
-        if y >= ws_area.y + ws_area.height {
+        let y = layout.ws_area.y + visible_idx as u16;
+        if y >= layout.ws_area.y + layout.ws_area.height {
             break;
         }
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
-        let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
+        let has_attention = is_attention_state(agg_state, agg_seen);
+        let (dot, dot_style) = state_dot(agg_state, agg_seen, p);
         let is_selected = visible_idx == app.selected && is_navigating;
         let is_active = Some(visible_idx) == app.active;
-        let row_style = if is_selected {
-            Style::default().bg(p.surface0)
+
+        let row_bg = if is_selected {
+            Some(p.surface0)
         } else if is_active {
-            Style::default().bg(p.surface_dim)
+            Some(p.surface_dim)
         } else {
-            Style::default()
-        };
-        let num_style = if is_selected {
-            Style::default().fg(p.overlay1).bg(p.surface0)
-        } else if is_active {
-            Style::default().fg(p.text).bg(p.surface_dim)
-        } else {
-            Style::default().fg(p.overlay0)
+            None
         };
 
-        if is_selected || is_active {
+        if let Some(bg) = row_bg {
             let buf = frame.buffer_mut();
-            for x in ws_area.x..ws_area.x + ws_area.width {
-                buf[(x, y)].set_style(row_style);
+            for x in layout.ws_area.x..layout.ws_area.x + content_w {
+                buf[(x, y)].set_style(Style::default().bg(bg));
             }
         }
 
+        let num_style = match row_bg {
+            Some(bg) if is_selected => Style::default()
+                .fg(p.text)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+            Some(bg) => Style::default().fg(p.text).bg(bg),
+            None => Style::default().fg(p.overlay0),
+        };
+
+        let marker = if has_attention { "●" } else { " " };
+        let marker_style = if has_attention {
+            Style::default().fg(p.accent)
+        } else {
+            Style::default()
+        };
+
+        // marker | pad | num | pad | dot, left-aligned; Paragraph clips to content_w.
+        let spans = vec![
+            Span::styled(marker, marker_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(format!("{}", visible_idx + 1), num_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(dot, dot_style),
+        ];
+
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("{}", visible_idx + 1), num_style),
-                Span::styled(" ", row_style),
-                Span::styled(icon, icon_style),
-            ])),
-            Rect::new(ws_area.x, y, ws_area.width, 1),
+            Paragraph::new(Line::from(spans)),
+            Rect::new(layout.ws_area.x, y, content_w, 1),
         );
     }
 
-    if let Some(divider_y) = divider_y {
+    if let Some(divider_y) = layout.divider_y {
         let buf = frame.buffer_mut();
-        for x in ws_area.x..ws_area.x + ws_area.width {
+        for x in layout.ws_area.x..layout.ws_area.x + content_w {
             buf[(x, divider_y)].set_symbol("─");
             buf[(x, divider_y)].set_style(Style::default().fg(p.surface_dim));
         }
@@ -711,10 +756,10 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         app.active
     };
     let detail_content_area = Rect::new(
-        detail_area.x,
-        detail_area.y,
-        detail_area.width,
-        detail_area.height.saturating_sub(1),
+        layout.detail_area.x,
+        layout.detail_area.y,
+        layout.detail_area.width,
+        layout.detail_area.height.saturating_sub(1),
     );
     if detail_content_area != Rect::default() {
         if let Some(ws_idx) = detail_ws_idx {
@@ -727,16 +772,47 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     let pane_num = ws
                         .public_pane_number(detail.pane_id)
                         .unwrap_or(detail_idx + 1);
-                    let pane_style = Style::default().fg(p.overlay0);
+                    let has_attention = is_attention_state(detail.state, detail.seen);
+
+                    let row_bg = if has_attention {
+                        Some(p.surface_dim)
+                    } else {
+                        None
+                    };
+
+                    if let Some(bg) = row_bg {
+                        let buf = frame.buffer_mut();
+                        for x in detail_content_area.x..detail_content_area.x + content_w {
+                            buf[(x, y)].set_style(Style::default().bg(bg));
+                        }
+                    }
+
+                    let pane_style = if has_attention {
+                        Style::default().fg(p.text)
+                    } else {
+                        Style::default().fg(p.overlay0)
+                    };
                     let (icon, icon_style) =
                         agent_icon(detail.state, detail.seen, app.spinner_tick, p);
+
+                    let marker = if has_attention { "●" } else { " " };
+                    let marker_style = if has_attention {
+                        Style::default().fg(p.accent)
+                    } else {
+                        Style::default()
+                    };
+
+                    let spans = vec![
+                        Span::styled(marker, marker_style),
+                        Span::styled(" ", Style::default()),
+                        Span::styled(format!("{pane_num}"), pane_style),
+                        Span::styled(" ", Style::default()),
+                        Span::styled(icon, icon_style),
+                    ];
+
                     frame.render_widget(
-                        Paragraph::new(Line::from(vec![
-                            Span::styled(format!("{pane_num}"), pane_style),
-                            Span::styled(" ", pane_style),
-                            Span::styled(icon, icon_style),
-                        ])),
-                        Rect::new(detail_content_area.x, y, detail_content_area.width, 1),
+                        Paragraph::new(Line::from(spans)),
+                        Rect::new(detail_content_area.x, y, content_w, 1),
                     );
                 }
             }
@@ -1157,8 +1233,9 @@ pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
     if content_w == 0 || area.height == 0 {
         return Rect::default();
     }
-    let x = area.x + content_w / 2;
-    Rect::new(x, bottom_y, 1, 1)
+    let toggle_w = content_w.min(3);
+    let x = area.x + (content_w.saturating_sub(toggle_w)) / 2;
+    Rect::new(x, bottom_y, toggle_w, 1)
 }
 
 pub(crate) fn expanded_sidebar_toggle_rect(area: Rect) -> Rect {
@@ -1189,12 +1266,30 @@ fn render_sidebar_toggle(
         return;
     }
     let icon = if collapsed { "»" } else { "«" };
-    let icon_style = if collapsed && app.global_menu_attention_badge_visible() {
+    let has_badge = app.global_menu_attention_badge_visible();
+    let icon_style = if collapsed {
+        // The enlarged collapsed toggle is always prominent (accent fg + chip
+        // bg); bold is reserved to preserve the pending-update attention signal.
+        let mut style = Style::default().fg(p.accent).bg(p.surface_dim);
+        if has_badge {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        style
+    } else if has_badge {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(p.overlay0)
     };
-    frame.render_widget(Paragraph::new(Span::styled(icon, icon_style)), toggle_area);
+    if collapsed {
+        let buf = frame.buffer_mut();
+        for x in toggle_area.x..toggle_area.x + toggle_area.width {
+            buf[(x, toggle_area.y)].set_style(Style::default().bg(p.surface_dim));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(icon, icon_style)).alignment(Alignment::Center),
+        toggle_area,
+    );
 }
 
 #[cfg(test)]
@@ -1774,5 +1869,168 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn collapsed_toggle_rect_is_at_least_3_wide() {
+        let area = Rect::new(0, 0, 7, 20);
+        let toggle = collapsed_sidebar_toggle_rect(area);
+        assert!(toggle.width >= 3);
+        assert_eq!(toggle.y, area.y + area.height - 1);
+        assert!(toggle.x + toggle.width <= area.x + area.width.saturating_sub(1));
+    }
+
+    #[test]
+    fn collapsed_toggle_rect_degrades_at_narrow_width() {
+        let area = Rect::new(0, 0, 3, 10);
+        let toggle = collapsed_sidebar_toggle_rect(area);
+        assert!(toggle.width >= 1);
+        assert!(toggle.width <= area.width.saturating_sub(1));
+    }
+
+    #[test]
+    fn collapsed_rail_layout_sections_no_overlap() {
+        let area = Rect::new(0, 0, 7, 20);
+        let layout = compute_collapsed_rail_layout(area);
+
+        assert!(layout.ws_area.height > 0);
+        if let Some(div_y) = layout.divider_y {
+            assert!(div_y >= layout.ws_area.y + layout.ws_area.height);
+            assert!(layout.detail_area.y > div_y);
+        }
+        assert!(layout.ws_area.x + layout.ws_area.width <= area.x + area.width);
+        assert!(layout.ws_area.y + layout.ws_area.height <= area.y + area.height);
+        if layout.detail_area != Rect::default() {
+            assert!(layout.detail_area.y + layout.detail_area.height <= area.y + area.height);
+        }
+    }
+
+    #[test]
+    fn collapsed_rail_layout_height_below_7_has_no_detail_area() {
+        let area = Rect::new(0, 0, 7, 6);
+        let layout = compute_collapsed_rail_layout(area);
+
+        assert_eq!(layout.detail_area, Rect::default());
+        assert!(layout.divider_y.is_none());
+        assert!(layout.ws_area.height > 0);
+    }
+
+    #[test]
+    fn is_attention_state_blocked_is_attention() {
+        assert!(is_attention_state(AgentState::Blocked, true));
+        assert!(is_attention_state(AgentState::Blocked, false));
+    }
+
+    #[test]
+    fn is_attention_state_idle_unseen_is_attention() {
+        assert!(is_attention_state(AgentState::Idle, false));
+    }
+
+    #[test]
+    fn is_attention_state_idle_seen_is_not_attention() {
+        assert!(!is_attention_state(AgentState::Idle, true));
+    }
+
+    #[test]
+    fn is_attention_state_working_is_not_attention() {
+        assert!(!is_attention_state(AgentState::Working, true));
+        assert!(!is_attention_state(AgentState::Working, false));
+    }
+
+    #[test]
+    fn is_attention_state_unknown_is_not_attention() {
+        assert!(!is_attention_state(AgentState::Unknown, true));
+        assert!(!is_attention_state(AgentState::Unknown, false));
+    }
+
+    #[test]
+    fn collapsed_rail_layout_at_exact_height_floor_has_detail_area() {
+        let area = Rect::new(0, 0, 7, 7);
+        let layout = compute_collapsed_rail_layout(area);
+
+        assert!(layout.ws_area.height > 0);
+        assert!(layout.divider_y.is_some());
+        assert!(layout.detail_area.height > 0);
+    }
+
+    #[test]
+    fn collapsed_rail_renders_button_like_rows_at_width_7() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_collapsed = true;
+
+        let area = Rect::new(0, 0, 7, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(7, 20)).expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .expect("collapsed sidebar should render");
+
+        let layout = compute_collapsed_rail_layout(area);
+        let buf = terminal.backend().buffer();
+        let active_row = layout.ws_area.y;
+        let active_bg = buf[(layout.ws_area.x, active_row)].style().bg;
+        assert_eq!(active_bg, Some(app.palette.surface_dim));
+    }
+
+    #[test]
+    fn collapsed_toggle_renders_accent_style() {
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 7, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(7, 20)).expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar_toggle(&app, frame, area, true, &app.palette))
+            .expect("sidebar toggle should render");
+
+        let toggle = collapsed_sidebar_toggle_rect(area);
+        let cell = &terminal.backend().buffer()[(toggle.x + toggle.width / 2, toggle.y)];
+        assert_eq!(cell.symbol(), "»");
+        assert_eq!(cell.style().fg, Some(app.palette.accent));
+        assert_eq!(cell.style().bg, Some(app.palette.surface_dim));
+        // No pending badge → not bold (bold is reserved for the attention signal).
+        assert!(!cell.style().add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn collapsed_toggle_bolds_when_attention_badge_pending() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.update_available = Some("9.9.9".into());
+        let area = Rect::new(0, 0, 7, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(7, 20)).expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar_toggle(&app, frame, area, true, &app.palette))
+            .expect("sidebar toggle should render");
+
+        let toggle = collapsed_sidebar_toggle_rect(area);
+        let cell = &terminal.backend().buffer()[(toggle.x + toggle.width / 2, toggle.y)];
+        assert_eq!(cell.style().fg, Some(app.palette.accent));
+        assert!(cell.style().add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn collapsed_rail_layout_rects_in_bounds_at_mobile_threshold() {
+        let area = Rect::new(0, 0, 7, 10);
+        let layout = compute_collapsed_rail_layout(area);
+        let content_w = area.width.saturating_sub(1);
+
+        assert!(layout.ws_area.x + layout.ws_area.width <= area.x + content_w);
+        assert!(layout.ws_area.y + layout.ws_area.height <= area.y + area.height);
+        if layout.detail_area != Rect::default() {
+            assert!(layout.detail_area.x + layout.detail_area.width <= area.x + content_w);
+            assert!(layout.detail_area.y + layout.detail_area.height <= area.y + area.height);
+        }
+        if layout.toggle != Rect::default() {
+            assert!(layout.toggle.x + layout.toggle.width <= area.x + content_w);
+            assert!(layout.toggle.y + layout.toggle.height <= area.y + area.height);
+        }
     }
 }
