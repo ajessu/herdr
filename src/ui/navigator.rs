@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::{
-    scrollbar::{render_scrollbar, should_show_scrollbar},
+    scrollbar::{render_scrollbar, should_show_scrollbar, SCROLLBAR_THUMB},
     status::{agent_icon, state_label_color},
     widgets::{panel_contrast_fg, render_panel_shell},
 };
@@ -268,7 +268,7 @@ fn render_navigator_scrollbar(
         track,
         app.palette.surface_dim,
         app.palette.overlay0,
-        "▕",
+        SCROLLBAR_THUMB,
     );
 }
 
