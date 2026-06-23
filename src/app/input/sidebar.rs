@@ -1180,10 +1180,18 @@ mod tests {
     fn clicking_tab_scroll_button_reveals_hidden_tabs_without_renaming() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
+        // Enough tabs to overflow the tab bar at width 65 even after the
+        // sidebar claims its minimum width and uniform compression is tried,
+        // so the scroll buttons are guaranteed to appear. Five tabs fit exactly
+        // at MIN_TAB_WIDTH and would not overflow; keep a margin so a future
+        // sidebar-width default change cannot silently make this fit again.
         ws.test_add_tab(Some("logs"));
         ws.test_add_tab(Some("review"));
         ws.test_add_tab(Some("ops"));
         ws.test_add_tab(Some("notes"));
+        ws.test_add_tab(Some("build"));
+        ws.test_add_tab(Some("deploy"));
+        ws.test_add_tab(Some("watch"));
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
