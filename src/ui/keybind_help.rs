@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use super::release_notes::release_notes_close_button_rect;
-use super::scrollbar::{release_notes_scrollbar_rect, render_scrollbar};
+use super::scrollbar::{release_notes_scrollbar_rect, render_scrollbar, SCROLLBAR_THUMB};
 use super::widgets::{
     modal_stack_areas, panel_contrast_fg, render_action_button, render_modal_header,
     render_modal_shell,
@@ -288,7 +288,7 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
             track,
             app.palette.overlay0,
             app.palette.overlay1,
-            "▐",
+            SCROLLBAR_THUMB,
         );
     }
 
