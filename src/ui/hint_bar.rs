@@ -12,7 +12,11 @@ use unicode_width::UnicodeWidthStr;
 use super::widgets::panel_contrast_fg;
 use crate::app::state::{Mode, Palette};
 use crate::app::AppState;
-use crate::config::{format_key_combo, HintBarStyle, Keybinds, ModeBinding};
+use crate::config::{format_key_combo, ActionKeybinds, HintBarStyle, Keybinds, ModeBinding};
+
+/// Minimum blank columns kept between the left and right hint sections so they
+/// stay visually distinct and never touch.
+const MIN_SECTION_GAP: usize = 2;
 
 pub struct Hint {
     pub key: Cow<'static, str>,
@@ -36,6 +40,7 @@ pub struct Badge {
 pub struct HintSet {
     pub badge: Badge,
     pub hints: Vec<Hint>,
+    pub alt_hints: Vec<Hint>,
 }
 
 fn mode_binding_label(binding: &ModeBinding) -> Option<Cow<'static, str>> {
@@ -64,9 +69,83 @@ fn is_bidi_override(c: char) -> bool {
     )
 }
 
-fn resolve_prefix_rhs(bindings: &crate::config::ActionKeybinds) -> Option<Cow<'static, str>> {
-    // Sanitization happens at the build_hint_line chokepoint for all hint sources.
+fn alt_binding_label(bindings: &ActionKeybinds) -> Option<Cow<'static, str>> {
+    bindings.alt_direct_label().map(Cow::Owned)
+}
+
+fn resolve_prefix_rhs(bindings: &ActionKeybinds) -> Option<Cow<'static, str>> {
     bindings.prefix_rhs_label().map(Cow::Owned)
+}
+
+fn terminal_alt_hints(kb: &Keybinds) -> Vec<Hint> {
+    let mut alt_hints = Vec::new();
+
+    let focus_labels: Vec<String> = [
+        &kb.focus_pane_left,
+        &kb.focus_pane_down,
+        &kb.focus_pane_up,
+        &kb.focus_pane_right,
+    ]
+    .iter()
+    .filter_map(|b| b.alt_direct_label())
+    .collect();
+    if !focus_labels.is_empty() {
+        let combined = focus_labels.join("/");
+        alt_hints.push(Hint {
+            key: Cow::Owned(combined),
+            label: "FOCUS",
+            short: "foc",
+            priority: 0,
+        });
+    }
+
+    if let Some(key) = alt_binding_label(&kb.split_auto) {
+        alt_hints.push(Hint {
+            key,
+            label: "SPLIT",
+            short: "spl",
+            priority: 1,
+        });
+    }
+
+    if let Some(key) = alt_binding_label(&kb.close_pane) {
+        alt_hints.push(Hint {
+            key,
+            label: "CLOSE",
+            short: "cls",
+            priority: 2,
+        });
+    }
+
+    let resize_labels: Vec<String> = [&kb.resize_grow, &kb.resize_shrink]
+        .iter()
+        .filter_map(|b| b.alt_direct_label())
+        .collect();
+    if !resize_labels.is_empty() {
+        let combined = resize_labels.join("/");
+        alt_hints.push(Hint {
+            key: Cow::Owned(combined),
+            label: "RESIZE",
+            short: "rsz",
+            priority: 3,
+        });
+    }
+
+    let move_labels: Vec<String> = [&kb.move_tab_left, &kb.move_tab_right]
+        .iter()
+        .filter_map(|b| b.alt_direct_label())
+        .collect();
+    if !move_labels.is_empty() {
+        let combined = move_labels.join("/");
+        alt_hints.push(Hint {
+            key: Cow::Owned(combined),
+            label: "MOV TAB",
+            short: "mov",
+            priority: 4,
+        });
+    }
+
+    alt_hints
 }
 
 fn terminal_hints(kb: &Keybinds) -> HintSet {
@@ -122,12 +201,15 @@ fn terminal_hints(kb: &Keybinds) -> HintSet {
         });
     }
 
+    let alt_hints = terminal_alt_hints(kb);
+
     HintSet {
         badge: Badge {
             label: "NORMAL",
             accent: BadgeColor::Accent,
         },
         hints,
+        alt_hints,
     }
 }
 
@@ -199,6 +281,7 @@ fn session_hints(kb: &Keybinds) -> HintSet {
             accent: BadgeColor::Mauve,
         },
         hints,
+        alt_hints: Vec::new(),
     }
 }
 
@@ -265,6 +348,7 @@ fn pane_hints(kb: &Keybinds) -> HintSet {
             accent: BadgeColor::Mauve,
         },
         hints,
+        alt_hints: Vec::new(),
     }
 }
 
@@ -329,14 +413,13 @@ fn tab_hints(kb: &Keybinds) -> HintSet {
             accent: BadgeColor::Mauve,
         },
         hints,
+        alt_hints: Vec::new(),
     }
 }
 
 fn resize_hints(kb: &Keybinds) -> HintSet {
     let b = &kb.mode_resize;
     let mut hints = vec![
-        // Directional resize keys are hardcoded like the other sticky modes; only
-        // the non-directional grow/shrink keys are surfaced from the live config.
         Hint {
             key: Cow::Borrowed("h/j/k/l"),
             label: "increase",
@@ -375,6 +458,7 @@ fn resize_hints(kb: &Keybinds) -> HintSet {
             accent: BadgeColor::Mauve,
         },
         hints,
+        alt_hints: Vec::new(),
     }
 }
 
@@ -409,15 +493,13 @@ fn move_hints(kb: &Keybinds) -> HintSet {
             accent: BadgeColor::Mauve,
         },
         hints,
+        alt_hints: Vec::new(),
     }
 }
 
 fn locked_hints(kb: &Keybinds) -> HintSet {
     let mut hints = Vec::new();
 
-    // mode_entry.locked is None only when config validation dropped the key; the
-    // reachability invariant (keybinds.rs) prevents starting locked without it, but
-    // be honest rather than advertise a key that won't work.
     let unlock = match kb.mode_entry.locked {
         Some(combo) => Cow::Owned(format_key_combo(combo)),
         None => Cow::Borrowed("(unbound)"),
@@ -441,6 +523,7 @@ fn locked_hints(kb: &Keybinds) -> HintSet {
             accent: BadgeColor::Locked,
         },
         hints,
+        alt_hints: Vec::new(),
     }
 }
 
@@ -477,6 +560,7 @@ fn prefix_hints(kb: &Keybinds) -> HintSet {
             accent: BadgeColor::Accent,
         },
         hints,
+        alt_hints: Vec::new(),
     }
 }
 
@@ -512,6 +596,7 @@ fn copy_hints() -> HintSet {
                 priority: 3,
             },
         ],
+        alt_hints: Vec::new(),
     }
 }
 
@@ -528,6 +613,33 @@ pub fn hints(mode: Mode, kb: &Keybinds) -> HintSet {
         Mode::Copy => copy_hints(),
         _ => terminal_hints(kb),
     }
+}
+
+fn compute_section_width(hints: &[&Hint], use_short: bool) -> usize {
+    hints.iter().fold(0usize, |acc, hint| {
+        let label = if use_short { hint.short } else { hint.label };
+        // Match build_section_spans, which renders the sanitized key, so the
+        // width budget and the placed spans agree on control/bidi-stripped keys.
+        let key_w = sanitize_key(&hint.key).width();
+        acc + 1 + key_w + 1 + label.width()
+    })
+}
+
+fn build_section_spans(
+    hints: &[&Hint],
+    use_short: bool,
+    key_style: Style,
+    dim_style: Style,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for hint in hints {
+        let label = if use_short { hint.short } else { hint.label };
+        let key_str = sanitize_key(&hint.key);
+        spans.push(Span::raw(String::from(" ")));
+        spans.push(Span::styled(key_str.into_owned(), key_style));
+        spans.push(Span::styled(format!(" {label}"), dim_style));
+    }
+    spans
 }
 
 pub fn build_hint_line(
@@ -561,9 +673,7 @@ pub fn build_hint_line(
         return Line::from(spans);
     }
 
-    let mut used = badge_width;
-
-    let selected_hints: Vec<&Hint> = if style == HintBarStyle::Compact {
+    let left_hints: Vec<&Hint> = if style == HintBarStyle::Compact {
         let mut sorted: Vec<&Hint> = hint_set.hints.iter().collect();
         sorted.sort_by_key(|h| h.priority);
         sorted.truncate(4);
@@ -572,17 +682,62 @@ pub fn build_hint_line(
         hint_set.hints.iter().collect()
     };
 
-    for hint in &selected_hints {
-        let label = if style == HintBarStyle::Compact {
-            hint.short
-        } else {
-            hint.label
-        };
-        let separator = " ";
-        // Sanitize at the chokepoint so no hint source can leak control/bidi chars
-        // into the rendered bar (key strings derive from config-bound key combos).
+    let right_hints: Vec<&Hint> = hint_set.alt_hints.iter().collect();
+    let has_right = !right_hints.is_empty();
+
+    // FR4 degradation: full labels -> short labels -> drop right -> ellipsis on left.
+    // Compact style means short labels throughout, so it skips the full-label tier.
+    let force_short = style == HintBarStyle::Compact;
+    let remaining = width.saturating_sub(badge_width);
+
+    if has_right {
+        let left_full = compute_section_width(&left_hints, false);
+        let right_full = compute_section_width(&right_hints, false);
+        let gap = MIN_SECTION_GAP;
+
+        // Tier 1: both full labels
+        if !force_short && left_full + gap + right_full <= remaining {
+            let pad = remaining - left_full - right_full;
+            spans.extend(build_section_spans(
+                &left_hints,
+                false,
+                key_style,
+                dim_style,
+            ));
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.extend(build_section_spans(
+                &right_hints,
+                false,
+                key_style,
+                dim_style,
+            ));
+            return Line::from(spans);
+        }
+
+        // Tier 2: both short labels
+        let left_short = compute_section_width(&left_hints, true);
+        let right_short = compute_section_width(&right_hints, true);
+        if left_short + gap + right_short <= remaining {
+            let pad = remaining - left_short - right_short;
+            spans.extend(build_section_spans(&left_hints, true, key_style, dim_style));
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.extend(build_section_spans(
+                &right_hints,
+                true,
+                key_style,
+                dim_style,
+            ));
+            return Line::from(spans);
+        }
+    }
+
+    // Tier 3 (or no right section): left only with truncation/ellipsis.
+    // Reuse force_short — Compact is the single source of the short-label choice.
+    let mut used = badge_width;
+    for hint in &left_hints {
+        let label = if force_short { hint.short } else { hint.label };
         let key_str = sanitize_key(&hint.key);
-        let entry = format!("{separator}{key_str} {label}");
+        let entry = format!(" {key_str} {label}");
         let entry_width = entry.width();
 
         let ellipsis_width = 2; // " …"
@@ -593,12 +748,11 @@ pub fn build_hint_line(
             return Line::from(spans);
         }
 
-        used += separator.width();
-        spans.push(Span::raw(String::from(separator)));
+        spans.push(Span::raw(String::from(" ")));
         let key_width = key_str.width();
         spans.push(Span::styled(key_str.into_owned(), key_style));
         let label_text = format!(" {label}");
-        used += key_width + label_text.width();
+        used += 1 + key_width + label_text.width();
         spans.push(Span::styled(label_text, dim_style));
     }
 
@@ -849,15 +1003,14 @@ mod tests {
                 accent: BadgeColor::Accent,
             },
             hints: vec![Hint {
-                key: Cow::Borrowed("\u{4e16}"), // CJK char, 2 display columns
+                key: Cow::Borrowed("\u{4e16}"),
                 label: "x",
                 short: "x",
                 priority: 0,
             }],
+            alt_hints: Vec::new(),
         };
         let palette = Palette::catppuccin();
-        // Badge " T " = 3 cols, then " 世 x" = 1 + 2 + 1 + 1 = 5 cols; total = 8
-        // At width 7, the hint shouldn't fit (badge=3, entry needs 5, total 8 > 7)
         let line = build_hint_line(&set, HintBarStyle::Full, &palette, 7);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
@@ -885,6 +1038,7 @@ mod tests {
                 short: "x",
                 priority: 0,
             }],
+            alt_hints: Vec::new(),
         };
         let palette = Palette::catppuccin();
         let line = build_hint_line(&set, HintBarStyle::Full, &palette, 200);
@@ -904,5 +1058,293 @@ mod tests {
         let set = hints(Mode::Locked, &kb);
         let unlock = set.hints.iter().find(|h| h.label == "unlock").unwrap();
         assert_eq!(unlock.key.as_ref(), "(unbound)");
+    }
+
+    // --- Alt-shortcut section tests ---
+
+    #[test]
+    fn terminal_mode_has_alt_hints() {
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        assert!(!set.alt_hints.is_empty());
+        let labels: Vec<&str> = set.alt_hints.iter().map(|h| h.label).collect();
+        assert!(labels.contains(&"FOCUS"));
+        assert!(labels.contains(&"SPLIT"));
+        assert!(labels.contains(&"CLOSE"));
+        assert!(labels.contains(&"RESIZE"));
+        assert!(labels.contains(&"MOV TAB"));
+    }
+
+    #[test]
+    fn alt_hints_use_alt_modifier_labels() {
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let focus = set.alt_hints.iter().find(|h| h.label == "FOCUS").unwrap();
+        assert!(
+            focus.key.contains("alt+"),
+            "FOCUS hint should contain 'alt+', got: {}",
+            focus.key
+        );
+        let split = set.alt_hints.iter().find(|h| h.label == "SPLIT").unwrap();
+        assert_eq!(split.key.as_ref(), "alt+n");
+    }
+
+    #[test]
+    fn alt_hint_many_binding_selects_alt_alternative() {
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let close = set.alt_hints.iter().find(|h| h.label == "CLOSE").unwrap();
+        assert_eq!(close.key.as_ref(), "alt+x");
+    }
+
+    #[test]
+    fn alt_hint_dropped_when_no_alt_alternative() {
+        let mut kb = default_keybinds();
+        kb.focus_pane_left = ActionKeybinds::prefix("h");
+        kb.focus_pane_down = ActionKeybinds::prefix("j");
+        kb.focus_pane_up = ActionKeybinds::prefix("k");
+        kb.focus_pane_right = ActionKeybinds::prefix("l");
+        let set = hints(Mode::Terminal, &kb);
+        let focus = set.alt_hints.iter().find(|h| h.label == "FOCUS");
+        assert!(focus.is_none());
+    }
+
+    #[test]
+    fn non_terminal_modes_have_no_alt_hints() {
+        let kb = default_keybinds();
+        for mode in [
+            Mode::Pane,
+            Mode::Tab,
+            Mode::Session,
+            Mode::Locked,
+            Mode::Copy,
+            Mode::Resize,
+            Mode::Move,
+            Mode::Prefix,
+        ] {
+            let set = hints(mode, &kb);
+            assert!(
+                set.alt_hints.is_empty(),
+                "Mode {:?} should not have alt hints",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn degradation_tier1_full_labels_both_sections() {
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let palette = Palette::catppuccin();
+        let line = build_hint_line(&set, HintBarStyle::Full, &palette, 200);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("NORMAL"));
+        assert!(text.contains("PANE"));
+        assert!(text.contains("FOCUS"));
+        assert!(text.contains("SPLIT"));
+    }
+
+    #[test]
+    fn degradation_tier2_short_labels_both_sections() {
+        // Synthetic set with full labels strictly wider than short labels, so a
+        // width window where short fits but full does not provably exists.
+        let set = HintSet {
+            badge: Badge {
+                label: "M",
+                accent: BadgeColor::Accent,
+            },
+            hints: vec![Hint {
+                key: Cow::Borrowed("a"),
+                label: "LEFTLONG",
+                short: "L",
+                priority: 0,
+            }],
+            alt_hints: vec![Hint {
+                key: Cow::Borrowed("b"),
+                label: "RIGHTLONG",
+                short: "R",
+                priority: 0,
+            }],
+        };
+        let palette = Palette::catppuccin();
+        let left_full = compute_section_width(&set.hints.iter().collect::<Vec<_>>(), false);
+        let right_full = compute_section_width(&set.alt_hints.iter().collect::<Vec<_>>(), false);
+        let left_short = compute_section_width(&set.hints.iter().collect::<Vec<_>>(), true);
+        let right_short = compute_section_width(&set.alt_hints.iter().collect::<Vec<_>>(), true);
+        let badge_width = format!(" {} ", set.badge.label).width();
+        let gap = MIN_SECTION_GAP;
+        let too_small_for_full = badge_width + left_full + gap + right_full;
+        let fits_short = badge_width + left_short + gap + right_short;
+        assert!(
+            too_small_for_full > fits_short,
+            "test setup must distinguish tiers"
+        );
+        // Width fits short but not full: exercises tier 2 specifically.
+        let width = (too_small_for_full - 1) as u16;
+        let line = build_hint_line(&set, HintBarStyle::Full, &palette, width);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("M"));
+        // Short labels present, full labels absent.
+        assert!(
+            text.contains(" L") && text.contains(" R"),
+            "short labels expected: {text}"
+        );
+        assert!(
+            !text.contains("LEFTLONG") && !text.contains("RIGHTLONG"),
+            "full labels must not appear in tier 2: {text}"
+        );
+    }
+
+    #[test]
+    fn degradation_tier3_alt_section_dropped() {
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let palette = Palette::catppuccin();
+        let left_short = compute_section_width(&set.hints.iter().collect::<Vec<_>>(), true);
+        let right_short = compute_section_width(&set.alt_hints.iter().collect::<Vec<_>>(), true);
+        let badge_width = format!(" {} ", set.badge.label).width();
+        let gap = MIN_SECTION_GAP;
+        let fits_both_short = badge_width + left_short + gap + right_short;
+        let width = fits_both_short.saturating_sub(1) as u16;
+        let line = build_hint_line(&set, HintBarStyle::Full, &palette, width);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("NORMAL"));
+        assert!(
+            !text.contains("FOCUS") && !text.contains("foc"),
+            "Alt section should be dropped, got: {text}"
+        );
+        assert!(text.contains("PANE") || text.contains("pane"));
+    }
+
+    #[test]
+    fn degradation_tier4_ellipsis_on_left() {
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let palette = Palette::catppuccin();
+        let line = build_hint_line(&set, HintBarStyle::Full, &palette, 30);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("NORMAL"));
+        assert!(text.contains('\u{2026}'));
+        assert!(!text.contains("FOCUS") && !text.contains("foc"));
+    }
+
+    #[test]
+    fn compact_style_uses_short_labels_with_alt_section() {
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let palette = Palette::catppuccin();
+        // Wide enough that Full would render full labels; Compact must not.
+        let line = build_hint_line(&set, HintBarStyle::Compact, &palette, 200);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("NORMAL"));
+        // Compact uses short labels on both sections, never the full label.
+        assert!(text.contains("foc"), "compact short label expected: {text}");
+        assert!(
+            !text.contains("FOCUS"),
+            "compact must not render full label: {text}"
+        );
+    }
+
+    #[test]
+    fn alt_section_sanitizes_bidi_control_chars() {
+        let set = HintSet {
+            badge: Badge {
+                label: "T",
+                accent: BadgeColor::Accent,
+            },
+            hints: vec![Hint {
+                key: Cow::Borrowed("x"),
+                label: "left",
+                short: "l",
+                priority: 0,
+            }],
+            alt_hints: vec![Hint {
+                key: Cow::Borrowed("alt+\u{202e}h"),
+                label: "FOC",
+                short: "f",
+                priority: 0,
+            }],
+        };
+        let palette = Palette::catppuccin();
+        let line = build_hint_line(&set, HintBarStyle::Full, &palette, 200);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains('\u{202e}'),
+            "bidi char should be stripped from alt hint"
+        );
+        assert!(text.contains("alt+h"));
+    }
+
+    #[test]
+    fn no_overlap_at_any_width() {
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let palette = Palette::catppuccin();
+        let badge_width = format!(" {} ", set.badge.label).width() as u16;
+        for style in [HintBarStyle::Full, HintBarStyle::Compact] {
+            for w in badge_width..=200 {
+                let line = build_hint_line(&set, style, &palette, w);
+                let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
+                assert!(
+                    total <= w as usize,
+                    "overlap at width {w} ({style:?}): rendered {total} cols"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_overlap_with_wide_remapped_alt_labels() {
+        // Alt labels are user-customizable; a remap to long combos must not
+        // overflow or overlap — only shift the degradation thresholds.
+        let mut set = hints(Mode::Terminal, &Default::default());
+        set.alt_hints = vec![
+            Hint {
+                key: Cow::Borrowed("alt+shift+pageup/alt+shift+pagedown"),
+                label: "FOCUS",
+                short: "foc",
+                priority: 0,
+            },
+            Hint {
+                key: Cow::Borrowed("ctrl+alt+backspace"),
+                label: "CLOSE",
+                short: "cls",
+                priority: 1,
+            },
+        ];
+        let palette = Palette::catppuccin();
+        let badge_width = format!(" {} ", set.badge.label).width() as u16;
+        for w in badge_width..=200 {
+            let line = build_hint_line(&set, HintBarStyle::Full, &palette, w);
+            let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                total <= w as usize,
+                "overlap at width {w} with wide alt labels: rendered {total} cols"
+            );
+        }
+    }
+
+    #[test]
+    fn two_sections_keep_minimum_gap() {
+        // When both sections render, the blank run between them must be at least
+        // MIN_SECTION_GAP so they stay visually distinct (FR4 "never overlap").
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let palette = Palette::catppuccin();
+        // A wide terminal renders both sections (tier 1 or 2).
+        let line = build_hint_line(&set, HintBarStyle::Full, &palette, 200);
+        // The single padding span is the inter-section blank run.
+        let max_blank = line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .filter(|c| c.chars().all(|ch| ch == ' '))
+            .map(|c| c.width())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_blank >= MIN_SECTION_GAP,
+            "inter-section gap {max_blank} < MIN_SECTION_GAP {MIN_SECTION_GAP}"
+        );
     }
 }
