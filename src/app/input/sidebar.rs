@@ -1289,39 +1289,39 @@ mod tests {
     }
 
     #[test]
-    fn clicking_tab_scroll_button_reveals_hidden_tabs_without_renaming() {
+    fn clicking_overflow_indicator_jumps_to_hidden_tab_without_renaming() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
-        // Enough tabs to overflow the tab bar at width 65 even after the
-        // sidebar claims its minimum width and uniform compression is tried,
-        // so the scroll buttons are guaranteed to appear. Five tabs fit exactly
-        // at MIN_TAB_WIDTH and would not overflow; keep a margin so a future
-        // sidebar-width default change cannot silently make this fit again.
-        ws.test_add_tab(Some("logs"));
-        ws.test_add_tab(Some("review"));
-        ws.test_add_tab(Some("ops"));
-        ws.test_add_tab(Some("notes"));
-        ws.test_add_tab(Some("build"));
-        ws.test_add_tab(Some("deploy"));
-        ws.test_add_tab(Some("watch"));
+        // Enough tabs to overflow the tab bar at width 65 even after the sidebar
+        // claims its minimum width, so the overflow indicators are guaranteed to
+        // appear. Keep a margin so a future sidebar-width default change cannot
+        // silently make these fit again.
+        for name in ["logs", "review", "ops", "notes", "build", "deploy", "watch"] {
+            ws.test_add_tab(Some(name));
+        }
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+        // Desktop width (above the mobile threshold) but narrow enough that the
+        // trailing tabs overflow behind the right indicator with active tab 0.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 70, 20));
 
-        let right = app.state.view.tab_scroll_right_hit_area;
-        assert!(right.width > 0);
+        let right = app.state.view.tab_overflow.right.expect("right overflow");
+        let right_rect = app.state.view.tab_overflow.right_hit_area;
+        assert!(right_rect.width > 0);
+        let expected_tab = right.jump_to;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            right.x + 1,
-            right.y,
+            right_rect.x + 1,
+            right_rect.y,
         ));
 
-        assert_eq!(app.state.tab_scroll, 1);
-        assert!(!app.state.tab_scroll_follow_active);
-        assert_eq!(app.state.workspaces[0].active_tab, 0);
-        assert_eq!(app.state.view.tab_hit_areas[0].width, 0);
+        // The indicator-jump activates the nearest hidden tab on that side.
+        assert_eq!(app.state.workspaces[0].active_tab, expected_tab);
+        // After re-centering, the jumped-to tab is now visible.
+        assert!(app.state.view.tab_hit_areas[expected_tab].width > 0);
+        // Tabs are not renamed by the jump (custom names preserved).
         assert!(app.state.workspaces[0].tabs[0].custom_name.is_none());
         assert_eq!(
             app.state.workspaces[0].tabs[1].custom_name.as_deref(),
@@ -1330,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_last_visible_tab_at_right_edge_does_not_overscroll() {
+    fn clicking_last_visible_tab_activates_it() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         for name in [
@@ -1338,17 +1338,16 @@ mod tests {
         ] {
             ws.test_add_tab(Some(name));
         }
+        // Active on the last tab so the centered fill keeps it visible.
+        let last_idx = ws.tabs.len() - 1;
+        ws.active_tab = last_idx;
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.tab_scroll = usize::MAX;
-        app.state.tab_scroll_follow_active = false;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
 
-        let last_idx = app.state.workspaces[0].tabs.len() - 1;
         let target = app.state.view.tab_hit_areas[last_idx];
-        let clamped_scroll = app.state.tab_scroll;
-        assert!(target.width > 0, "last tab should already be visible");
+        assert!(target.width > 0, "active/last tab should be visible");
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -1362,7 +1361,6 @@ mod tests {
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, last_idx);
-        assert_eq!(app.state.tab_scroll, clamped_scroll);
         assert!(app.state.view.tab_hit_areas[last_idx].width > 0);
     }
 

@@ -522,6 +522,22 @@ pub struct WorktreesConfig {
     pub directory: String,
 }
 
+/// Tab-bar appearance config, nested under `[ui.tabs]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TabsConfig {
+    /// Render Powerline arrow separators between tabs. When false, tabs are
+    /// separated by alternating backgrounds with no Powerline codepoints, so a
+    /// terminal whose font lacks the arrow glyph degrades cleanly. Default: true.
+    pub powerline: bool,
+}
+
+impl Default for TabsConfig {
+    fn default() -> Self {
+        Self { powerline: true }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -555,6 +571,8 @@ pub struct UiConfig {
     pub accent: String,
     /// Show agent status dots on tab bar labels.
     pub show_tab_status: TabStatusMode,
+    /// Tab-bar appearance (Powerline separators, etc.).
+    pub tabs: TabsConfig,
     /// Bottom hint bar showing mode-contextual keyboard shortcuts.
     pub hint_bar: HintBarStyle,
     /// Optional visual toast notifications for background workspace events.
@@ -863,6 +881,7 @@ impl Default for UiConfig {
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             accent: "cyan".into(),
             show_tab_status: TabStatusMode::Off,
+            tabs: TabsConfig::default(),
             hint_bar: HintBarStyle::Full,
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
@@ -1536,6 +1555,34 @@ show_tab_status = "all"
 show_tab_status = "blocked"
 "#;
         assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn tabs_powerline_defaults_on_and_parses() {
+        // Default is ON.
+        let default_config = Config::default();
+        assert!(default_config.ui.tabs.powerline);
+
+        // Explicit OFF parses, is not flagged unknown, and round-trips.
+        let toml_off = r#"
+[ui.tabs]
+powerline = false
+"#;
+        let config: Config = toml::from_str(toml_off).unwrap();
+        assert!(!config.ui.tabs.powerline);
+
+        // Round-trip the nested struct through TOML.
+        let serialized = toml::to_string(&config.ui.tabs).unwrap();
+        let restored: TabsConfig = toml::from_str(&serialized).unwrap();
+        assert!(!restored.powerline);
+
+        // Explicit ON parses too.
+        let toml_on = r#"
+[ui.tabs]
+powerline = true
+"#;
+        let config: Config = toml::from_str(toml_on).unwrap();
+        assert!(config.ui.tabs.powerline);
     }
 
     #[test]

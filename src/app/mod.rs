@@ -99,8 +99,7 @@ pub(crate) struct TabClickState {
 
 impl TabClickState {
     fn is_double_click_for(self, next: Self) -> bool {
-        self.tab_idx == next.tab_idx
-            && next.at.duration_since(self.at) <= TAB_DOUBLE_CLICK_WINDOW
+        self.tab_idx == next.tab_idx && next.at.duration_since(self.at) <= TAB_DOUBLE_CLICK_WINDOW
     }
 }
 
@@ -503,8 +502,6 @@ impl App {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
-            tab_scroll: 0,
-            tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
             view: state::ViewState {
                 layout: state::ViewLayout::Desktop,
@@ -514,9 +511,7 @@ impl App {
                 tab_hit_areas: Vec::new(),
                 tab_chrome: Vec::new(),
                 tab_status_mode: crate::config::TabStatusMode::Off,
-                tab_compressed_width: None,
-                tab_scroll_left_hit_area: Rect::default(),
-                tab_scroll_right_hit_area: Rect::default(),
+                tab_overflow: crate::ui::TabBarOverflow::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
                 hint_bar_rect: Rect::default(),
@@ -565,6 +560,7 @@ impl App {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             show_tab_status: config.ui.show_tab_status,
+            tabs_powerline: config.ui.tabs.powerline,
             hint_bar: config.ui.hint_bar,
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
@@ -1298,6 +1294,7 @@ impl App {
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.show_tab_status = config.ui.show_tab_status;
+                self.state.tabs_powerline = config.ui.tabs.powerline;
                 self.state.hint_bar = config.ui.hint_bar;
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);

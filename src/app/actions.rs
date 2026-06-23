@@ -974,7 +974,6 @@ impl AppState {
                     public_tab_id_for_index(ws, active_tab).unwrap_or_else(|| workspace_id.clone());
                 crate::logging::tab_focused(&workspace_id, &tab_id);
             }
-            self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
             self.record_pane_focus_after_navigation(previous_focus);
         }
@@ -1011,7 +1010,6 @@ impl AppState {
                 public_tab_id_for_index(ws, tab_idx).unwrap_or_else(|| workspace_id.clone());
             crate::logging::tab_focused(&workspace_id, &tab_id);
         }
-        self.tab_scroll_follow_active = true;
         self.refresh_tab_bar_view();
         self.record_pane_focus_after_navigation(previous_focus);
         true
@@ -1110,7 +1108,6 @@ impl AppState {
             let tab_id = public_tab_id_for_index(ws, idx).unwrap_or_else(|| workspace_id.clone());
             crate::logging::tab_focused(&workspace_id, &tab_id);
             self.mark_session_dirty();
-            self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
             self.record_pane_focus_after_navigation(previous_focus);
         }
@@ -1229,23 +1226,25 @@ impl AppState {
         self.ensure_workspace_visible(self.selected);
     }
 
-    pub fn scroll_tabs_left(&mut self) {
-        self.tab_scroll_follow_active = false;
-        self.tab_scroll = self.tab_scroll.saturating_sub(1);
-        self.refresh_tab_bar_view();
-    }
-
-    pub fn scroll_tabs_right(&mut self) {
-        self.tab_scroll_follow_active = false;
-        self.tab_scroll = self.tab_scroll.saturating_add(1);
-        self.refresh_tab_bar_view();
+    /// Activate the tab a `+N` overflow indicator points at. Routes through the
+    /// `switch_tab` chokepoint so drag/gesture state is cleared, then the
+    /// stateless centered fill re-centers on the new active tab, revealing the
+    /// next batch. `jump_to` is a tab index; out-of-range jumps are ignored.
+    pub fn jump_to_tab_indicator(&mut self, jump_to: usize) {
+        let tab_count = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .map(|ws| ws.tabs.len())
+            .unwrap_or(0);
+        if jump_to < tab_count {
+            self.switch_tab(jump_to);
+        }
     }
 
     pub fn move_tab(&mut self, source_idx: usize, insert_idx: usize) {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
             if ws.move_tab(source_idx, insert_idx) {
                 self.mark_session_dirty();
-                self.tab_scroll_follow_active = true;
                 self.refresh_tab_bar_view();
             }
         }
@@ -1480,8 +1479,6 @@ impl AppState {
             self.active = None;
             self.selected = 0;
             self.workspace_scroll = 0;
-            self.tab_scroll = 0;
-            self.tab_scroll_follow_active = true;
         } else {
             if self.selected >= self.workspaces.len() {
                 self.selected = self.workspaces.len() - 1;
@@ -1491,7 +1488,6 @@ impl AppState {
                 .workspace_scroll
                 .min(self.workspaces.len().saturating_sub(1));
             self.ensure_workspace_visible(self.selected);
-            self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
         }
     }
@@ -1499,13 +1495,10 @@ impl AppState {
     pub(crate) fn refresh_tab_bar_view(&mut self) {
         let area = self.view.tab_bar_rect;
         let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
-            self.tab_scroll = 0;
             self.view.tab_hit_areas.clear();
             self.view.tab_chrome.clear();
             self.view.tab_status_mode = crate::config::TabStatusMode::Off;
-            self.view.tab_compressed_width = None;
-            self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
-            self.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
+            self.view.tab_overflow = crate::ui::TabBarOverflow::default();
             self.view.new_tab_hit_area = ratatui::layout::Rect::default();
             return;
         };
@@ -1517,22 +1510,12 @@ impl AppState {
             self.spinner_tick,
             &self.palette,
         );
-        let layout = crate::ui::compute_tab_bar_view(
-            chromes,
-            active_tab,
-            mode,
-            area,
-            self.tab_scroll,
-            self.tab_scroll_follow_active,
-            self.mouse_capture,
-        );
-        self.tab_scroll = layout.scroll;
+        let layout =
+            crate::ui::compute_tab_bar_view(chromes, active_tab, mode, area, self.mouse_capture);
         self.view.tab_hit_areas = layout.tab_hit_areas;
         self.view.tab_chrome = layout.tab_chrome;
         self.view.tab_status_mode = layout.tab_status_mode;
-        self.view.tab_compressed_width = layout.compressed_width;
-        self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
-        self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
+        self.view.tab_overflow = layout.overflow;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;
 
         // When the bar produced hit areas, there must be exactly one per tab.
@@ -2036,7 +2019,6 @@ impl AppState {
                 .and_then(|i| self.workspaces.get(i))
                 .map(|ws| ws.tabs.len());
             if tab_count_after < tab_count_before {
-                self.tab_scroll_follow_active = true;
                 self.refresh_tab_bar_view();
             }
         }
@@ -2111,7 +2093,6 @@ impl AppState {
             self.remove_plugin_pane_records(pane_ids);
             self.remove_unattached_terminal_ids(terminal_ids);
             crate::logging::tab_closed(&workspace_id, &closing_tab_id);
-            self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
         }
         false
@@ -5782,6 +5763,65 @@ mod tests {
         assert!(state.drag.is_none());
         assert!(state.workspace_press.is_none());
         assert!(state.tab_press.is_none());
+    }
+
+    #[test]
+    fn indicator_jump_clears_drag_and_changes_no_pane_ratio_or_scroll() {
+        // The indicator-jump path is born in step-5; assert it routes through the
+        // step-3 drag-clearing chokepoint and leaves pane ratios / scroll offset
+        // untouched. Simulates press → move (drag active) → indicator-jump → move.
+        let mut state = app_with_workspaces(&["test"]);
+        for name in ["b", "c", "d", "e", "f", "g", "h"] {
+            state.workspaces[0].test_add_tab(Some(name));
+        }
+        state.ensure_test_terminals();
+        // Capture tab 0's pane geometry (a proxy for its split ratios) at a
+        // fixed area before the jump.
+        let probe = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let rects_before: Vec<ratatui::layout::Rect> = state.workspaces[0].tabs[0]
+            .layout
+            .panes(probe)
+            .iter()
+            .map(|p| p.rect)
+            .collect();
+        let scroll_before = state.workspace_scroll;
+        set_synthetic_drag(&mut state);
+
+        // Jump to a hidden tab via the indicator path.
+        state.jump_to_tab_indicator(5);
+
+        assert_eq!(
+            state.workspaces[0].active_tab, 5,
+            "indicator jump activates"
+        );
+        assert!(state.drag.is_none(), "drag latch must be cleared");
+        assert!(state.workspace_press.is_none());
+        assert!(state.tab_press.is_none());
+        assert_eq!(
+            state.workspace_scroll, scroll_before,
+            "workspace scroll offset must not change"
+        );
+        // The previously-active tab's pane ratios are untouched by the jump.
+        let rects_after: Vec<ratatui::layout::Rect> = state.workspaces[0].tabs[0]
+            .layout
+            .panes(probe)
+            .iter()
+            .map(|p| p.rect)
+            .collect();
+        assert_eq!(
+            rects_before, rects_after,
+            "the prior tab's pane ratios must be untouched by the jump"
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn indicator_jump_out_of_range_is_ignored() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("b"));
+        let before = state.workspaces[0].active_tab;
+        state.jump_to_tab_indicator(99);
+        assert_eq!(state.workspaces[0].active_tab, before, "OOB jump ignored");
     }
 
     #[test]
