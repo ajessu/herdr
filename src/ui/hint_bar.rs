@@ -724,21 +724,24 @@ fn push_tile(
         ));
     }
     // Interior: " <key> label "
+    // Split the bracketed key into three spans so only the key body gets the
+    // accent highlight — the `<` and `>` brackets render in the dim label
+    // color, matching zellij's `default-plugins/status-bar/src/first_line.rs`
+    // (`char_left_separator` / `char_right_separator` styled with the
+    // ribbon's `base` color, distinct from `emphasis_0` on the key shortcut).
+    let bracket_style = Style::default().fg(colors.label_fg).bg(colors.tile_bg);
+    let key_style = Style::default()
+        .fg(colors.key_fg)
+        .bg(colors.tile_bg)
+        .add_modifier(Modifier::BOLD);
     spans.push(Span::styled(
         String::from(" "),
         Style::default().bg(colors.tile_bg),
     ));
-    spans.push(Span::styled(
-        format!("<{bare_key}>"),
-        Style::default()
-            .fg(colors.key_fg)
-            .bg(colors.tile_bg)
-            .add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::styled(
-        format!(" {label} "),
-        Style::default().fg(colors.label_fg).bg(colors.tile_bg),
-    ));
+    spans.push(Span::styled(String::from("<"), bracket_style));
+    spans.push(Span::styled(bare_key.to_string(), key_style));
+    spans.push(Span::styled(String::from(">"), bracket_style));
+    spans.push(Span::styled(format!(" {label} "), bracket_style));
     if powerline {
         // Right arrow: tile_bg → outer_bg
         spans.push(Span::styled(
@@ -1570,6 +1573,63 @@ mod tests {
         assert!(
             !text.contains("ctrl+p"),
             "bare ctrl+p should not appear in ribbon mode: {text}"
+        );
+    }
+
+    #[test]
+    fn ribbon_bracket_fg_distinct_from_key_fg() {
+        // The `<` and `>` brackets render in the dim label color; only the
+        // key body inside carries the accent highlight + bold. Verifies the
+        // three-span split in `push_tile` (zellij-fidelity round 2 change 3).
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let palette = Palette::catppuccin();
+        let line = build_hint_line(&set, HintBarStyle::Full, &palette, 200, true);
+
+        // Walk spans, find each `<` and `>` and the span immediately between
+        // them; assert the bracket fg matches label_fg and the body fg matches
+        // key_fg + bold.
+        let spans = &line.spans;
+        let mut found_pairs = 0;
+        let mut i = 0;
+        while i + 2 < spans.len() {
+            if spans[i].content.as_ref() == "<" && spans[i + 2].content.as_ref() == ">" {
+                let open = &spans[i];
+                let body = &spans[i + 1];
+                let close = &spans[i + 2];
+                assert_eq!(open.style.fg, Some(palette.overlay1), "`<` fg = label_fg");
+                assert_eq!(close.style.fg, Some(palette.overlay1), "`>` fg = label_fg");
+                assert_eq!(body.style.fg, Some(palette.accent), "key body fg = accent");
+                assert!(
+                    body.style.add_modifier.contains(Modifier::BOLD),
+                    "key body must be bold"
+                );
+                assert!(
+                    !open.style.add_modifier.contains(Modifier::BOLD),
+                    "`<` must not be bold"
+                );
+                found_pairs += 1;
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        assert!(
+            found_pairs >= 4,
+            "expected several bracketed key tiles, found {found_pairs}"
+        );
+    }
+
+    #[test]
+    fn bracket_fg_distinct_from_key_fg_on_default_palette() {
+        // Visual contrast invariant: the dim bracket fg and the accent key fg
+        // are different colors on the default palette. If a palette change
+        // makes them identical the bracket-vs-letter distinction collapses
+        // and this test will catch it.
+        let p = Palette::catppuccin();
+        assert_ne!(
+            p.overlay1, p.accent,
+            "default palette overlay1 (bracket fg) must differ from accent (key fg)"
         );
     }
 
