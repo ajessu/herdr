@@ -21,6 +21,9 @@ const MIN_SECTION_GAP: usize = 2;
 pub struct Hint {
     pub key: Cow<'static, str>,
     pub label: &'static str,
+    // TODO: remove in a separate cleanup pass — no longer consumed since
+    // zellij-fidelity round 2 (labels always render full uppercase, no
+    // lowercase short fallback tier).
     pub short: &'static str,
     pub priority: u8,
 }
@@ -673,13 +676,10 @@ const POWERLINE_ARROW: &str = "\u{e0b0}";
 
 /// Width of a hint section: the modifier prefix text (when present) + each
 /// tile's full footprint (2 arrows + ` <key> LABEL `). Tiles abut directly —
-/// there is no inter-tile gap.
-fn compute_section_width(
-    hints: &[&Hint],
-    use_short: bool,
-    prefix: Option<&str>,
-    powerline: bool,
-) -> usize {
+/// there is no inter-tile gap. Labels are ALWAYS the full uppercase
+/// `hint.label`; the legacy lowercase `hint.short` is never consumed
+/// (zellij-fidelity round 2 dropped the short-label tier).
+fn compute_section_width(hints: &[&Hint], prefix: Option<&str>, powerline: bool) -> usize {
     if hints.is_empty() && prefix.is_none() {
         return 0;
     }
@@ -693,7 +693,6 @@ fn compute_section_width(
     }
 
     for hint in hints {
-        let label = if use_short { hint.short } else { hint.label };
         let key = sanitize_key(&hint.key);
         let bare_key = if let Some(pfx) = prefix {
             strip_key_modifier(&key, pfx)
@@ -702,7 +701,7 @@ fn compute_section_width(
         };
         // Tile = [left arrow][ <key> label ][right arrow]
         //       = arrow_w + (1 + 1 + bare_key + 1 + 1 + label + 1) = arrow_w + 5 + key + label
-        total += arrow_w + 5 + bare_key.width() + label.width();
+        total += arrow_w + 5 + bare_key.width() + hint.label.width();
     }
 
     total
@@ -753,11 +752,10 @@ fn push_tile(
 /// to `spans`. The prefix renders as bold plain text on `outer_bg` (zellij's
 /// `superkey` convention — NOT a colored ribbon segment); each tile abuts the
 /// next directly so adjacent right+left arrows produce zellij's back-to-back
-/// wedge separators.
+/// wedge separators. Labels are always full uppercase `hint.label`.
 fn emit_section(
     spans: &mut Vec<Span<'static>>,
     hints: &[&Hint],
-    use_short: bool,
     prefix: Option<&str>,
     prefix_fg: ratatui::style::Color,
     colors: &TileColors,
@@ -774,14 +772,13 @@ fn emit_section(
     }
 
     for hint in hints {
-        let label = if use_short { hint.short } else { hint.label };
         let key = sanitize_key(&hint.key);
         let bare_key = if let Some(pfx) = prefix {
             strip_key_modifier(&key, pfx)
         } else {
             key.into_owned()
         };
-        push_tile(spans, &bare_key, label, colors, powerline);
+        push_tile(spans, &bare_key, hint.label, colors, powerline);
     }
 }
 
@@ -813,6 +810,10 @@ pub fn build_hint_line(
         return Line::from(spans);
     }
 
+    // `HintBarStyle::Compact` truncates the left section to the top-4 keys
+    // by priority. Labels are ALWAYS full uppercase — Compact does not
+    // switch to lowercase short forms (those were a herdr invention; zellij
+    // never lowercases hint labels).
     let left_hints: Vec<&Hint> = if style == HintBarStyle::Compact {
         let mut sorted: Vec<&Hint> = hint_set.hints.iter().collect();
         sorted.sort_by_key(|h| h.priority);
@@ -825,7 +826,6 @@ pub fn build_hint_line(
     let right_hints: Vec<&Hint> = hint_set.alt_hints.iter().collect();
     let has_right = !right_hints.is_empty();
 
-    let force_short = style == HintBarStyle::Compact;
     let remaining = width.saturating_sub(badge_width);
 
     // Detect section prefixes
@@ -869,18 +869,21 @@ pub fn build_hint_line(
         palette.peach
     };
 
+    // FR4 degradation (zellij-fidelity round 2: short-label tier removed):
+    //   Tier 1: both sections at full uppercase labels.
+    //   Tier 2: drop Alt section, left section at full uppercase labels.
+    //   Tier 3: progressive ellipsis on left section (flat fallback).
     if has_right {
-        let left_full = compute_section_width(&left_hints, false, left_prefix, powerline);
-        let right_full = compute_section_width(&right_hints, false, right_prefix, powerline);
+        let left_full = compute_section_width(&left_hints, left_prefix, powerline);
+        let right_full = compute_section_width(&right_hints, right_prefix, powerline);
         let gap = MIN_SECTION_GAP;
 
-        // Tier 1: both full labels
-        if !force_short && left_full + gap + right_full <= remaining {
+        // Tier 1: both sections fit at full uppercase
+        if left_full + gap + right_full <= remaining {
             let whitespace = remaining - left_full - right_full;
             emit_section(
                 &mut spans,
                 &left_hints,
-                false,
                 left_prefix,
                 left_prefix_fg,
                 &colors,
@@ -890,34 +893,6 @@ pub fn build_hint_line(
             emit_section(
                 &mut spans,
                 &right_hints,
-                false,
-                right_prefix,
-                right_prefix_fg,
-                &colors,
-                powerline,
-            );
-            return Line::from(spans);
-        }
-
-        // Tier 2: both short labels
-        let left_short = compute_section_width(&left_hints, true, left_prefix, powerline);
-        let right_short = compute_section_width(&right_hints, true, right_prefix, powerline);
-        if left_short + gap + right_short <= remaining {
-            let whitespace = remaining - left_short - right_short;
-            emit_section(
-                &mut spans,
-                &left_hints,
-                true,
-                left_prefix,
-                left_prefix_fg,
-                &colors,
-                powerline,
-            );
-            spans.push(Span::raw(" ".repeat(whitespace)));
-            emit_section(
-                &mut spans,
-                &right_hints,
-                true,
                 right_prefix,
                 right_prefix_fg,
                 &colors,
@@ -927,13 +902,12 @@ pub fn build_hint_line(
         }
     }
 
-    // Tier 3 (or no right section): left only.
-    let left_w = compute_section_width(&left_hints, force_short, left_prefix, powerline);
+    // Tier 2 (or no right section): left only at full uppercase.
+    let left_w = compute_section_width(&left_hints, left_prefix, powerline);
     if left_w <= remaining {
         emit_section(
             &mut spans,
             &left_hints,
-            force_short,
             left_prefix,
             left_prefix_fg,
             &colors,
@@ -942,18 +916,17 @@ pub fn build_hint_line(
         return Line::from(spans);
     }
 
-    // Tier 4: progressive ellipsis on left section (flat fallback for very
-    // narrow). No prefix renders here, so keep the FULL sanitized key
-    // (`<ctrl+p>`) rather than the stripped `<p>` — otherwise the modifier the
-    // prefix would have shown is silently lost. Tiles still use their own
-    // arrows so the visual pattern stays consistent with the wider tiers.
+    // Tier 3: progressive ellipsis on left section. No prefix renders here,
+    // so keep the FULL sanitized key (`<ctrl+p>`) rather than the stripped
+    // `<p>` — otherwise the modifier the prefix would have shown is silently
+    // lost. Tiles still use their own arrows so the visual pattern stays
+    // consistent with the wider tiers.
     let dim_style = Style::default().fg(palette.overlay0);
     let mut used = badge_width;
     let arrow_cost: usize = if powerline { 2 } else { 0 };
     for hint in &left_hints {
-        let label = if force_short { hint.short } else { hint.label };
         let bare_key = sanitize_key(&hint.key).into_owned();
-        let entry_width = arrow_cost + 5 + bare_key.width() + label.width();
+        let entry_width = arrow_cost + 5 + bare_key.width() + hint.label.width();
 
         let ellipsis_width = 2; // " …"
         if used + entry_width + ellipsis_width > width && used + entry_width > width {
@@ -963,7 +936,7 @@ pub fn build_hint_line(
             return Line::from(spans);
         }
 
-        push_tile(&mut spans, &bare_key, label, &colors, powerline);
+        push_tile(&mut spans, &bare_key, hint.label, &colors, powerline);
         used += entry_width;
     }
 
@@ -1174,20 +1147,22 @@ mod tests {
 
     #[test]
     fn compact_selects_top_four_by_priority() {
+        // Compact mode truncates to the top-4 keys by priority, then renders
+        // them at full uppercase (no lowercase short fallback).
         let kb = default_keybinds();
         let set = hints(Mode::Session, &kb);
         let palette = Palette::catppuccin();
         let line = build_hint_line(&set, HintBarStyle::Compact, &palette, 200, true);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("SESSION"));
-        let short_labels: Vec<&str> = set
+        let top_labels: Vec<&str> = set
             .hints
             .iter()
             .filter(|h| h.priority < 4)
-            .map(|h| h.short)
+            .map(|h| h.label)
             .collect();
-        for label in short_labels {
-            assert!(text.contains(label), "compact missing short label: {label}");
+        for label in top_labels {
+            assert!(text.contains(label), "compact missing full label: {label}");
         }
     }
 
@@ -1362,62 +1337,11 @@ mod tests {
     }
 
     #[test]
-    fn degradation_tier2_short_labels_both_sections() {
-        // Synthetic set with full labels strictly wider than short labels, so a
-        // width window where short fits but full does not provably exists.
-        let set = HintSet {
-            badge: Badge {
-                label: "M",
-                accent: BadgeColor::Accent,
-            },
-            hints: vec![Hint {
-                key: Cow::Borrowed("a"),
-                label: "LEFTLONG",
-                short: "L",
-                priority: 0,
-            }],
-            alt_hints: vec![Hint {
-                key: Cow::Borrowed("b"),
-                label: "RIGHTLONG",
-                short: "R",
-                priority: 0,
-            }],
-        };
-        let palette = Palette::catppuccin();
-        let left_hints: Vec<&Hint> = set.hints.iter().collect();
-        let right_hints: Vec<&Hint> = set.alt_hints.iter().collect();
-        let left_prefix = detect_section_prefix(&left_hints);
-        let right_prefix = detect_section_prefix(&right_hints);
-        let left_full = compute_section_width(&left_hints, false, left_prefix, true);
-        let right_full = compute_section_width(&right_hints, false, right_prefix, true);
-        let left_short = compute_section_width(&left_hints, true, left_prefix, true);
-        let right_short = compute_section_width(&right_hints, true, right_prefix, true);
-        let badge_width = format!(" {} ", set.badge.label).width();
-        let gap = MIN_SECTION_GAP;
-        let too_small_for_full = badge_width + left_full + gap + right_full;
-        let fits_short = badge_width + left_short + gap + right_short;
-        assert!(
-            too_small_for_full > fits_short,
-            "test setup must distinguish tiers"
-        );
-        // Width fits short but not full: exercises tier 2 specifically.
-        let width = (too_small_for_full - 1) as u16;
-        let line = build_hint_line(&set, HintBarStyle::Full, &palette, width, true);
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("M"));
-        // Short labels present, full labels absent.
-        assert!(
-            text.contains(" L") && text.contains(" R"),
-            "short labels expected: {text}"
-        );
-        assert!(
-            !text.contains("LEFTLONG") && !text.contains("RIGHTLONG"),
-            "full labels must not appear in tier 2: {text}"
-        );
-    }
-
-    #[test]
-    fn degradation_tier3_alt_section_dropped() {
+    fn degradation_tier2_alt_section_dropped() {
+        // FR4 tier 2: when the width is just shy of fitting both sections at
+        // full uppercase, drop the Alt section and render the left section
+        // alone at full uppercase. (The legacy lowercase short-label tier
+        // was removed in zellij-fidelity round 2.)
         let kb = default_keybinds();
         let set = hints(Mode::Terminal, &kb);
         let palette = Palette::catppuccin();
@@ -1425,24 +1349,31 @@ mod tests {
         let right_hints: Vec<&Hint> = set.alt_hints.iter().collect();
         let left_prefix = detect_section_prefix(&left_hints);
         let right_prefix = detect_section_prefix(&right_hints);
-        let left_short = compute_section_width(&left_hints, true, left_prefix, true);
-        let right_short = compute_section_width(&right_hints, true, right_prefix, true);
+        let left_full = compute_section_width(&left_hints, left_prefix, true);
+        let right_full = compute_section_width(&right_hints, right_prefix, true);
         let badge_width = format!(" {} ", set.badge.label).width();
         let gap = MIN_SECTION_GAP;
-        let fits_both_short = badge_width + left_short + gap + right_short;
-        let width = fits_both_short.saturating_sub(1) as u16;
+        let fits_both_full = badge_width + left_full + gap + right_full;
+        // One column shy of fitting both sections: exercises tier 2 (drop Alt).
+        let width = fits_both_full.saturating_sub(1) as u16;
         let line = build_hint_line(&set, HintBarStyle::Full, &palette, width, true);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("NORMAL"));
+        // Alt section labels and short forms are both absent.
         assert!(
             !text.contains("FOCUS") && !text.contains("foc"),
             "Alt section should be dropped, got: {text}"
         );
-        assert!(text.contains("<p>") || text.contains("pane"));
+        // Left section keys render at full uppercase, brackets present.
+        assert!(text.contains("<p>"), "left key expected: {text}");
+        assert!(text.contains("PANE"), "left full label expected: {text}");
     }
 
     #[test]
-    fn degradation_tier4_ellipsis_on_left() {
+    fn degradation_tier3_ellipsis_on_left() {
+        // FR4 tier 3: very narrow widths render an ellipsized prefix of the
+        // left section. No prefix tile fits, so each key carries its full
+        // sanitized form (`<ctrl+p>`) — the modifier stays discoverable.
         let kb = default_keybinds();
         let set = hints(Mode::Terminal, &kb);
         let palette = Palette::catppuccin();
@@ -1451,29 +1382,72 @@ mod tests {
         assert!(text.contains("NORMAL"));
         assert!(text.contains('\u{2026}'));
         assert!(!text.contains("FOCUS") && !text.contains("foc"));
-        // Tier 4 has no prefix ribbon, so the modifier must stay on the key
-        // itself (e.g. `<ctrl+p>`) rather than being silently stripped to `<p>`.
         assert!(
             text.contains("ctrl+"),
-            "Ctrl modifier must remain discoverable in tier 4: {text}"
+            "Ctrl modifier must remain discoverable in tier 3: {text}"
         );
     }
 
     #[test]
-    fn compact_style_uses_short_labels_with_alt_section() {
+    fn compact_style_uses_top_four_keys_at_full_uppercase() {
+        // Compact mode truncates to top-4 keys by priority and renders at
+        // full uppercase — never lowercase short forms (zellij never
+        // lowercases hint labels).
         let kb = default_keybinds();
         let set = hints(Mode::Terminal, &kb);
         let palette = Palette::catppuccin();
-        // Wide enough that Full would render full labels; Compact must not.
         let line = build_hint_line(&set, HintBarStyle::Compact, &palette, 200, true);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("NORMAL"));
-        // Compact uses short labels on both sections, never the full label.
-        assert!(text.contains("foc"), "compact short label expected: {text}");
+        // Top-4 left labels (priorities 0-3): PANE, TAB, RESIZE, MOVE.
+        // Compact does NOT show SESSION (priority 4) or LOCK (priority 5).
+        assert!(text.contains("PANE"));
+        assert!(text.contains("TAB"));
+        assert!(text.contains("RESIZE"));
+        assert!(text.contains("MOVE"));
         assert!(
-            !text.contains("FOCUS"),
-            "compact must not render full label: {text}"
+            !text.contains("SESSION"),
+            "compact dropped SESSION (priority 4): {text}"
         );
+        assert!(
+            !text.contains("LOCK"),
+            "compact dropped LOCK (priority 5): {text}"
+        );
+        // No legacy lowercase short forms anywhere.
+        for short in [
+            "pane", "tab", "rsz", "mov", "foc", "spl", "cls", "ses", "lck",
+        ] {
+            assert!(
+                !text.contains(short),
+                "compact must NOT render lowercase short form {short:?}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_lowercase_short_label_ever_renders() {
+        // Render the default terminal-mode hint set at every width from 0 up
+        // to a comfortably wide bar; assert NO span text equals any of the
+        // legacy lowercase short labels at ANY width. Both Full and Compact
+        // styles must comply (the short tier is gone).
+        let kb = default_keybinds();
+        let set = hints(Mode::Terminal, &kb);
+        let palette = Palette::catppuccin();
+        let lowercase_shorts = [
+            "pane", "tab", "rsz", "mov", "ses", "lck", "foc", "spl", "cls",
+        ];
+        for style in [HintBarStyle::Full, HintBarStyle::Compact] {
+            for w in 0u16..=240 {
+                let line = build_hint_line(&set, style, &palette, w, true);
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                for short in lowercase_shorts {
+                    assert!(
+                        !text.contains(short),
+                        "width={w} style={style:?} rendered short label {short:?}: {text}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
