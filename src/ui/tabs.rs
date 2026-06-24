@@ -20,10 +20,15 @@ const NEW_TAB_WIDTH: u16 = 3;
 /// to the left separator of T<sub>N+1</sub>, producing two back-to-back wedges
 /// that blend against `panel_bg` from both sides.
 const TAB_SEPARATOR_OVERHEAD: u16 = 2;
-/// Width of a collapsed `←+N` / `+N→` overflow indicator. Four cells keeps a
-/// touch-adequate hit zone (NFR5) — never a 1-cell target — and fits the widest
-/// label (`←+9+` / `+9+→`) without clipping.
-const OVERFLOW_INDICATOR_WIDTH: u16 = 4;
+/// Width of a collapsed `←+N` / `+N→` overflow indicator, rendered as a proper
+/// zellij tile (left arrow + interior + right arrow). Six cells = 2 separator
+/// cols + 4 interior cols, keeping a touch-adequate hit zone (NFR5) — never a
+/// 1-cell target — and fitting the widest label (`←+9+` / `+9+→`) without
+/// clipping. Under `AlternatingBg` the 2 separator cols become interior
+/// padding.
+const OVERFLOW_INDICATOR_WIDTH: u16 = 6;
+/// Interior width of an overflow indicator = total minus the 2 separator cols.
+const OVERFLOW_INDICATOR_INTERIOR: u16 = OVERFLOW_INDICATOR_WIDTH - TAB_SEPARATOR_OVERHEAD;
 
 /// The Powerline "right arrow" separator glyph (U+E0B0). Rendered only when
 /// `SeparatorStyle::Powerline` is selected; the `AlternatingBg` path emits zero
@@ -394,19 +399,25 @@ fn chrome_is_attention(state: crate::detect::AgentState, seen: bool) -> bool {
     matches!(state, AgentState::Blocked) || matches!((state, seen), (AgentState::Idle, false))
 }
 
-/// Columns an overflow indicator needs for `count` hidden tabs, of which
-/// `attention` need action. Without a badge it is the base `OVERFLOW_INDICATOR_WIDTH`
-/// (touch-adequate, NFR5); with a badge it grows to fit `←+N ●ᵏ`. Attention
-/// badges only show under mouse chrome (non-mouse markers are count-only).
+/// Columns an overflow indicator tile needs for `count` hidden tabs, of which
+/// `attention` need action. The tile owns 2 separator cols (left + right
+/// Powerline arrow) plus its interior. Without a badge it is the base
+/// `OVERFLOW_INDICATOR_WIDTH` (touch-adequate, NFR5); with a badge the interior
+/// grows to fit `←+N ●ᵏ`. Attention badges only show under mouse chrome
+/// (non-mouse markers are count-only).
 fn tab_indicator_width(count: usize, attention: usize, mouse_chrome: bool) -> u16 {
     if !mouse_chrome || attention == 0 {
         return OVERFLOW_INDICATOR_WIDTH;
     }
-    // arrow(1) + "+"(1) + count text + space(1) + badge columns. Count text is
-    // measured by display width to match the rest of the tab-bar sizing.
+    // Interior = directional-arrow(1) + "+"(1) + count text + space(1) + badge
+    // columns; plus the 2 separator cols for the tile's Powerline wedges. Count
+    // text is measured by display width to match the rest of the tab-bar sizing.
     let count_w = u16::try_from(super::overflow::count_label(count).width()).unwrap_or(u16::MAX);
     let badge_w = super::overflow::badge_attention_width(attention);
-    (2 + count_w + 1 + badge_w).max(OVERFLOW_INDICATOR_WIDTH)
+    let interior = (2 + count_w + 1 + badge_w).max(OVERFLOW_INDICATOR_INTERIOR);
+    interior
+        .saturating_add(TAB_SEPARATOR_OVERHEAD)
+        .max(OVERFLOW_INDICATOR_WIDTH)
 }
 
 fn tab_width(chrome: &TabChrome, mode: TabStatusMode) -> u16 {
@@ -523,7 +534,9 @@ fn centered_active_fill(
     // left indicator reservation when present). Adjacent tabs abut directly
     // (each tab carries its own separator cols, no inter-tab gap). A single
     // active tab wider than the bar is clipped to the remaining width so the
-    // row is never blank.
+    // row is never blank. `footprint` already reserved the right indicator's
+    // columns when growing the window, so a fully-fit window never reaches
+    // into them; the clip below only bounds a single over-wide tab.
     let left_gutter = if lo > 0 { reserve_left } else { 0 };
     let mut x = area.x.saturating_add(left_gutter);
     let right_limit = area.x.saturating_add(area.width);
@@ -664,17 +677,32 @@ pub(crate) fn compute_tab_bar_view(
             right = r2;
         }
 
-        // Indicator rects occupy exactly the columns the final fill reserved for
-        // them. The left indicator hugs area.x; the right sits at the right edge
-        // of the tabs area (before any new-tab button).
+        // Indicator rects occupy the columns the final fill reserved for them.
+        // The left indicator hugs area.x; the right sits at the right edge of
+        // the tabs area (before any new-tab button). At pathologically narrow
+        // widths the active tab (always visible) can consume more than the
+        // reserve left for an indicator, so clamp each indicator away from the
+        // visible tabs: the left indicator's right edge must not pass the first
+        // visible tab, and the right indicator's left edge must not precede the
+        // last visible tab. The indicator content clips if the clamp shrinks it.
+        let (vis_first, vis_last) = visible_bounds(&rects).unwrap_or((active_tab, active_tab));
+        let first_visible_x = rects.get(vis_first).map(|r| r.x).unwrap_or(area.x);
+        let last_visible_right = rects.get(vis_last).map(|r| r.x + r.width).unwrap_or(area.x);
+
         let left_hit_area = if left.is_some() {
-            Rect::new(area.x, area.y, left_w.min(area.width), 1)
+            let lw = left_w
+                .min(area.width)
+                .min(first_visible_x.saturating_sub(area.x));
+            Rect::new(area.x, area.y, lw, 1)
         } else {
             Rect::default()
         };
         let right_hit_area = if right.is_some() {
             let tabs_right = tabs_area.x + tabs_area.width;
-            let rx = tabs_right.saturating_sub(right_w).max(area.x);
+            let rx = tabs_right
+                .saturating_sub(right_w)
+                .max(area.x)
+                .max(last_visible_right);
             Rect::new(rx, area.y, tabs_right.saturating_sub(rx), 1)
         } else {
             Rect::default()
@@ -812,6 +840,53 @@ fn tab_bg(
     }
 }
 
+/// Render an overflow indicator as a proper zellij tile: a left Powerline
+/// arrow (panel→tile), the interior spans on `tile_bg`, and a right Powerline
+/// arrow (tile→panel) — identical chrome to a regular inactive tab. Under
+/// `AlternatingBg` (or when the rect is too narrow for arrows) the interior
+/// fills the whole rect and no Powerline codepoint is emitted.
+#[allow(clippy::too_many_arguments)]
+fn render_overflow_tile(
+    frame: &mut Frame,
+    area: Rect,
+    rect: Rect,
+    interior: Vec<Span<'static>>,
+    tile_bg: ratatui::style::Color,
+    separator: SeparatorStyle,
+    panel_bg: ratatui::style::Color,
+) {
+    let area_right = area.x + area.width;
+    if separator == SeparatorStyle::Powerline && rect.width >= TAB_SEPARATOR_OVERHEAD {
+        // Left arrow: panel_bg → tile_bg.
+        if rect.x < area_right {
+            frame.buffer_mut()[(rect.x, area.y)]
+                .set_symbol(POWERLINE_ARROW)
+                .set_style(Style::default().fg(panel_bg).bg(tile_bg));
+        }
+        // Right arrow: tile_bg → panel_bg.
+        let right_x = rect.x + rect.width - 1;
+        if right_x < area_right {
+            frame.buffer_mut()[(right_x, area.y)]
+                .set_symbol(POWERLINE_ARROW)
+                .set_style(Style::default().fg(tile_bg).bg(panel_bg));
+        }
+        // Interior between the two arrows.
+        let interior_w = rect.width.saturating_sub(2);
+        if interior_w > 0 {
+            let interior_rect = Rect::new(rect.x + 1, area.y, interior_w, 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(interior)).style(Style::default().bg(tile_bg)),
+                interior_rect,
+            );
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new(Line::from(interior)).style(Style::default().bg(tile_bg)),
+            rect,
+        );
+    }
+}
+
 pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -837,9 +912,19 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 
     let overflow = &app.view.tab_overflow;
 
-    // Overflow indicators. Under mouse chrome they are clickable `← +N` / `+N →`
-    // affordances; without mouse chrome they are non-clickable `← N` / `N →`
-    // markers. Counts cap at `9+`.
+    // Inactive-tile bg for overflow indicators. Falls back to surface_dim when
+    // surface0 == panel_bg so the Powerline arrows stay visible (same rule as
+    // `tab_bg`).
+    let indicator_tile_bg = if separator == SeparatorStyle::Powerline && p.surface0 == p.panel_bg {
+        p.surface_dim
+    } else {
+        p.surface0
+    };
+
+    // Overflow indicators render as proper zellij tiles (left arrow + interior
+    // + right arrow), matching a regular inactive tab. Under mouse chrome the
+    // interior is a clickable `←+N` / `+N→` affordance; without mouse chrome it
+    // is a non-clickable `← N` / `N →` marker. Counts cap at `9+`.
     let fmt_count = |n: usize| -> String {
         if n > 9 {
             "9+".to_string()
@@ -847,73 +932,73 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             n.to_string()
         }
     };
-    let indicator_bg = Style::default().fg(p.overlay1).bg(p.surface0);
+    let interior_text_style = Style::default().fg(p.overlay1).bg(indicator_tile_bg);
+    let badge_style = Style::default()
+        .fg(p.accent)
+        .bg(indicator_tile_bg)
+        .add_modifier(Modifier::BOLD);
     if let Some(group) = overflow.left {
         if overflow.left_hit_area.width > 0 {
-            let mut spans = if app.mouse_capture {
-                vec![Span::styled(
-                    format!("←+{}", fmt_count(group.count)),
-                    indicator_bg,
-                )]
-            } else {
-                vec![Span::styled(
-                    format!("←{} ", fmt_count(group.count)),
-                    indicator_bg,
-                )]
-            };
-            // Attention badge (mouse chrome only — non-mouse markers stay
-            // count-only since they are not clickable). `●ᵏ` in the accent color.
+            let mut interior = vec![Span::styled(
+                if app.mouse_capture {
+                    format!("←+{}", fmt_count(group.count))
+                } else {
+                    format!("←{} ", fmt_count(group.count))
+                },
+                interior_text_style,
+            )];
+            // Badge after the count for the left indicator (mouse chrome only).
             if app.mouse_capture && group.hidden_attention_count > 0 {
-                spans.push(Span::styled(" ", indicator_bg));
-                spans.push(Span::styled(
+                interior.push(Span::styled(" ", interior_text_style));
+                interior.push(Span::styled(
                     format!(
                         "●{}",
                         super::overflow::attention_superscript(group.hidden_attention_count)
                     ),
-                    Style::default()
-                        .fg(p.accent)
-                        .bg(p.surface0)
-                        .add_modifier(Modifier::BOLD),
+                    badge_style,
                 ));
             }
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(Style::default().bg(p.surface0)),
+            render_overflow_tile(
+                frame,
+                area,
                 overflow.left_hit_area,
+                interior,
+                indicator_tile_bg,
+                separator,
+                p.panel_bg,
             );
         }
     }
     if let Some(group) = overflow.right {
         if overflow.right_hit_area.width > 0 {
-            let mut spans = if app.mouse_capture {
-                vec![Span::styled(
-                    format!("+{}→", fmt_count(group.count)),
-                    indicator_bg,
-                )]
-            } else {
-                vec![Span::styled(
-                    format!(" {}→", fmt_count(group.count)),
-                    indicator_bg,
-                )]
-            };
+            let mut interior: Vec<Span<'static>> = Vec::new();
+            // Badge before the count for the right indicator (mouse chrome only).
             if app.mouse_capture && group.hidden_attention_count > 0 {
-                spans.insert(
-                    0,
-                    Span::styled(
-                        format!(
-                            "●{}",
-                            super::overflow::attention_superscript(group.hidden_attention_count)
-                        ),
-                        Style::default()
-                            .fg(p.accent)
-                            .bg(p.surface0)
-                            .add_modifier(Modifier::BOLD),
+                interior.push(Span::styled(
+                    format!(
+                        "●{}",
+                        super::overflow::attention_superscript(group.hidden_attention_count)
                     ),
-                );
-                spans.insert(1, Span::styled(" ", indicator_bg));
+                    badge_style,
+                ));
+                interior.push(Span::styled(" ", interior_text_style));
             }
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(Style::default().bg(p.surface0)),
+            interior.push(Span::styled(
+                if app.mouse_capture {
+                    format!("+{}→", fmt_count(group.count))
+                } else {
+                    format!(" {}→", fmt_count(group.count))
+                },
+                interior_text_style,
+            ));
+            render_overflow_tile(
+                frame,
+                area,
                 overflow.right_hit_area,
+                interior,
+                indicator_tile_bg,
+                separator,
+                p.panel_bg,
             );
         }
     }
@@ -1820,6 +1905,87 @@ mod tests {
             row.contains(POWERLINE_ARROW),
             "Powerline arrow expected when powerline on: {row:?}"
         );
+    }
+
+    #[test]
+    fn overflow_indicator_renders_as_tile_with_arrows() {
+        // The overflow indicator is a proper zellij tile: a left arrow
+        // (panel→tile), interior on tile_bg, and a right arrow (tile→panel) —
+        // identical chrome to a regular inactive tab.
+        let names: Vec<String> = (0..14).map(|i| format!("tab{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = app_with_tab_bar(&refs, 7, Rect::new(0, 0, 40, 1), true);
+        app.tabs_powerline = true;
+        let p = &app.palette;
+        let tile_bg = p.surface0;
+        let left = app.view.tab_overflow.left_hit_area;
+        let right = app.view.tab_overflow.right_hit_area;
+        assert!(
+            left.width >= TAB_SEPARATOR_OVERHEAD,
+            "left indicator present"
+        );
+        assert!(
+            right.width >= TAB_SEPARATOR_OVERHEAD,
+            "right indicator present"
+        );
+        let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+
+        // Left indicator: left col = panel→tile arrow, right col = tile→panel.
+        let l0 = &buffer[(left.x, 0)];
+        assert_eq!(l0.symbol(), POWERLINE_ARROW);
+        assert_eq!(l0.fg, p.panel_bg, "left indicator left arrow fg = panel_bg");
+        assert_eq!(l0.bg, tile_bg, "left indicator left arrow bg = tile_bg");
+        let l_last = &buffer[(left.x + left.width - 1, 0)];
+        assert_eq!(l_last.symbol(), POWERLINE_ARROW);
+        assert_eq!(
+            l_last.fg, tile_bg,
+            "left indicator right arrow fg = tile_bg"
+        );
+        assert_eq!(
+            l_last.bg, p.panel_bg,
+            "left indicator right arrow bg = panel_bg"
+        );
+
+        // Right indicator: same wedge chrome.
+        let r0 = &buffer[(right.x, 0)];
+        assert_eq!(r0.symbol(), POWERLINE_ARROW);
+        assert_eq!(
+            r0.fg, p.panel_bg,
+            "right indicator left arrow fg = panel_bg"
+        );
+        assert_eq!(r0.bg, tile_bg, "right indicator left arrow bg = tile_bg");
+        let r_last = &buffer[(right.x + right.width - 1, 0)];
+        assert_eq!(r_last.symbol(), POWERLINE_ARROW);
+        assert_eq!(
+            r_last.fg, tile_bg,
+            "right indicator right arrow fg = tile_bg"
+        );
+        assert_eq!(
+            r_last.bg, p.panel_bg,
+            "right indicator right arrow bg = panel_bg"
+        );
+    }
+
+    #[test]
+    fn overflow_indicator_alternating_bg_path_skips_arrows() {
+        // Under AlternatingBg the indicator interior fills the whole rect and
+        // emits no Powerline codepoint.
+        let names: Vec<String> = (0..14).map(|i| format!("tab{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = app_with_tab_bar(&refs, 7, Rect::new(0, 0, 40, 1), true);
+        app.tabs_powerline = false;
+        let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+        for ind in [
+            app.view.tab_overflow.left_hit_area,
+            app.view.tab_overflow.right_hit_area,
+        ] {
+            for x in ind.x..ind.x + ind.width {
+                assert!(
+                    !buffer[(x, 0)].symbol().contains(POWERLINE_ARROW),
+                    "AlternatingBg overflow indicator must emit no Powerline glyph at x={x}"
+                );
+            }
+        }
     }
 
     #[test]

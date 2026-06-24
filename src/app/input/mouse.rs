@@ -3230,6 +3230,43 @@ mod tests {
     }
 
     #[test]
+    fn overflow_indicator_hit_test_covers_arrow_cols() {
+        // The overflow indicator is a proper tile (left arrow + interior +
+        // right arrow); the full tile width is the click target. A click on
+        // the leftmost or rightmost arrow col routes to the same jump target
+        // as a click in the interior.
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_width_ratio = 0.0;
+        let mut ws = Workspace::test_new("one");
+        ws.tabs[0].set_custom_name("very-long-zero".into());
+        for i in 1..14 {
+            ws.test_add_tab(Some(&format!("very-long-{i}")));
+        }
+        ws.active_tab = 7;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+        let right = app.state.view.tab_overflow.right_hit_area;
+        let row = app.state.view.tab_bar_rect.y;
+        assert!(right.width >= 2, "right indicator present as a tile");
+        let expected = app.state.view.tab_overflow.right.map(|g| g.jump_to);
+        assert_eq!(
+            app.state.tab_overflow_indicator_at(right.x, row),
+            expected,
+            "click on right indicator's left arrow col routes to jump target"
+        );
+        assert_eq!(
+            app.state
+                .tab_overflow_indicator_at(right.x + right.width - 1, row),
+            expected,
+            "click on right indicator's right arrow col routes to jump target"
+        );
+    }
+
+    #[test]
     fn wheel_outside_tab_bar_does_not_switch_tabs() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("one");
