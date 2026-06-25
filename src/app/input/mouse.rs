@@ -507,12 +507,12 @@ impl AppState {
                 }
 
                 if in_sidebar {
-                    if self.on_sidebar_toggle(mouse.column, mouse.row) {
-                        self.sidebar_collapsed = !self.sidebar_collapsed;
-                        return None;
-                    }
-
                     if self.sidebar_collapsed {
+                        if self.on_sidebar_toggle(mouse.column, mouse.row) {
+                            self.toggle_sidebar_chrome();
+                            return None;
+                        }
+
                         // Overflow badge clicks (FR8) take priority over the row
                         // beneath them: jump to the nearest hidden attention item.
                         if self.on_collapsed_overflow_badge(mouse.column, mouse.row) {
@@ -550,11 +550,15 @@ impl AppState {
                         return None;
                     }
 
-                    // Overflow badge clicks (FR8) on the expanded surfaces jump to
-                    // the nearest hidden attention item, taking priority over the
-                    // row beneath them.
+                    // Overflow badge clicks (FR8) on the expanded surfaces take
+                    // priority over the close button when they share the bottom row.
                     if self.on_expanded_overflow_badge(mouse.column, mouse.row) {
                         self.mode = Mode::Terminal;
+                        return None;
+                    }
+
+                    if self.on_sidebar_toggle(mouse.column, mouse.row) {
+                        self.toggle_sidebar_chrome();
                         return None;
                     }
 

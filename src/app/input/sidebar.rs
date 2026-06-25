@@ -261,16 +261,30 @@ impl AppState {
     }
 
     pub(super) fn on_sidebar_toggle(&self, col: u16, row: u16) -> bool {
-        let rect = if self.sidebar_collapsed {
-            crate::ui::collapsed_sidebar_toggle_rect(self.view.sidebar_rect)
-        } else {
-            crate::ui::expanded_sidebar_toggle_rect(self.view.sidebar_rect)
+        let hit = |rect: Rect| -> bool {
+            rect.width > 0
+                && col >= rect.x
+                && col < rect.x + rect.width
+                && row >= rect.y
+                && row < rect.y + rect.height
         };
-        rect.width > 0
-            && col >= rect.x
-            && col < rect.x + rect.width
-            && row >= rect.y
-            && row < rect.y + rect.height
+        if self.sidebar_collapsed {
+            return hit(crate::ui::collapsed_sidebar_toggle_rect(
+                self.view.sidebar_rect,
+            ));
+        }
+        let (_, detail) = crate::ui::expanded_sidebar_sections(
+            self.view.sidebar_rect,
+            self.sidebar_section_split,
+        );
+        hit(crate::ui::expanded_sidebar_toggle_rect(
+            self.view.sidebar_rect,
+        )) || hit(crate::ui::expanded_sidebar_close_button_rect(detail))
+    }
+
+    pub(super) fn toggle_sidebar_chrome(&mut self) {
+        self.drag = None;
+        self.sidebar_collapsed = !self.sidebar_collapsed;
     }
 
     pub(super) fn set_manual_sidebar_width(&mut self, divider_col: u16) {
@@ -2114,5 +2128,73 @@ mod tests {
             app.state.workspaces[0].tabs[tab_idx].layout.focused(),
             pane_id
         );
+    }
+
+    #[test]
+    fn clicking_expanded_close_button_collapses_sidebar() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_collapsed = false;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let (_, detail) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let btn = crate::ui::expanded_sidebar_close_button_rect(detail);
+        assert_ne!(btn, Rect::default(), "close button rect should be valid");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            btn.x + btn.width / 2,
+            btn.y,
+        ));
+
+        assert!(app.state.sidebar_collapsed);
+    }
+
+    #[test]
+    fn clicking_expanded_close_button_clears_drag_latch() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_collapsed = false;
+        app.state.drag = Some(DragState {
+            target: DragTarget::WorkspaceReorder {
+                source_ws_idx: 0,
+                insert_idx: None,
+            },
+        });
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let (_, detail) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let btn = crate::ui::expanded_sidebar_close_button_rect(detail);
+        assert_ne!(btn, Rect::default());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            btn.x + btn.width / 2,
+            btn.y,
+        ));
+
+        assert!(app.state.drag.is_none());
+        assert!(app.state.sidebar_collapsed);
+    }
+
+    #[test]
+    fn close_button_click_preserves_invariants_on_adversarial_state() {
+        let mut state = crate::app::state::AppState::test_with_adversarial_identity_state();
+        state.sidebar_collapsed = false;
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
+
+        let (_, detail) = crate::ui::expanded_sidebar_sections(
+            state.view.sidebar_rect,
+            state.sidebar_section_split,
+        );
+        let btn = crate::ui::expanded_sidebar_close_button_rect(detail);
+        if btn != Rect::default() {
+            state.toggle_sidebar_chrome();
+            state.assert_invariants_for_test();
+        }
     }
 }

@@ -47,16 +47,49 @@ fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     (ws_h, detail_h)
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
+pub(crate) struct ExpandedSidebarLayout {
+    pub spaces: Rect,
+    pub detail: Rect,
+    pub close_button: Rect,
+}
+
+pub(crate) fn compute_expanded_sidebar_layout(
+    area: Rect,
+    split_ratio: f32,
+) -> ExpandedSidebarLayout {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
-        return (Rect::default(), Rect::default());
+        return ExpandedSidebarLayout {
+            spaces: Rect::default(),
+            detail: Rect::default(),
+            close_button: Rect::default(),
+        };
     }
 
     let (ws_h, detail_h) = sidebar_section_heights(content.height, split_ratio);
-    let ws_area = Rect::new(content.x, content.y, content.width, ws_h);
-    let detail_area = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
-    (ws_area, detail_area)
+    let spaces = Rect::new(content.x, content.y, content.width, ws_h);
+    let detail = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
+    let close_button = expanded_sidebar_close_button_rect(detail);
+    ExpandedSidebarLayout {
+        spaces,
+        detail,
+        close_button,
+    }
+}
+
+pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
+    let layout = compute_expanded_sidebar_layout(area, split_ratio);
+    (layout.spaces, layout.detail)
+}
+
+pub(crate) fn expanded_sidebar_close_button_rect(detail_area: Rect) -> Rect {
+    if detail_area.width < 4 || detail_area.height == 0 {
+        return Rect::default();
+    }
+    let w = detail_area.width.saturating_sub(1).min(3);
+    let x = detail_area.x + detail_area.width - 1 - w;
+    let y = detail_area.y + detail_area.height.saturating_sub(1);
+    Rect::new(x, y, w, 1)
 }
 
 pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
@@ -1148,10 +1181,10 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let layout = compute_expanded_sidebar_layout(area, app.sidebar_section_split);
 
-    render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_agent_detail(app, terminal_runtimes, frame, detail_area);
+    render_workspace_list(app, terminal_runtimes, frame, layout.spaces, is_navigating);
+    render_agent_detail(app, terminal_runtimes, frame, layout.detail);
 
     // Attention-aware overflow badges (FR8) overlaid on the first/last body row
     // of each expanded section, from the pre-computed rects (render == hit-test).
@@ -1162,6 +1195,7 @@ pub(super) fn render_sidebar(
     render_overflow_badge(frame, ov.expanded_agents_below, p);
 
     render_sidebar_toggle(app, frame, area, false, p);
+    render_expanded_close_button(app, frame, layout.close_button, p);
 }
 
 fn render_workspace_list(
@@ -1531,6 +1565,25 @@ pub(crate) fn expanded_sidebar_toggle_rect(area: Rect) -> Rect {
         1,
         1,
     )
+}
+
+fn render_expanded_close_button(app: &AppState, frame: &mut Frame, rect: Rect, p: &Palette) {
+    if rect == Rect::default() {
+        return;
+    }
+    let has_badge = app.global_menu_attention_badge_visible();
+    let mut style = Style::default().fg(p.accent).bg(p.surface_dim);
+    if has_badge {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    let buf = frame.buffer_mut();
+    for x in rect.x..rect.x + rect.width {
+        buf[(x, rect.y)].set_style(Style::default().bg(p.surface_dim));
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled("«", style)).alignment(Alignment::Center),
+        rect,
+    );
 }
 
 fn render_sidebar_toggle(
@@ -2362,6 +2415,90 @@ mod tests {
         if layout.toggle != Rect::default() {
             assert!(layout.toggle.x + layout.toggle.width <= area.x + content_w);
             assert!(layout.toggle.y + layout.toggle.height <= area.y + area.height);
+        }
+    }
+
+    #[test]
+    fn expanded_close_button_rect_anchors_bottom_right_of_detail_area() {
+        let detail = Rect::new(5, 10, 20, 12);
+        let btn = expanded_sidebar_close_button_rect(detail);
+        assert_eq!(btn.y, detail.y + detail.height - 1);
+        assert!(btn.x + btn.width <= detail.x + detail.width);
+        assert!(btn.x >= detail.x);
+    }
+
+    #[test]
+    fn expanded_close_button_is_at_least_3_wide_for_touch_adequate_hit_zone() {
+        for w in 3..=40u16 {
+            let detail = Rect::new(0, 0, w, 10);
+            let btn = expanded_sidebar_close_button_rect(detail);
+            if btn != Rect::default() {
+                assert!(
+                    btn.width >= 3,
+                    "width {} too narrow at detail.width={}",
+                    btn.width,
+                    w
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_close_button_does_not_collide_with_agent_panel_scrollbar() {
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 26, 30);
+        let layout = compute_expanded_sidebar_layout(area, app.sidebar_section_split);
+        let scrollbar = agent_panel_scrollbar_rect(&app, layout.detail);
+        if let Some(sb) = scrollbar {
+            let btn = layout.close_button;
+            if btn != Rect::default() {
+                let btn_right = btn.x + btn.width;
+                assert!(
+                    btn_right <= sb.x
+                        || btn.x >= sb.x + sb.width
+                        || btn.y + btn.height <= sb.y
+                        || btn.y >= sb.y + sb.height,
+                    "close button {btn:?} collides with scrollbar {sb:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_close_button_render_rect_equals_hit_rect() {
+        let area = Rect::new(0, 0, 26, 20);
+        let layout = compute_expanded_sidebar_layout(area, 0.5);
+        let btn_rect = layout.close_button;
+        assert_ne!(btn_rect, Rect::default());
+        let hit_rect = expanded_sidebar_close_button_rect(layout.detail);
+        assert_eq!(btn_rect, hit_rect);
+    }
+
+    #[test]
+    fn expanded_close_button_renders_collapse_glyph() {
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 26, 20);
+        let layout = compute_expanded_sidebar_layout(area, app.sidebar_section_split);
+        let btn = layout.close_button;
+        assert_ne!(btn, Rect::default());
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(26, 20)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_expanded_close_button(&app, frame, btn, &app.palette))
+            .expect("close button should render");
+
+        let buf = terminal.backend().buffer();
+        let has_glyph = (btn.x..btn.x + btn.width).any(|x| buf[(x, btn.y)].symbol() == "«");
+        assert!(has_glyph, "close button should render « glyph");
+    }
+
+    #[test]
+    fn expanded_close_button_empty_when_detail_too_narrow() {
+        for w in 0..4u16 {
+            let detail = Rect::new(0, 0, w, 10);
+            let btn = expanded_sidebar_close_button_rect(detail);
+            assert_eq!(btn, Rect::default(), "should be empty at width={w}");
         }
     }
 }
