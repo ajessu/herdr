@@ -12,7 +12,7 @@ mod menus;
 mod mobile;
 mod navigator;
 mod onboarding;
-mod overflow;
+pub(crate) mod overflow;
 mod panes;
 mod release_notes;
 mod scrollbar;

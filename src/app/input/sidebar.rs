@@ -1100,11 +1100,14 @@ mod tests {
             .get_mut(&second_terminal_id)
             .unwrap()
             .detected_agent = Some(Agent::Claude);
+        // Unknown is the only genuinely non-attention state after zellij-
+        // fidelity round 2 broadened the predicate to include Working. A row
+        // in a non-attention state must not steal focus on click.
         app.state
             .terminals
             .get_mut(&second_terminal_id)
             .unwrap()
-            .state = crate::detect::AgentState::Working;
+            .state = crate::detect::AgentState::Unknown;
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
@@ -1871,10 +1874,10 @@ mod tests {
         let below = app.state.view.sidebar_overflow.collapsed_ws_below;
         assert!(below.is_active(), "spaces are hidden below");
         assert!(
-            below.side.hidden_attention >= 1,
+            below.side.hidden_blocked >= 1,
             "hidden blocked space counted"
         );
-        assert_eq!(below.side.attention_jump_to, Some(9));
+        assert_eq!(below.side.blocked_jump_to, Some(9));
     }
 
     #[test]
@@ -1905,8 +1908,8 @@ mod tests {
 
         let below = app.state.view.sidebar_overflow.collapsed_ws_below;
         assert!(below.is_active());
-        assert_eq!(below.side.hidden_attention, 0);
-        assert_eq!(below.side.attention_jump_to, None);
+        assert_eq!(below.side.hidden_attention(), 0);
+        assert_eq!(below.side.blocked_jump_to, None);
         let rect = below.rect;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -2033,7 +2036,7 @@ mod tests {
 
         let below = app.state.view.sidebar_overflow.expanded_agents_below;
         assert!(below.is_active(), "agents hidden below the panel");
-        assert!(below.side.hidden_attention >= 1);
+        assert!(below.side.hidden_attention() >= 1);
         let rect = below.rect;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -2097,7 +2100,7 @@ mod tests {
 
         let below = app.state.view.sidebar_overflow.collapsed_detail_below;
         assert!(below.is_active(), "detail panes hidden below");
-        assert!(below.side.hidden_attention >= 1);
+        assert!(below.side.hidden_attention() >= 1);
         let rect = below.rect;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),

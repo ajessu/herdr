@@ -654,8 +654,12 @@ pub(crate) fn compute_collapsed_rail_layout(area: Rect) -> CollapsedRailLayout {
     }
 }
 
+/// "Any non-idle state" predicate — Blocked, Working, or Idle-unseen — shared
+/// with `tabs::chrome_is_attention` so the rail and the tab bar agree on which
+/// items are badge-worthy. Idle-seen and Unknown are excluded.
 pub(crate) fn is_attention_state(state: AgentState, seen: bool) -> bool {
-    matches!(state, AgentState::Blocked) || (matches!(state, AgentState::Idle) && !seen)
+    matches!(state, AgentState::Blocked | AgentState::Working)
+        || (matches!(state, AgentState::Idle) && !seen)
 }
 
 /// Which workspace anchors the collapsed rail's window — the selected one while
@@ -773,17 +777,14 @@ pub(crate) fn compute_sidebar_overflow(
         if layout.ws_area != Rect::default() {
             let ws_area = layout.ws_area;
             let win = collapsed_ws_window(app, ws_area);
-            let attn = |i: usize| {
+            let state_of = |i: usize| {
                 app.workspaces
                     .get(i)
-                    .map(|ws| {
-                        let (s, seen) = ws.aggregate_state(&app.terminals);
-                        is_attention_state(s, seen)
-                    })
-                    .unwrap_or(false)
+                    .map(|ws| ws.aggregate_state(&app.terminals))
+                    .unwrap_or((AgentState::Idle, true))
             };
-            let above = side_above(win, attn);
-            let below = side_below(win, app.workspaces.len(), attn);
+            let above = side_above(win, state_of);
+            let below = side_below(win, app.workspaces.len(), state_of);
             rects.collapsed_ws_above = place_row_badge(ws_area.x, ws_area.y, ws_area.width, above);
             rects.collapsed_ws_below = place_row_badge(
                 ws_area.x,
@@ -801,14 +802,14 @@ pub(crate) fn compute_sidebar_overflow(
                     content.height as usize,
                     anchor,
                 );
-                let attn = |i: usize| {
+                let state_of = |i: usize| {
                     details
                         .get(i)
-                        .map(|d| is_attention_state(d.state, d.seen))
-                        .unwrap_or(false)
+                        .map(|d| (d.state, d.seen))
+                        .unwrap_or((AgentState::Idle, true))
                 };
-                let above = side_above(win, attn);
-                let below = side_below(win, details.len(), attn);
+                let above = side_above(win, state_of);
+                let below = side_below(win, details.len(), state_of);
                 rects.collapsed_detail_above =
                     place_row_badge(content.x, content.y, content.width, above);
                 rects.collapsed_detail_below = place_row_badge(
@@ -835,9 +836,9 @@ pub(crate) fn compute_sidebar_overflow(
             ws_metrics.viewport_rows,
             app.workspace_scroll,
         );
-        let attn = |i: usize| entry_is_attention(app, &entries, i);
-        let above = side_above(win, attn);
-        let below = side_below(win, entries.len(), attn);
+        let state_of = |i: usize| entry_state(app, &entries, i);
+        let above = side_above(win, state_of);
+        let below = side_below(win, entries.len(), state_of);
         rects.expanded_ws_above = place_row_badge(ws_body.x, ws_body.y, ws_body.width, above);
         rects.expanded_ws_below = place_row_badge(
             ws_body.x,
@@ -857,14 +858,14 @@ pub(crate) fn compute_sidebar_overflow(
             ag_metrics.viewport_rows,
             app.agent_panel_scroll,
         );
-        let attn = |i: usize| {
+        let state_of = |i: usize| {
             entries
                 .get(i)
-                .map(|e| is_attention_state(e.state, e.seen))
-                .unwrap_or(false)
+                .map(|e| (e.state, e.seen))
+                .unwrap_or((AgentState::Idle, true))
         };
-        let above = side_above(win, attn);
-        let below = side_below(win, entries.len(), attn);
+        let above = side_above(win, state_of);
+        let below = side_below(win, entries.len(), state_of);
         rects.expanded_agents_above = place_row_badge(ag_body.x, ag_body.y, ag_body.width, above);
         rects.expanded_agents_below = place_row_badge(
             ag_body.x,
@@ -888,7 +889,7 @@ fn render_overflow_badge(
     if !badge.is_active() {
         return;
     }
-    let spans = super::overflow::badge_spans(badge.side.hidden, badge.side.hidden_attention, p);
+    let spans = super::overflow::badge_spans(badge.side, p);
     frame.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
         badge.rect,
@@ -897,17 +898,17 @@ fn render_overflow_badge(
 
 /// Attention predicate for a workspace-list entry by index (resolves the
 /// underlying workspace's aggregate state).
-fn entry_is_attention(app: &AppState, entries: &[WorkspaceListEntry], idx: usize) -> bool {
+/// The `(state, seen)` tuple for a workspace-list entry, used to classify it
+/// into the overflow badge buckets. Idle-seen for an entry that has no
+/// workspace (group header / out of range), so it never counts as badge-worthy.
+fn entry_state(app: &AppState, entries: &[WorkspaceListEntry], idx: usize) -> (AgentState, bool) {
     match entries.get(idx) {
         Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => app
             .workspaces
             .get(*ws_idx)
-            .map(|ws| {
-                let (s, seen) = ws.aggregate_state(&app.terminals);
-                is_attention_state(s, seen)
-            })
-            .unwrap_or(false),
-        None => false,
+            .map(|ws| ws.aggregate_state(&app.terminals))
+            .unwrap_or((AgentState::Idle, true)),
+        _ => (AgentState::Idle, true),
     }
 }
 
@@ -2214,9 +2215,11 @@ mod tests {
     }
 
     #[test]
-    fn is_attention_state_working_is_not_attention() {
-        assert!(!is_attention_state(AgentState::Working, true));
-        assert!(!is_attention_state(AgentState::Working, false));
+    fn is_attention_state_working_is_attention() {
+        // zellij-fidelity round 2: Working agents now count as badge-worthy
+        // (the badge surfaces all three non-idle states).
+        assert!(is_attention_state(AgentState::Working, true));
+        assert!(is_attention_state(AgentState::Working, false));
     }
 
     #[test]
@@ -2294,14 +2297,14 @@ mod tests {
 
         let below = app.view.sidebar_overflow.collapsed_ws_below;
         assert!(below.is_active(), "spaces hidden below");
-        assert!(below.side.hidden_attention >= 1, "blocked space counted");
+        assert!(below.side.hidden_blocked >= 1, "blocked space counted");
         let buf = terminal.backend().buffer();
         let row_text: String = (below.rect.x..below.rect.x + below.rect.width)
             .map(|x| buf[(x, below.rect.y)].symbol())
             .collect();
         assert!(
-            row_text.contains('●'),
-            "attention glyph drawn: {row_text:?}"
+            row_text.contains('◉'),
+            "blocked badge glyph drawn: {row_text:?}"
         );
         assert!(row_text.contains('+'), "hidden count drawn: {row_text:?}");
     }

@@ -21,9 +21,11 @@ const MIN_SECTION_GAP: usize = 2;
 pub struct Hint {
     pub key: Cow<'static, str>,
     pub label: &'static str,
-    // TODO: remove in a separate cleanup pass — no longer consumed since
-    // zellij-fidelity round 2 (labels always render full uppercase, no
-    // lowercase short fallback tier).
+    // No longer consumed since zellij-fidelity round 2 (labels always render
+    // full uppercase, no lowercase short fallback tier). Kept on the struct so
+    // the many `hints()` constructor sites don't churn this round; removed in a
+    // separate cleanup pass.
+    #[allow(dead_code)]
     pub short: &'static str,
     pub priority: u8,
 }

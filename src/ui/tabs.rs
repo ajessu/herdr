@@ -46,20 +46,18 @@ pub(crate) enum SeparatorStyle {
     AlternatingBg,
 }
 
-/// A run of hidden tabs collapsed behind one overflow indicator. `jump_to` is a
-/// TAB INDEX (not a vec position) — the nearest hidden tab on that side — and is
-/// range-asserted against the live tab count before use.
-///
-/// `hidden_attention_count` is how many of the `count` hidden tabs are in an
-/// attention state (Blocked or Idle-unseen); `attention_jump_to` is the TAB
-/// INDEX of the nearest hidden attention tab on that side (closest to the
-/// visible edge), or `None` when no hidden tab there is in attention.
+/// A run of hidden tabs collapsed behind one overflow indicator. `count` and
+/// `jump_to` are the total hidden count and the nearest hidden tab INDEX on
+/// that side. `side` carries the disaggregated Working/Blocked/Done-unseen
+/// counts + per-bucket jump targets (shared with the sidebar surfaces via
+/// `overflow::OverflowSide`), all computed on one walk over the hidden range.
+/// The TAB INDEX targets are range-asserted against the live tab count before
+/// use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HiddenGroup {
     pub count: usize,
     pub jump_to: usize,
-    pub hidden_attention_count: usize,
-    pub attention_jump_to: Option<usize>,
+    pub side: super::overflow::OverflowSide,
 }
 
 /// Overflow indicators for the centered-active fill: the hidden tabs to each
@@ -145,6 +143,10 @@ pub(crate) struct TabChrome {
     /// the tab cell. Consumed by `compute_tab_bar_view` to count hidden-attention
     /// tabs on the same fill walk.
     pub is_attention: bool,
+    /// The tab's `(state, seen)` source tuple (None under `TabStatusMode::Off`).
+    /// Carried so `compute_tab_bar_view` can classify hidden tabs into the
+    /// three overflow badge buckets on its single fill walk.
+    pub agent_state: Option<(crate::detect::AgentState, bool)>,
 }
 
 impl TabChrome {
@@ -314,6 +316,7 @@ fn build_tab_chrome(
                 name,
                 zoomed: false,
                 is_attention: false,
+                agent_state: None,
             },
             None,
         );
@@ -351,6 +354,7 @@ fn build_tab_chrome(
             name,
             zoomed,
             is_attention,
+            agent_state: source,
         },
         source,
     )
@@ -391,30 +395,38 @@ pub(crate) struct TabBarView {
     pub new_tab_hit_area: Rect,
 }
 
-/// Canonical attention predicate for a tab's `(state, seen)`: Blocked (awaiting
-/// input) or Idle-unseen (done, not yet looked at). Mirrors
-/// `sidebar::is_attention_state` so the tab bar and the sidebar rail agree.
+/// Canonical "any non-idle state" predicate for a tab's `(state, seen)`:
+/// Blocked (awaiting input), Working (in flight), or Idle-unseen (done, not
+/// yet looked at). Mirrors `sidebar::is_attention_state` so the tab bar and
+/// the sidebar rail agree on which tabs are badge-worthy.
 fn chrome_is_attention(state: crate::detect::AgentState, seen: bool) -> bool {
     use crate::detect::AgentState;
-    matches!(state, AgentState::Blocked) || matches!((state, seen), (AgentState::Idle, false))
+    matches!(state, AgentState::Blocked | AgentState::Working)
+        || matches!((state, seen), (AgentState::Idle, false))
 }
 
-/// Columns an overflow indicator tile needs for `count` hidden tabs, of which
-/// `attention` need action. The tile owns 2 separator cols (left + right
-/// Powerline arrow) plus its interior. Without a badge it is the base
-/// `OVERFLOW_INDICATOR_WIDTH` (touch-adequate, NFR5); with a badge the interior
-/// grows to fit `←+N ●ᵏ`. Attention badges only show under mouse chrome
-/// (non-mouse markers are count-only).
-fn tab_indicator_width(count: usize, attention: usize, mouse_chrome: bool) -> u16 {
-    if !mouse_chrome || attention == 0 {
+/// Columns an overflow indicator tile needs for `count` hidden tabs whose
+/// disaggregated badge breakdown is `side`. The tile owns 2 separator cols
+/// (left + right Powerline arrow) plus its interior. Without any badge it is
+/// the base `OVERFLOW_INDICATOR_WIDTH` (touch-adequate, NFR5); with badges the
+/// interior grows to fit `←+N` plus each non-zero bucket segment. Badges only
+/// show under mouse chrome (non-mouse markers are count-only).
+fn tab_indicator_width(
+    count: usize,
+    side: super::overflow::OverflowSide,
+    mouse_chrome: bool,
+) -> u16 {
+    if !mouse_chrome || side.hidden_attention() == 0 {
         return OVERFLOW_INDICATOR_WIDTH;
     }
-    // Interior = directional-arrow(1) + "+"(1) + count text + space(1) + badge
-    // columns; plus the 2 separator cols for the tile's Powerline wedges. Count
-    // text is measured by display width to match the rest of the tab-bar sizing.
+    // Interior = directional-arrow(1) + "+"(1) + count text + badge columns
+    // (`badge_attention_width` already includes a leading space per non-zero
+    // bucket segment); plus the 2 separator cols for the tile's Powerline
+    // wedges. Count text is measured by display width to match the rest of the
+    // tab-bar sizing.
     let count_w = u16::try_from(super::overflow::count_label(count).width()).unwrap_or(u16::MAX);
-    let badge_w = super::overflow::badge_attention_width(attention);
-    let interior = (2 + count_w + 1 + badge_w).max(OVERFLOW_INDICATOR_INTERIOR);
+    let badge_w = super::overflow::badge_attention_width(side);
+    let interior = (2 + count_w + badge_w).max(OVERFLOW_INDICATOR_INTERIOR);
     interior
         .saturating_add(TAB_SEPARATOR_OVERHEAD)
         .max(OVERFLOW_INDICATOR_WIDTH)
@@ -591,31 +603,46 @@ pub(crate) fn compute_tab_bar_view(
         // Everything fits — no indicators.
         (probe, TabBarOverflow::default())
     } else {
-        // Build the hidden groups for a given fill result. Counts attention
-        // tabs and finds the nearest one on each side, walking only the
-        // already-identified hidden ranges [0..first) and (last..n) — no second
-        // full-tab scan. "Nearest" = closest to the visible edge: the rightmost
-        // attention tab on the left, the leftmost on the right.
+        // Build the hidden groups for a given fill result, reusing the shared
+        // `overflow::side_above`/`side_below` so the tab bar and the sidebar
+        // surfaces classify hidden items into the same Working/Blocked/Done-
+        // unseen buckets with the same single-walk, nearest-to-edge semantics.
+        // The walk covers only the hidden ranges [0..first) and (last..n) — no
+        // second full-tab scan. A tab with no agent_state (TabStatusMode::Off)
+        // classifies as Unknown, which `AttnBucket::classify` treats as
+        // non-badge-worthy.
+        let state_of = |i: usize| {
+            chromes
+                .get(i)
+                .and_then(|c| c.agent_state)
+                .unwrap_or((crate::detect::AgentState::Unknown, true))
+        };
         let groups_for = |rects: &[Rect]| -> (Option<HiddenGroup>, Option<HiddenGroup>) {
             let (first, last) = visible_bounds(rects).unwrap_or((active_tab, active_tab));
             let left_hidden = first;
             let right_hidden = tab_count.saturating_sub(last + 1);
-            let right_lo = last + 1;
 
-            let left = (left_hidden > 0).then(|| HiddenGroup {
-                count: left_hidden,
-                jump_to: first.saturating_sub(1),
-                hidden_attention_count: chromes[0..first].iter().filter(|c| c.is_attention).count(),
-                attention_jump_to: (0..first).rev().find(|&i| chromes[i].is_attention),
+            let window = super::overflow::ListWindow {
+                first,
+                count: last.saturating_sub(first) + 1,
+                hidden_above: left_hidden,
+                hidden_below: right_hidden,
+            };
+            let left = (left_hidden > 0).then(|| {
+                let side = super::overflow::side_above(window, state_of);
+                HiddenGroup {
+                    count: left_hidden,
+                    jump_to: first.saturating_sub(1),
+                    side,
+                }
             });
-            let right = (right_hidden > 0).then(|| HiddenGroup {
-                count: right_hidden,
-                jump_to: last + 1,
-                hidden_attention_count: chromes[right_lo..tab_count]
-                    .iter()
-                    .filter(|c| c.is_attention)
-                    .count(),
-                attention_jump_to: (right_lo..tab_count).find(|&i| chromes[i].is_attention),
+            let right = (right_hidden > 0).then(|| {
+                let side = super::overflow::side_below(window, tab_count, state_of);
+                HiddenGroup {
+                    count: right_hidden,
+                    jump_to: last + 1,
+                    side,
+                }
             });
             (left, right)
         };
@@ -643,7 +670,7 @@ pub(crate) fn compute_tab_bar_view(
         // 4 as a backstop. `left_w`/`right_w` always hold the reserves that
         // produced the final `rects`/`left`/`right`.
         let want_w = |g: &Option<HiddenGroup>| {
-            g.map(|g| tab_indicator_width(g.count, g.hidden_attention_count, mouse_chrome))
+            g.map(|g| tab_indicator_width(g.count, g.side, mouse_chrome))
                 .unwrap_or(0)
         };
         let mut left_w = OVERFLOW_INDICATOR_WIDTH;
@@ -923,8 +950,9 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 
     // Overflow indicators render as proper zellij tiles (left arrow + interior
     // + right arrow), matching a regular inactive tab. Under mouse chrome the
-    // interior is a clickable `←+N` / `+N→` affordance; without mouse chrome it
-    // is a non-clickable `← N` / `N →` marker. Counts cap at `9+`.
+    // interior is a clickable `←+N` affordance plus up to three disaggregated
+    // Blocked/Working/Done-unseen badge segments; without mouse chrome it is a
+    // non-clickable `← N` / `N →` marker (count only). Counts cap at `9+`.
     let fmt_count = |n: usize| -> String {
         if n > 9 {
             "9+".to_string()
@@ -933,29 +961,28 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     };
     let interior_text_style = Style::default().fg(p.overlay1).bg(indicator_tile_bg);
-    let badge_style = Style::default()
-        .fg(p.accent)
-        .bg(indicator_tile_bg)
-        .add_modifier(Modifier::BOLD);
+    // Re-tint the shared `badge_spans` (which uses transparent bg) onto the
+    // tile bg so the badge sits on the indicator tile, not the panel.
+    let on_tile = |spans: Vec<Span<'static>>| -> Vec<Span<'static>> {
+        spans
+            .into_iter()
+            .map(|s| {
+                let style = s.style.bg(indicator_tile_bg);
+                Span::styled(s.content, style)
+            })
+            .collect()
+    };
     if let Some(group) = overflow.left {
         if overflow.left_hit_area.width > 0 {
-            let mut interior = vec![Span::styled(
-                if app.mouse_capture {
-                    format!("←+{}", fmt_count(group.count))
-                } else {
-                    format!("←{} ", fmt_count(group.count))
-                },
-                interior_text_style,
-            )];
-            // Badge after the count for the left indicator (mouse chrome only).
-            if app.mouse_capture && group.hidden_attention_count > 0 {
-                interior.push(Span::styled(" ", interior_text_style));
+            let mut interior: Vec<Span<'static>> = Vec::new();
+            if app.mouse_capture {
+                // `←` + the shared badge (`+N` plus bucket segments), re-tinted.
+                interior.push(Span::styled("←", interior_text_style));
+                interior.extend(on_tile(super::overflow::badge_spans(group.side, p)));
+            } else {
                 interior.push(Span::styled(
-                    format!(
-                        "●{}",
-                        super::overflow::attention_superscript(group.hidden_attention_count)
-                    ),
-                    badge_style,
+                    format!("←{} ", fmt_count(group.count)),
+                    interior_text_style,
                 ));
             }
             render_overflow_tile(
@@ -972,25 +999,16 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if let Some(group) = overflow.right {
         if overflow.right_hit_area.width > 0 {
             let mut interior: Vec<Span<'static>> = Vec::new();
-            // Badge before the count for the right indicator (mouse chrome only).
-            if app.mouse_capture && group.hidden_attention_count > 0 {
+            if app.mouse_capture {
+                // The shared badge then a trailing `→`.
+                interior.extend(on_tile(super::overflow::badge_spans(group.side, p)));
+                interior.push(Span::styled("→", interior_text_style));
+            } else {
                 interior.push(Span::styled(
-                    format!(
-                        "●{}",
-                        super::overflow::attention_superscript(group.hidden_attention_count)
-                    ),
-                    badge_style,
+                    format!(" {}→", fmt_count(group.count)),
+                    interior_text_style,
                 ));
-                interior.push(Span::styled(" ", interior_text_style));
             }
-            interior.push(Span::styled(
-                if app.mouse_capture {
-                    format!("+{}→", fmt_count(group.count))
-                } else {
-                    format!(" {}→", fmt_count(group.count))
-                },
-                interior_text_style,
-            ));
             render_overflow_tile(
                 frame,
                 area,
@@ -1148,6 +1166,7 @@ mod tests {
                     name,
                     zoomed,
                     is_attention: false,
+                    agent_state: None,
                 }
             })
             .collect()
@@ -1161,21 +1180,52 @@ mod tests {
                 name: name.to_string(),
                 zoomed: false,
                 is_attention: false,
+                agent_state: None,
             })
             .collect()
     }
 
     /// Build chromes with explicit attention flags (indices in `attention` are
-    /// marked `is_attention = true`). Used by the FR8 hidden-attention tests.
+    /// Blocked-and-seen so they count as badge-worthy). Used by the FR8
+    /// hidden-attention tests.
     fn chromes_with_attention(names: &[&str], attention: &[usize]) -> Vec<TabChrome> {
         names
             .iter()
             .enumerate()
-            .map(|(i, &name)| TabChrome {
-                status: None,
-                name: name.to_string(),
-                zoomed: false,
-                is_attention: attention.contains(&i),
+            .map(|(i, &name)| {
+                let attn = attention.contains(&i);
+                TabChrome {
+                    status: None,
+                    name: name.to_string(),
+                    zoomed: false,
+                    is_attention: attn,
+                    agent_state: attn.then_some((crate::detect::AgentState::Blocked, true)),
+                }
+            })
+            .collect()
+    }
+
+    /// Build chromes with explicit per-index agent states. Used by the
+    /// disaggregated-bucket tests.
+    fn chromes_with_states(
+        names: &[&str],
+        states: &[(usize, crate::detect::AgentState, bool)],
+    ) -> Vec<TabChrome> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| {
+                let st = states
+                    .iter()
+                    .find(|(idx, ..)| *idx == i)
+                    .map(|(_, s, seen)| (*s, *seen));
+                TabChrome {
+                    status: None,
+                    name: name.to_string(),
+                    zoomed: false,
+                    is_attention: st.is_some_and(|(s, seen)| chrome_is_attention(s, seen)),
+                    agent_state: st,
+                }
             })
             .collect()
     }
@@ -1275,19 +1325,15 @@ mod tests {
     #[test]
     fn build_tab_chromes_sets_is_attention_from_state() {
         use crate::detect::AgentState;
-        // Tab 0 Blocked → attention; tab 1 Idle-seen → not; tab 2 Idle-unseen →
-        // attention; tab 3 Working → not.
-        let mut ws = crate::workspace::Workspace::test_new("w");
-        ws.test_add_tab(Some("b"));
-        ws.test_add_tab(Some("c"));
-        ws.test_add_tab(Some("d"));
-        // Drive states via the chrome's own attention predicate to avoid coupling
-        // to terminal wiring: assert the predicate the builder uses.
+        // zellij-fidelity round 2: the predicate is "any non-idle state".
+        // Blocked, Working, and Idle-unseen are attention; Idle-seen and
+        // Unknown are not.
         assert!(chrome_is_attention(AgentState::Blocked, true));
+        assert!(chrome_is_attention(AgentState::Working, false));
+        assert!(chrome_is_attention(AgentState::Working, true));
         assert!(chrome_is_attention(AgentState::Idle, false));
         assert!(!chrome_is_attention(AgentState::Idle, true));
-        assert!(!chrome_is_attention(AgentState::Working, false));
-        let _ = ws;
+        assert!(!chrome_is_attention(AgentState::Unknown, false));
     }
 
     #[test]
@@ -1302,17 +1348,21 @@ mod tests {
         let left = view.overflow.left.expect("left overflow");
         let right = view.overflow.right.expect("right overflow");
 
-        // Left: attention tab 1 is hidden and counted; nearest-to-edge is the
-        // rightmost attention index in the hidden left range.
-        assert!(left.hidden_attention_count >= 1);
-        assert_eq!(left.attention_jump_to, Some(1));
+        // Left: attention tab 1 is hidden and counted (chromes_with_attention
+        // marks them Blocked); nearest-to-edge is the rightmost blocked index
+        // in the hidden left range.
+        assert!(left.side.hidden_attention() >= 1);
+        assert_eq!(left.side.blocked_jump_to, Some(1));
         // The attention jump target is actually hidden.
-        assert_eq!(view.tab_hit_areas[left.attention_jump_to.unwrap()].width, 0);
-
-        assert!(right.hidden_attention_count >= 1);
-        assert_eq!(right.attention_jump_to, Some(8));
         assert_eq!(
-            view.tab_hit_areas[right.attention_jump_to.unwrap()].width,
+            view.tab_hit_areas[left.side.blocked_jump_to.unwrap()].width,
+            0
+        );
+
+        assert!(right.side.hidden_attention() >= 1);
+        assert_eq!(right.side.blocked_jump_to, Some(8));
+        assert_eq!(
+            view.tab_hit_areas[right.side.blocked_jump_to.unwrap()].width,
             0
         );
     }
@@ -1327,10 +1377,65 @@ mod tests {
             compute_tab_bar_view(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         let left = view.overflow.left.expect("left overflow");
         let right = view.overflow.right.expect("right overflow");
-        assert_eq!(left.hidden_attention_count, 0);
-        assert_eq!(left.attention_jump_to, None);
-        assert_eq!(right.hidden_attention_count, 0);
-        assert_eq!(right.attention_jump_to, None);
+        assert_eq!(left.side.hidden_attention(), 0);
+        assert_eq!(left.side.blocked_jump_to, None);
+        assert_eq!(right.side.hidden_attention(), 0);
+        assert_eq!(right.side.blocked_jump_to, None);
+    }
+
+    #[test]
+    fn tab_overflow_counts_working_blocked_done_unseen_in_one_walk() {
+        use crate::detect::AgentState::*;
+        // 12 tabs, active 6. Left hidden range [0..6): blocked@1, working@2,
+        // idle-unseen@4. Right hidden range (last..12): blocked@9, working@10.
+        let names: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let chromes = chromes_with_states(
+            &refs,
+            &[
+                (1, Blocked, true),
+                (2, Working, false),
+                (4, Idle, false),
+                (9, Blocked, true),
+                (10, Working, false),
+            ],
+        );
+        let view =
+            compute_tab_bar_view(chromes, 6, TabStatusMode::Off, Rect::new(0, 0, 36, 1), true);
+        let left = view.overflow.left.expect("left overflow").side;
+        let right = view.overflow.right.expect("right overflow").side;
+        assert_eq!(left.hidden_blocked, 1, "left blocked");
+        assert_eq!(left.hidden_working, 1, "left working");
+        assert_eq!(left.hidden_done_unseen, 1, "left done-unseen");
+        // ABOVE keeps highest index per bucket.
+        assert_eq!(left.blocked_jump_to, Some(1));
+        assert_eq!(left.working_jump_to, Some(2));
+        assert_eq!(left.done_unseen_jump_to, Some(4));
+        assert_eq!(right.hidden_blocked, 1, "right blocked");
+        assert_eq!(right.hidden_working, 1, "right working");
+        // BELOW keeps lowest index per bucket.
+        assert_eq!(right.blocked_jump_to, Some(9));
+        assert_eq!(right.working_jump_to, Some(10));
+    }
+
+    #[test]
+    fn tab_overflow_click_priority_blocked_over_working() {
+        use crate::detect::AgentState::*;
+        // Left hidden range has a working tab (index 1) and a blocked tab
+        // (index 3); resolve_jump must prefer the blocked one.
+        let names: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let chromes = chromes_with_states(&refs, &[(1, Working, false), (3, Blocked, true)]);
+        let view =
+            compute_tab_bar_view(chromes, 7, TabStatusMode::Off, Rect::new(0, 0, 36, 1), true);
+        let left = view.overflow.left.expect("left overflow");
+        let mut side = left.side;
+        side.jump_to = left.jump_to;
+        assert_eq!(
+            crate::ui::overflow::resolve_jump(side),
+            Some(3),
+            "blocked outranks working for the jump target"
+        );
     }
 
     #[test]
@@ -1412,12 +1517,12 @@ mod tests {
         let left = view
             .overflow
             .left
-            .map(|g| g.hidden_attention_count)
+            .map(|g| g.side.hidden_attention())
             .unwrap_or(0);
         let right = view
             .overflow
             .right
-            .map(|g| g.hidden_attention_count)
+            .map(|g| g.side.hidden_attention())
             .unwrap_or(0);
         assert_eq!(left + right, 0, "visible attention tab is not a hidden one");
     }
@@ -1607,6 +1712,7 @@ mod tests {
             name: "abcdefgh".into(),
             zoomed: true,
             is_attention: false,
+            agent_state: None,
         };
         assert_eq!(tab_width(&chrome, TabStatusMode::Off), 16);
     }
@@ -1619,6 +1725,7 @@ mod tests {
             name: "你好".into(),
             zoomed: false,
             is_attention: false,
+            agent_state: None,
         };
         assert_eq!(c.display_width(TabStatusMode::Off), 4);
 
@@ -1628,6 +1735,7 @@ mod tests {
             name: "a\u{0300}".into(),
             zoomed: false,
             is_attention: false,
+            agent_state: None,
         };
         assert_eq!(c.display_width(TabStatusMode::Off), 1);
     }
@@ -1639,6 +1747,7 @@ mod tests {
             name: "hello".into(),
             zoomed: false,
             is_attention: false,
+            agent_state: None,
         };
         assert_eq!(c.display_width(TabStatusMode::Off), 5);
         let c = TabChrome {
@@ -1646,6 +1755,7 @@ mod tests {
             name: "hello".into(),
             zoomed: true,
             is_attention: false,
+            agent_state: None,
         };
         assert_eq!(c.display_width(TabStatusMode::Off), 7);
         let c = TabChrome {
@@ -1653,6 +1763,7 @@ mod tests {
             name: "hello".into(),
             zoomed: false,
             is_attention: false,
+            agent_state: None,
         };
         assert_eq!(c.display_width(TabStatusMode::All), 7);
         let c = TabChrome {
@@ -1663,6 +1774,7 @@ mod tests {
             name: "hello".into(),
             zoomed: true,
             is_attention: false,
+            agent_state: None,
         };
         assert_eq!(c.display_width(TabStatusMode::All), 9);
     }
@@ -1677,6 +1789,7 @@ mod tests {
             name: "test".into(),
             zoomed: true,
             is_attention: false,
+            agent_state: None,
         };
         let spans = c.to_spans(TabStatusMode::All, 15);
         assert_eq!(spans[0].content.as_ref(), " ");
@@ -1691,6 +1804,7 @@ mod tests {
             name: "abc".into(),
             zoomed: false,
             is_attention: false,
+            agent_state: None,
         };
         let spans = c.to_spans(TabStatusMode::All, 10);
         assert_eq!(spans[0].content.as_ref(), " ");
@@ -1704,6 +1818,7 @@ mod tests {
             name: "xyz".into(),
             zoomed: false,
             is_attention: false,
+            agent_state: None,
         };
         let spans = c.to_spans(TabStatusMode::Off, 8);
         assert_eq!(spans[0].content.as_ref(), " ");
@@ -1718,6 +1833,7 @@ mod tests {
             name: "longername".into(),
             zoomed: false,
             is_attention: false,
+            agent_state: None,
         };
         // mode=Off, no zoom: name_budget = rect_width - 1 = 4 → "lon…".
         let spans = c.to_spans(TabStatusMode::Off, 5);
@@ -1733,6 +1849,7 @@ mod tests {
             name: "abc".into(),
             zoomed: false,
             is_attention: false,
+            agent_state: None,
         };
         let spans = c.to_spans(TabStatusMode::Off, 8);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1757,6 +1874,7 @@ mod tests {
             name: "ev\u{202e}il".into(),
             zoomed: false,
             is_attention: false,
+            agent_state: None,
         };
         let spans = c.to_spans(TabStatusMode::Off, 12);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();

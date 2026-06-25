@@ -17,6 +17,63 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::state::Palette;
+use crate::detect::AgentState;
+
+/// The three non-idle states an overflow badge surfaces, each rendered as its
+/// own icon + count. `Blocked` outranks `Working` outranks `DoneUnseen` for
+/// jump resolution (blocked is the only state that won't progress without the
+/// user). Idle-seen and Unknown are not badge-worthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttnBucket {
+    /// Agent is blocked awaiting user input.
+    Blocked,
+    /// Agent is actively working.
+    Working,
+    /// Agent finished but the result has not been seen yet (`Idle`, `!seen`).
+    DoneUnseen,
+}
+
+impl AttnBucket {
+    /// Classify a `(state, seen)` tuple into a badge bucket, or `None` when the
+    /// item is idle-seen / unknown (not badge-worthy).
+    pub fn classify(state: AgentState, seen: bool) -> Option<Self> {
+        match (state, seen) {
+            (AgentState::Blocked, _) => Some(Self::Blocked),
+            (AgentState::Working, _) => Some(Self::Working),
+            (AgentState::Idle, false) => Some(Self::DoneUnseen),
+            _ => None,
+        }
+    }
+
+    /// A distinct badge glyph per bucket — the user wants three visually
+    /// different icons, not one dot in three colors. Blocked is the filled
+    /// target `◉`, Working the half-filled `◐`, DoneUnseen the solid `●`.
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Blocked => "◉",
+            Self::Working => "◐",
+            Self::DoneUnseen => "●",
+        }
+    }
+
+    /// The palette tone for this bucket, matching the per-tab status dots
+    /// (`status::state_dot`): blocked red, working yellow, done-unseen teal.
+    fn color(self, p: &Palette) -> ratatui::style::Color {
+        match self {
+            Self::Blocked => p.red,
+            Self::Working => p.yellow,
+            Self::DoneUnseen => p.teal,
+        }
+    }
+}
+
+/// Render order for the badge segments — Blocked first (most urgent), then
+/// Working, then DoneUnseen. Also the jump-resolution priority order.
+const BUCKET_ORDER: [AttnBucket; 3] = [
+    AttnBucket::Blocked,
+    AttnBucket::Working,
+    AttnBucket::DoneUnseen,
+];
 
 /// A rendered overflow badge's clickable rect plus the resolved jump targets it
 /// carries, stored on the compute side for the mouse layer to hit-test. `rect`
@@ -35,22 +92,50 @@ impl OverflowBadgeRect {
 
 /// Counts of hidden items on one side of a scrollable list, with the jump
 /// targets a badge click resolves to. `jump_to` is the nearest hidden item
-/// (any) toward the visible edge; `attention_jump_to` is the nearest hidden
-/// item in an attention state, or `None` when none on that side is.
+/// (any) toward the visible edge. Each non-idle bucket carries its own hidden
+/// count and nearest-to-edge jump target, all computed in one walk over the
+/// hidden range (no rescans).
 ///
 /// The index space is surface-specific (workspace index, pane-entry index, tab
 /// index); each surface range-asserts it before acting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct OverflowSide {
     pub hidden: usize,
-    pub hidden_attention: usize,
+    pub hidden_working: usize,
+    pub hidden_blocked: usize,
+    pub hidden_done_unseen: usize,
     pub jump_to: usize,
-    pub attention_jump_to: Option<usize>,
+    pub working_jump_to: Option<usize>,
+    pub blocked_jump_to: Option<usize>,
+    pub done_unseen_jump_to: Option<usize>,
 }
 
 impl OverflowSide {
     pub fn is_empty(&self) -> bool {
         self.hidden == 0
+    }
+
+    /// Count for a given bucket.
+    fn bucket_count(&self, bucket: AttnBucket) -> usize {
+        match bucket {
+            AttnBucket::Blocked => self.hidden_blocked,
+            AttnBucket::Working => self.hidden_working,
+            AttnBucket::DoneUnseen => self.hidden_done_unseen,
+        }
+    }
+
+    /// Jump target for a given bucket.
+    fn bucket_jump(&self, bucket: AttnBucket) -> Option<usize> {
+        match bucket {
+            AttnBucket::Blocked => self.blocked_jump_to,
+            AttnBucket::Working => self.working_jump_to,
+            AttnBucket::DoneUnseen => self.done_unseen_jump_to,
+        }
+    }
+
+    /// Total badge-worthy (non-idle) hidden items across all three buckets.
+    pub fn hidden_attention(&self) -> usize {
+        self.hidden_working + self.hidden_blocked + self.hidden_done_unseen
     }
 }
 
@@ -181,73 +266,92 @@ pub(crate) fn scrolled_window(total: usize, height: usize, scroll: usize) -> Lis
     }
 }
 
-/// Resolve the hidden items ABOVE a window into an `OverflowSide`. `is_attention`
+/// Accumulate the three bucket counts + jump targets in a single forward walk
+/// over `range`. `keep_latest` controls which match wins the jump target: for
+/// the ABOVE side we keep the latest (highest index, closest to the visible
+/// edge); for the BELOW side we keep the earliest (lowest index). `state_of`
+/// is queried only over the hidden range — no full rescan.
+fn accumulate_buckets(
+    side: &mut OverflowSide,
+    range: std::ops::Range<usize>,
+    keep_latest: bool,
+    state_of: impl Fn(usize) -> (AgentState, bool),
+) {
+    for i in range {
+        let (state, seen) = state_of(i);
+        let Some(bucket) = AttnBucket::classify(state, seen) else {
+            continue;
+        };
+        let (count, jump) = match bucket {
+            AttnBucket::Blocked => (&mut side.hidden_blocked, &mut side.blocked_jump_to),
+            AttnBucket::Working => (&mut side.hidden_working, &mut side.working_jump_to),
+            AttnBucket::DoneUnseen => (&mut side.hidden_done_unseen, &mut side.done_unseen_jump_to),
+        };
+        *count += 1;
+        if keep_latest || jump.is_none() {
+            *jump = Some(i);
+        }
+    }
+}
+
+/// Resolve the hidden items ABOVE a window into an `OverflowSide`. `state_of`
 /// is queried only over the hidden range `[0..window.first)` — no full rescan.
-/// `jump_to` is the nearest hidden item (just above the window); the attention
-/// target is the closest attention item to the visible edge (highest index).
-pub(crate) fn side_above(window: ListWindow, is_attention: impl Fn(usize) -> bool) -> OverflowSide {
+/// `jump_to` is the nearest hidden item (just above the window); each bucket's
+/// jump target is the closest item of that state to the visible edge (highest
+/// index).
+pub(crate) fn side_above(
+    window: ListWindow,
+    state_of: impl Fn(usize) -> (AgentState, bool),
+) -> OverflowSide {
     let hidden = window.hidden_above;
     if hidden == 0 {
         return OverflowSide::default();
     }
-    let mut hidden_attention = 0;
-    let mut attention_jump_to = None;
-    for i in 0..window.first {
-        if is_attention(i) {
-            hidden_attention += 1;
-            // Keep the highest index (closest to the visible edge).
-            attention_jump_to = Some(i);
-        }
-    }
-    OverflowSide {
+    let mut side = OverflowSide {
         hidden,
-        hidden_attention,
         jump_to: window.first.saturating_sub(1),
-        attention_jump_to,
-    }
+        ..OverflowSide::default()
+    };
+    accumulate_buckets(&mut side, 0..window.first, true, state_of);
+    side
 }
 
 /// Resolve the hidden items BELOW a window into an `OverflowSide`. `total` is the
-/// full item count; `is_attention` is queried only over `(last..total)`.
-/// `jump_to` is the nearest hidden item (just below the window); the attention
-/// target is the closest attention item to the visible edge (lowest index).
+/// full item count; `state_of` is queried only over `(last..total)`. `jump_to`
+/// is the nearest hidden item (just below the window); each bucket's jump
+/// target is the closest item of that state to the visible edge (lowest index).
 pub(crate) fn side_below(
     window: ListWindow,
     total: usize,
-    is_attention: impl Fn(usize) -> bool,
+    state_of: impl Fn(usize) -> (AgentState, bool),
 ) -> OverflowSide {
     let hidden = window.hidden_below;
     if hidden == 0 {
         return OverflowSide::default();
     }
     let lo = window.last().map(|l| l + 1).unwrap_or(window.first);
-    let mut hidden_attention = 0;
-    let mut attention_jump_to = None;
-    for i in lo..total {
-        if is_attention(i) {
-            hidden_attention += 1;
-            if attention_jump_to.is_none() {
-                // First found is the lowest index (closest to the visible edge).
-                attention_jump_to = Some(i);
-            }
-        }
-    }
-    OverflowSide {
+    let mut side = OverflowSide {
         hidden,
-        hidden_attention,
         jump_to: lo,
-        attention_jump_to,
-    }
+        ..OverflowSide::default()
+    };
+    accumulate_buckets(&mut side, lo..total, false, state_of);
+    side
 }
 
-/// The jump target a badge click resolves to: the nearest hidden attention item
-/// when one exists on that side, else the nearest hidden item.
+/// The jump target a badge click resolves to: the nearest hidden item in the
+/// highest-priority non-idle bucket present (Blocked → Working → DoneUnseen),
+/// else the nearest hidden item of any kind.
 pub(crate) fn resolve_jump(side: OverflowSide) -> Option<usize> {
     if side.is_empty() {
-        None
-    } else {
-        Some(side.attention_jump_to.unwrap_or(side.jump_to))
+        return None;
     }
+    for bucket in BUCKET_ORDER {
+        if let Some(target) = side.bucket_jump(bucket) {
+            return Some(target);
+        }
+    }
+    Some(side.jump_to)
 }
 
 /// Superscript rendering of an attention count, capped at `⁹⁺`.
@@ -269,35 +373,47 @@ pub(crate) fn count_label(n: usize) -> String {
     }
 }
 
-/// Styled spans for an overflow badge: always the dim `+N` count span, plus an
-/// accent `●ᵏ` attention span when `hidden_attention > 0`.
-pub(crate) fn badge_spans(
-    hidden: usize,
-    hidden_attention: usize,
-    p: &Palette,
-) -> Vec<Span<'static>> {
+/// Styled spans for an overflow badge: always the dim `+N` count span, then one
+/// ` <glyph><count>` segment per non-zero bucket in `BUCKET_ORDER` (Blocked,
+/// Working, DoneUnseen). Each segment uses the bucket's distinct glyph + tone;
+/// zero-count buckets are omitted entirely (no `◐⁰`).
+pub(crate) fn badge_spans(side: OverflowSide, p: &Palette) -> Vec<Span<'static>> {
     let mut spans = vec![Span::styled(
-        format!("+{}", count_label(hidden)),
+        format!("+{}", count_label(side.hidden)),
         Style::default().fg(p.overlay0),
     )];
-    if hidden_attention > 0 {
+    for bucket in BUCKET_ORDER {
+        let count = side.bucket_count(bucket);
+        if count == 0 {
+            continue;
+        }
         spans.push(Span::styled(" ", Style::default()));
         spans.push(Span::styled(
-            format!("●{}", attention_superscript(hidden_attention)),
-            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+            format!("{}{}", bucket.glyph(), attention_superscript(count)),
+            Style::default()
+                .fg(bucket.color(p))
+                .add_modifier(Modifier::BOLD),
         ));
     }
     spans
 }
 
-/// Columns the `●ᵏ` attention portion alone occupies (no leading space): the
-/// dot plus the superscript count glyph(s). Measured by Unicode display width
-/// (not char count) to stay consistent with the rest of the tab-bar sizing —
-/// `●` and the superscript digits are East-Asian-ambiguous and may render two
-/// columns wide.
-pub(crate) fn badge_attention_width(hidden_attention: usize) -> u16 {
-    let s = format!("●{}", attention_superscript(hidden_attention));
-    u16::try_from(s.width()).unwrap_or(u16::MAX)
+/// Columns the bucket-badge portion occupies after the `+N` count: for each
+/// non-zero bucket, a leading space + the glyph + the superscript count.
+/// Measured by Unicode display width (not char count) to stay consistent with
+/// the rest of the tab-bar sizing — the glyphs and superscript digits are
+/// East-Asian-ambiguous and may render two columns wide.
+pub(crate) fn badge_attention_width(side: OverflowSide) -> u16 {
+    let mut w: u16 = 0;
+    for bucket in BUCKET_ORDER {
+        let count = side.bucket_count(bucket);
+        if count == 0 {
+            continue;
+        }
+        let s = format!(" {}{}", bucket.glyph(), attention_superscript(count));
+        w = w.saturating_add(u16::try_from(s.width()).unwrap_or(u16::MAX));
+    }
+    w
 }
 
 #[cfg(test)]
@@ -428,14 +544,182 @@ mod tests {
     }
 
     #[test]
-    fn badge_attention_width_counts_dot_plus_superscript() {
-        assert_eq!(badge_attention_width(2), 2); // "●²"
-        assert_eq!(badge_attention_width(42), 3); // "●⁹⁺"
+    fn badge_attention_width_sums_nonzero_buckets() {
+        // Single bucket: " " + glyph + superscript = 1 + 1 + 1 = 3.
+        let one = OverflowSide {
+            hidden: 2,
+            hidden_blocked: 2,
+            blocked_jump_to: Some(0),
+            ..OverflowSide::default()
+        };
+        assert_eq!(badge_attention_width(one), 3);
+        // All three non-zero: three " glyph^k" segments = 3 * 3 = 9.
+        let three = OverflowSide {
+            hidden: 3,
+            hidden_blocked: 1,
+            hidden_working: 1,
+            hidden_done_unseen: 1,
+            blocked_jump_to: Some(0),
+            working_jump_to: Some(1),
+            done_unseen_jump_to: Some(2),
+            ..OverflowSide::default()
+        };
+        assert_eq!(badge_attention_width(three), 9);
+        // No buckets: zero width.
+        let none = OverflowSide {
+            hidden: 4,
+            jump_to: 0,
+            ..OverflowSide::default()
+        };
+        assert_eq!(badge_attention_width(none), 0);
     }
 
     #[test]
     fn superscript_caps_at_nine_plus() {
         assert_eq!(attention_superscript(2), "²");
         assert_eq!(attention_superscript(42), "⁹⁺");
+    }
+
+    // --- Disaggregated-bucket tests (zellij-fidelity round 2, change 5) ---
+
+    fn states(seq: &[(AgentState, bool)]) -> impl Fn(usize) -> (AgentState, bool) + '_ {
+        move |i: usize| seq[i]
+    }
+
+    #[test]
+    fn side_above_accumulates_three_counts_in_one_walk() {
+        use AgentState::*;
+        // indices 0..4 hidden: blocked, working, idle-unseen, blocked.
+        let seq = [
+            (Blocked, false),
+            (Working, false),
+            (Idle, false),
+            (Blocked, false),
+            (Idle, true), // visible window starts here (index 4)
+        ];
+        let window = ListWindow {
+            first: 4,
+            count: 1,
+            hidden_above: 4,
+            hidden_below: 0,
+        };
+        let side = side_above(window, states(&seq));
+        assert_eq!(side.hidden, 4);
+        assert_eq!(side.hidden_blocked, 2);
+        assert_eq!(side.hidden_working, 1);
+        assert_eq!(side.hidden_done_unseen, 1);
+        // ABOVE keeps the highest index per bucket (closest to visible edge).
+        assert_eq!(side.blocked_jump_to, Some(3));
+        assert_eq!(side.working_jump_to, Some(1));
+        assert_eq!(side.done_unseen_jump_to, Some(2));
+    }
+
+    #[test]
+    fn side_below_accumulates_three_counts_in_one_walk() {
+        use AgentState::*;
+        // index 0 visible; 1..5 hidden: working, blocked, idle-unseen, working.
+        let seq = [
+            (Idle, true),
+            (Working, false),
+            (Blocked, false),
+            (Idle, false),
+            (Working, false),
+        ];
+        let window = ListWindow {
+            first: 0,
+            count: 1,
+            hidden_above: 0,
+            hidden_below: 4,
+        };
+        let side = side_below(window, seq.len(), states(&seq));
+        assert_eq!(side.hidden, 4);
+        assert_eq!(side.hidden_working, 2);
+        assert_eq!(side.hidden_blocked, 1);
+        assert_eq!(side.hidden_done_unseen, 1);
+        // BELOW keeps the lowest index per bucket (closest to visible edge).
+        assert_eq!(side.working_jump_to, Some(1));
+        assert_eq!(side.blocked_jump_to, Some(2));
+        assert_eq!(side.done_unseen_jump_to, Some(3));
+    }
+
+    #[test]
+    fn badge_spans_omits_zero_count_segments() {
+        let p = Palette::catppuccin();
+        // Only working > 0.
+        let side = OverflowSide {
+            hidden: 3,
+            hidden_working: 2,
+            working_jump_to: Some(0),
+            ..OverflowSide::default()
+        };
+        let text: String = badge_spans(side, &p)
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(text.contains('◐'), "working glyph present: {text}");
+        assert!(!text.contains('◉'), "no blocked glyph: {text}");
+        assert!(!text.contains('●'), "no done-unseen glyph: {text}");
+    }
+
+    #[test]
+    fn badge_spans_renders_all_three_in_bucket_order() {
+        let p = Palette::catppuccin();
+        let side = OverflowSide {
+            hidden: 3,
+            hidden_blocked: 1,
+            hidden_working: 2,
+            hidden_done_unseen: 3,
+            blocked_jump_to: Some(0),
+            working_jump_to: Some(1),
+            done_unseen_jump_to: Some(2),
+            ..OverflowSide::default()
+        };
+        let spans = badge_spans(side, &p);
+        // Glyph spans in order: ◉ (blocked), ◐ (working), ● (done-unseen).
+        let glyphs: Vec<String> = spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .filter(|c| c.contains('◉') || c.contains('◐') || c.contains('●'))
+            .collect();
+        assert_eq!(glyphs.len(), 3, "all three bucket glyphs: {glyphs:?}");
+        assert!(glyphs[0].starts_with('◉'), "blocked first: {glyphs:?}");
+        assert!(glyphs[1].starts_with('◐'), "working second: {glyphs:?}");
+        assert!(glyphs[2].starts_with('●'), "done-unseen third: {glyphs:?}");
+    }
+
+    #[test]
+    fn resolve_jump_priority_blocked_first() {
+        let side = OverflowSide {
+            hidden: 3,
+            hidden_working: 1,
+            hidden_blocked: 1,
+            working_jump_to: Some(1),
+            blocked_jump_to: Some(2),
+            jump_to: 0,
+            ..OverflowSide::default()
+        };
+        assert_eq!(resolve_jump(side), Some(2), "blocked outranks working");
+    }
+
+    #[test]
+    fn resolve_jump_done_unseen_then_fallback() {
+        // Only done-unseen populated → resolves to done-unseen.
+        let only_done = OverflowSide {
+            hidden: 2,
+            hidden_done_unseen: 1,
+            done_unseen_jump_to: Some(1),
+            jump_to: 0,
+            ..OverflowSide::default()
+        };
+        assert_eq!(resolve_jump(only_done), Some(1));
+        // No buckets → falls back to the nearest hidden item.
+        let plain = OverflowSide {
+            hidden: 2,
+            jump_to: 0,
+            ..OverflowSide::default()
+        };
+        assert_eq!(resolve_jump(plain), Some(0));
+        // Empty side → None.
+        assert_eq!(resolve_jump(OverflowSide::default()), None);
     }
 }

@@ -1295,14 +1295,20 @@ impl AppState {
     /// (FR8). `None` otherwise.
     pub(super) fn tab_overflow_indicator_at(&self, col: u16, row: u16) -> Option<usize> {
         let overflow = &self.view.tab_overflow;
+        // Jump priority Blocked → Working → Done-unseen → nearest hidden is
+        // centralized in `overflow::resolve_jump`; `jump_to` seeds the fallback.
         if let Some(group) = overflow.left {
             if Self::hit(overflow.left_hit_area, col, row) {
-                return Some(group.attention_jump_to.unwrap_or(group.jump_to));
+                let mut side = group.side;
+                side.jump_to = group.jump_to;
+                return crate::ui::overflow::resolve_jump(side).or(Some(group.jump_to));
             }
         }
         if let Some(group) = overflow.right {
             if Self::hit(overflow.right_hit_area, col, row) {
-                return Some(group.attention_jump_to.unwrap_or(group.jump_to));
+                let mut side = group.side;
+                side.jump_to = group.jump_to;
+                return crate::ui::overflow::resolve_jump(side).or(Some(group.jump_to));
             }
         }
         None
