@@ -52,6 +52,7 @@ mod cli;
 mod client;
 mod config;
 mod detect;
+mod env;
 mod events;
 mod ghostty;
 mod handoff_runtime;
