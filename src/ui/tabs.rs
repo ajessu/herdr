@@ -505,6 +505,15 @@ fn centered_active_fill(
     let mut lo = active;
     let mut hi = active;
 
+    // Accumulated width of the tabs added to each side so far. zellij balances
+    // the centered-active fill by ACCUMULATED WIDTH (`total_left`/`total_right`
+    // in `populate_tabs_in_tab_line`), not by tab count — for tabs of unequal
+    // width, count-balance would off-center the active tab. Match zellij: add
+    // to whichever side has less width so far (ties + a non-fitting other side
+    // both bias left, mirroring zellij's `total_left <= total_right || !right_fits`).
+    let mut total_left: u16 = 0;
+    let mut total_right: u16 = 0;
+
     loop {
         let can_extend_left = lo > 0;
         let can_extend_right = hi + 1 < n;
@@ -512,29 +521,21 @@ fn centered_active_fill(
             break;
         }
 
-        // Prefer the lighter side (fewer tabs added so far) for balance; on a
-        // tie, extend left first (matches zellij's bias toward earlier tabs).
-        let left_count = active - lo;
-        let right_count = hi - active;
-        let prefer_left = can_extend_left && (left_count <= right_count || !can_extend_right);
+        let left_fits = can_extend_left && footprint(lo - 1, hi) <= area.width;
+        let right_fits = can_extend_right && footprint(lo, hi + 1) <= area.width;
 
+        // zellij: `if (total_left <= total_right || !right_fits) && left_fits {
+        // add left } else if right_fits { add right }`. Balance by accumulated
+        // width; a tie or a non-fitting right side both prefer left.
         let mut progressed = false;
-        if prefer_left {
-            if footprint(lo - 1, hi) <= area.width {
-                lo -= 1;
-                progressed = true;
-            } else if can_extend_right && footprint(lo, hi + 1) <= area.width {
-                hi += 1;
-                progressed = true;
-            }
-        } else if can_extend_right {
-            if footprint(lo, hi + 1) <= area.width {
-                hi += 1;
-                progressed = true;
-            } else if can_extend_left && footprint(lo - 1, hi) <= area.width {
-                lo -= 1;
-                progressed = true;
-            }
+        if (total_left <= total_right || !right_fits) && left_fits {
+            lo -= 1;
+            total_left = total_left.saturating_add(tab_width(&chromes[lo], mode));
+            progressed = true;
+        } else if right_fits {
+            hi += 1;
+            total_right = total_right.saturating_add(tab_width(&chromes[hi], mode));
+            progressed = true;
         }
 
         if !progressed {
@@ -1039,21 +1040,22 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
         let active = idx == ws.active_tab;
         let bg = tab_bg(p, idx, active, separator);
-        let interior_style = if active {
-            let base = Style::default().fg(panel_contrast_fg(p)).bg(bg);
-            if tab.is_auto_named() {
-                base.add_modifier(Modifier::DIM)
-            } else {
-                base.add_modifier(Modifier::BOLD)
-            }
+        // zellij `render_tab` paints EVERY tab label bold (active and inactive
+        // alike) and distinguishes them only by color — the selected ribbon's
+        // base/background vs the unselected ribbon's. herdr mirrors that: the
+        // active tab uses `panel_contrast_fg` on the accent bg, inactive tabs
+        // use the readable `text` color on the surface bg, and both are BOLD.
+        // Auto-named tabs keep a herdr-only "unnamed" hint, but expressed as a
+        // dimmer color (`overlay1`) rather than by dropping bold or dimming the
+        // focused tab — zellij never renders a non-bold or dimmed tab.
+        let fg = if active {
+            panel_contrast_fg(p)
         } else if tab.is_auto_named() {
-            Style::default()
-                .fg(p.overlay0)
-                .bg(bg)
-                .add_modifier(Modifier::DIM)
+            p.overlay1
         } else {
-            Style::default().fg(p.overlay1).bg(bg)
+            p.text
         };
+        let interior_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
 
         let area_right = area.x + area.width;
         if separator == SeparatorStyle::Powerline && rect.width >= TAB_SEPARATOR_OVERHEAD {
@@ -1936,6 +1938,47 @@ mod tests {
                 "active tab interior cell at x={x} should have accent bg"
             );
         }
+    }
+
+    #[test]
+    fn render_all_tab_labels_are_bold_like_zellij() {
+        // zellij `render_tab` paints every tab label bold — active AND inactive
+        // alike — distinguishing them only by color. herdr matches: the name
+        // glyph of both the active and an inactive tab must carry BOLD.
+        use ratatui::style::Modifier;
+        let app = app_with_tab_bar(&["ab", "cd", "ef"], 0, Rect::new(0, 0, 60, 1), false);
+        let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+        for (idx, first_ch) in [(0usize, 'a'), (1usize, 'c')] {
+            let rect = app.view.tab_hit_areas[idx];
+            let cell = (rect.x..rect.x + rect.width)
+                .map(|x| &buffer[(x, 0)])
+                .find(|c| c.symbol() == first_ch.to_string())
+                .unwrap_or_else(|| panic!("tab {idx} name glyph not found"));
+            assert!(
+                cell.modifier.contains(Modifier::BOLD),
+                "tab {idx} label must be bold (zellij bolds every tab)"
+            );
+            assert!(
+                !cell.modifier.contains(Modifier::DIM),
+                "tab {idx} label must not be dimmed (zellij has no dim tabs)"
+            );
+        }
+    }
+
+    #[test]
+    fn render_inactive_tab_fg_uses_text_not_overlay() {
+        // zellij inactive fg = ribbon_unselected.base (the readable text color),
+        // mapped in herdr to `palette.text` — NOT the muted `overlay1` that made
+        // inactive labels low-contrast before round 3.
+        let app = app_with_tab_bar(&["ab", "cd", "ef"], 0, Rect::new(0, 0, 60, 1), false);
+        let p = &app.palette;
+        let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+        let rect = app.view.tab_hit_areas[1]; // inactive, non-auto-named
+        let cell = (rect.x..rect.x + rect.width)
+            .map(|x| &buffer[(x, 0)])
+            .find(|c| c.symbol() == "c")
+            .expect("tab 1 name glyph not found");
+        assert_eq!(cell.fg, p.text, "inactive tab fg should be palette.text");
     }
 
     #[test]

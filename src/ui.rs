@@ -907,7 +907,12 @@ mod tests {
     }
 
     #[test]
-    fn tab_bar_dims_auto_named_tabs_and_emphasizes_custom_tabs() {
+    fn tab_bar_bolds_every_tab_and_marks_auto_named_by_color() {
+        // zellij bolds every tab label (active AND inactive) and never dims a
+        // tab; it distinguishes tabs only by color. herdr matches: both the
+        // inactive auto-named tab and the active custom tab render BOLD, never
+        // DIM. The herdr-only "auto-named" signal survives as a dimmer fg color
+        // (`overlay1`) on the inactive tab, not as a DIM modifier.
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
         let custom_tab = ws.test_add_tab(Some("logs"));
@@ -930,10 +935,14 @@ mod tests {
         let auto_style = buffer[(auto_rect.x + 1, auto_rect.y)].style();
         let custom_style = buffer[(custom_rect.x + 1, custom_rect.y)].style();
 
-        assert_eq!(auto_style.fg, Some(app.palette.overlay0));
-        assert!(auto_style.add_modifier.contains(Modifier::DIM));
+        // Inactive auto-named tab: dimmer fg color, but BOLD and never DIM.
+        assert_eq!(auto_style.fg, Some(app.palette.overlay1));
+        assert!(auto_style.add_modifier.contains(Modifier::BOLD));
+        assert!(!auto_style.add_modifier.contains(Modifier::DIM));
+        // Active custom tab: contrast fg on accent, BOLD.
         assert_eq!(custom_style.fg, Some(app.palette.panel_bg));
         assert!(custom_style.add_modifier.contains(Modifier::BOLD));
+        assert!(!custom_style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
