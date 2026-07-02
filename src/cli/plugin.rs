@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
@@ -1321,7 +1321,7 @@ fn run_plugin_build_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    scrub_herdr_runtime_env(&mut child);
+    crate::env::scrub_herdr_runtime_env(&mut child);
 
     let mut child = match child.spawn() {
         Ok(child) => child,
@@ -1497,26 +1497,6 @@ fn read_tail_capped_output(mut reader: impl Read, cap: usize) -> CappedOutput {
     CappedOutput {
         text: String::from_utf8_lossy(&out).to_string(),
         truncated,
-    }
-}
-
-fn scrub_herdr_runtime_env(command: &mut Command) {
-    for key in [
-        crate::api::SOCKET_PATH_ENV_VAR,
-        crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
-        crate::session::SESSION_ENV_VAR,
-        "HERDR_BIN_PATH",
-        "HERDR_ENV",
-        "HERDR_WORKSPACE_ID",
-        "HERDR_TAB_ID",
-        "HERDR_PANE_ID",
-    ] {
-        command.env_remove(key);
-    }
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("HERDR_PLUGIN_") {
-            command.env_remove(key);
-        }
     }
 }
 
