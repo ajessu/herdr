@@ -9,6 +9,9 @@
 - Added configurable agent status dots on tab bar labels with `[ui] show_tab_status`. Three modes: `"off"` (default, no dots), `"attention"` (dots for blocked and done tabs only), and `"all"` (dots for all known agent states). Dot colors match the sidebar's existing state palette. Enabled modes reserve a constant-width slot per tab to prevent layout jitter on state transitions.
 - Added a `break_pane_to_tab` keybinding (default `prefix+!`) that breaks the focused pane out into a new tab in the same workspace, keeping its terminal process and focus. Single-pane tabs are left unchanged.
 
+### Breaking Changes
+- `experimental.allow_nested` now defaults to `true`. Herdr no longer blocks nested launches by default. A same-server recursion check prevents the most dangerous case (attaching to your own parent server, which would create a recursive rendering loop). Set `allow_nested = false` in your config to restore the old blocking behavior.
+
 ### Changed
 - The sidebar is now responsive by default (see `sidebar_width_ratio` above). On first launch after upgrading, a sidebar width you had previously dragged to a custom size resets once to the responsive width; drag the divider again to re-pin it (or set `sidebar_width_ratio = 0` to restore fixed-width behavior). Subsequent manual pins persist across restarts as before.
 

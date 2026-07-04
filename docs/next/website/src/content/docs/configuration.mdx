@@ -466,14 +466,23 @@ For how pane screen history differs from live persistence, snapshot restore, nat
 
 ## Nested launches
 
-Herdr normally protects you from launching Herdr inside Herdr.
+Herdr allows launching herdr inside an existing herdr pane by default. A same-server recursion check prevents the dangerous case: attaching to your own parent server, which would create a recursive rendering loop.
+
+```toml
+[experimental]
+allow_nested = true
+```
+
+When `allow_nested` is true (the default), running `herdr` inside a herdr pane is permitted as long as the resolved API socket differs from the inherited parent socket. If they match, herdr refuses with an error explaining the recursion and suggesting `herdr --remote <host>` for tunnels.
+
+Set `allow_nested = false` to restore the old blanket block that prevents any nested launch regardless of target:
 
 ```toml
 [experimental]
 allow_nested = false
 ```
 
-Only enable nested launches for testing.
+The recursion check is a UX safety net, not a security boundary. A process can clear `HERDR_SOCKET_PATH` or `HERDR_ENV` to bypass it. The check prevents accidental feedback loops, not adversarial nesting.
 
 ## Kitty graphics
 
