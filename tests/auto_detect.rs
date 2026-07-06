@@ -729,7 +729,7 @@ fn no_session_writes_startup_logs_to_monolith_file() {
 }
 
 #[test]
-fn auto_detect_respects_nested_guard_before_auto_attach() {
+fn same_server_recursion_check_blocks_self_attach() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -766,12 +766,12 @@ fn auto_detect_respects_nested_guard_before_auto_attach() {
 
     assert!(
         !output.status.success(),
-        "nested launch should fail before auto-attach"
+        "same-server recursion should be blocked"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("nested herdr is disabled by default"),
-        "stderr should mention nested-launch guard: {stderr}"
+        stderr.contains("refusing to attach to own parent server"),
+        "stderr should mention recursion check: {stderr}"
     );
 
     let after = read_json_line({
@@ -789,7 +789,51 @@ fn auto_detect_respects_nested_guard_before_auto_attach() {
         .unwrap_or(0);
     assert_eq!(
         after_count, baseline_count,
-        "nested launch should not auto-attach or mutate server state"
+        "recursion check should not auto-attach or mutate server state"
+    );
+
+    cleanup_spawned_herdr(server, base);
+}
+
+#[test]
+fn auto_detect_respects_nested_guard_when_allow_nested_false() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let config_dir = config_home.join("herdr-dev");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[experimental]\nallow_nested = false\n",
+    )
+    .unwrap();
+
+    let server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("HERDR_SOCKET_PATH", &api_socket)
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .env("HERDR_ENV", "1")
+        .env_remove("HERDR_CONFIG_PATH")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "nested launch should fail with allow_nested=false"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nested herdr is disabled by default"),
+        "stderr should mention nested-launch guard: {stderr}"
     );
 
     cleanup_spawned_herdr(server, base);

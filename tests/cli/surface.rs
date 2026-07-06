@@ -562,7 +562,14 @@ fn api_schema_output_writes_bundled_schema_to_file() {
 #[test]
 fn explicit_client_command_respects_nested_guard() {
     let base = unique_test_dir();
-    fs::create_dir_all(&base).unwrap();
+    let config_dir = base.join(app_dir_name());
+    fs::create_dir_all(&config_dir).unwrap();
+    // Nesting is allowed by default; disable it so the guard fires.
+    fs::write(
+        config_dir.join("config.toml"),
+        "[experimental]\nallow_nested = false\n",
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .arg("client")
