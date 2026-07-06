@@ -281,6 +281,31 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
 }
 
 // ---------------------------------------------------------------------------
+// Same-server recursion check
+// ---------------------------------------------------------------------------
+
+/// Returns true if the current process would recursively attach to its own
+/// parent herdr server. This is a UX safety net, not a security boundary.
+pub(crate) fn is_same_server_recursion(
+    herdr_env: Option<&str>,
+    inherited_api_socket: Option<&str>,
+    resolved_api_socket: &Path,
+) -> bool {
+    if herdr_env != Some(crate::HERDR_ENV_VALUE) {
+        return false;
+    }
+    let Some(parent_socket) = inherited_api_socket else {
+        return false;
+    };
+    let parent_path = Path::new(parent_socket);
+    let canon_parent =
+        std::fs::canonicalize(parent_path).unwrap_or_else(|_| parent_path.to_path_buf());
+    let canon_resolved = std::fs::canonicalize(resolved_api_socket)
+        .unwrap_or_else(|_| resolved_api_socket.to_path_buf());
+    canon_parent == canon_resolved
+}
+
+// ---------------------------------------------------------------------------
 // Auto-detect launch
 // ---------------------------------------------------------------------------
 
@@ -569,6 +594,73 @@ mod tests {
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn is_same_server_recursion_detects_match() {
+        let dir = unique_test_dir("recursion-match");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        std::fs::write(&sock, b"").unwrap();
+
+        assert!(is_same_server_recursion(
+            Some(crate::HERDR_ENV_VALUE),
+            Some(sock.to_str().unwrap()),
+            &sock,
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn is_same_server_recursion_ignores_different_paths() {
+        let dir = unique_test_dir("recursion-diff");
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent = dir.join("parent.sock");
+        let resolved = dir.join("other.sock");
+        std::fs::write(&parent, b"").unwrap();
+        std::fs::write(&resolved, b"").unwrap();
+
+        assert!(!is_same_server_recursion(
+            Some(crate::HERDR_ENV_VALUE),
+            Some(parent.to_str().unwrap()),
+            &resolved,
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn is_same_server_recursion_ignores_without_herdr_env() {
+        let dir = unique_test_dir("recursion-noenv");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        std::fs::write(&sock, b"").unwrap();
+
+        assert!(!is_same_server_recursion(
+            None,
+            Some(sock.to_str().unwrap()),
+            &sock,
+        ));
+        assert!(!is_same_server_recursion(
+            Some("0"),
+            Some(sock.to_str().unwrap()),
+            &sock,
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn is_same_server_recursion_ignores_without_inherited_socket() {
+        let dir = unique_test_dir("recursion-nosock");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        std::fs::write(&sock, b"").unwrap();
+
+        assert!(!is_same_server_recursion(
+            Some(crate::HERDR_ENV_VALUE),
+            None,
+            &sock,
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

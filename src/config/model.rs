@@ -632,10 +632,10 @@ impl Default for RemoteConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct ExperimentalConfig {
-    /// Allow launching herdr inside an existing herdr pane. Default: false.
+    /// Allow launching herdr inside an existing herdr pane. Default: true.
     pub allow_nested: bool,
     /// Experimental local Kitty graphics rendering for attached clients. Default: false.
     pub kitty_graphics: bool,
@@ -671,6 +671,20 @@ pub struct ExperimentalConfig {
     /// source when prefix mode exits. macOS only; a no-op elsewhere and a
     /// best-effort no-op if the switch fails. Default: false.
     pub switch_ascii_input_source_in_prefix: bool,
+}
+
+impl Default for ExperimentalConfig {
+    fn default() -> Self {
+        Self {
+            allow_nested: true,
+            kitty_graphics: false,
+            pane_history: false,
+            reveal_hidden_cursor_for_cjk_ime: false,
+            cjk_ime_agents: Vec::new(),
+            cjk_ime_cursor_shape: ImeCursorShape::default(),
+            switch_ascii_input_source_in_prefix: false,
+        }
+    }
 }
 
 impl Default for KeysConfig {
@@ -1602,5 +1616,27 @@ break_pane_to_tab = "shift+b"
             config.keys.tmux.break_pane_to_tab,
             BindingConfig::one("shift+b")
         );
+    }
+
+    #[test]
+    fn allow_nested_defaults_true_when_missing_from_toml() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.experimental.allow_nested);
+
+        let config: Config = toml::from_str("[experimental]\n").unwrap();
+        assert!(config.experimental.allow_nested);
+    }
+
+    #[test]
+    fn allow_nested_respects_explicit_false() {
+        let config: Config =
+            toml::from_str("[experimental]\nallow_nested = false\n").unwrap();
+        assert!(!config.experimental.allow_nested);
+    }
+
+    #[test]
+    fn allow_nested_rust_default_is_true() {
+        let config = Config::default();
+        assert!(config.experimental.allow_nested);
     }
 }

@@ -1075,7 +1075,13 @@ fn root_help_hides_explicit_client_command() {
 #[test]
 fn explicit_client_command_respects_nested_guard() {
     let base = unique_test_dir();
-    fs::create_dir_all(&base).unwrap();
+    let config_dir = base.join("herdr-dev");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[experimental]\nallow_nested = false\n",
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .arg("client")
