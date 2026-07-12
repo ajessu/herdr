@@ -134,6 +134,10 @@ impl OverflowSide {
     }
 
     /// Total badge-worthy (non-idle) hidden items across all three buckets.
+    /// Production sizing now derives indicator width from the count and badge
+    /// segments directly; the aggregate remains the assertion surface for the
+    /// hidden-attention tests across the tab bar and sidebar.
+    #[cfg(test)]
     pub fn hidden_attention(&self) -> usize {
         self.hidden_working + self.hidden_blocked + self.hidden_done_unseen
     }
@@ -364,7 +368,9 @@ pub(crate) fn attention_superscript(n: usize) -> String {
     }
 }
 
-/// Plain hidden-count text, capped at `9+` (matches the tab overflow cap).
+/// Plain hidden-count text, capped at `9+`. Used by the sidebar badges; the
+/// tab bar's overflow indicator composes its own uncapped zellij-format count
+/// and does not go through this cap.
 pub(crate) fn count_label(n: usize) -> String {
     if n > 9 {
         "9+".to_string()
@@ -382,6 +388,17 @@ pub(crate) fn badge_spans(side: OverflowSide, p: &Palette) -> Vec<Span<'static>>
         format!("+{}", count_label(side.hidden)),
         Style::default().fg(p.overlay0),
     )];
+    spans.extend(bucket_segment_spans(side, p));
+    spans
+}
+
+/// Just the per-bucket badge segments (no leading `+N` count span): one
+/// ` <glyph><count>` segment per non-zero bucket in `BUCKET_ORDER`. Split out
+/// so the tab bar can compose its own uncapped count text (zellij's full-count
+/// ` +N ` format) ahead of the segments, while `badge_spans` — and with it the
+/// sidebar's capped `+9+` badge — stays byte-for-byte unchanged.
+pub(crate) fn bucket_segment_spans(side: OverflowSide, p: &Palette) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
     for bucket in BUCKET_ORDER {
         let count = side.bucket_count(bucket);
         if count == 0 {
@@ -578,6 +595,52 @@ mod tests {
     fn superscript_caps_at_nine_plus() {
         assert_eq!(attention_superscript(2), "²");
         assert_eq!(attention_superscript(42), "⁹⁺");
+    }
+
+    #[test]
+    fn count_label_caps_at_nine_plus() {
+        // The sidebar's badge cap must survive the tab bar going uncapped
+        // (the tab bar composes its own full-count text and never calls this).
+        assert_eq!(count_label(3), "3");
+        assert_eq!(count_label(9), "9");
+        assert_eq!(count_label(10), "9+");
+        assert_eq!(count_label(100), "9+");
+        assert_eq!(count_label(10000), "9+");
+    }
+
+    #[test]
+    fn badge_spans_count_stays_capped_past_nine() {
+        // Sidebar badge at a >9 hidden count still renders `+9+`.
+        let p = Palette::catppuccin();
+        let side = OverflowSide {
+            hidden: 12,
+            ..OverflowSide::default()
+        };
+        let spans = badge_spans(side, &p);
+        assert_eq!(spans[0].content.as_ref(), "+9+");
+    }
+
+    #[test]
+    fn bucket_segment_spans_match_badge_spans_tail() {
+        // `badge_spans` == `+N` count span followed by `bucket_segment_spans`,
+        // so the tab bar composing its own count over the shared segments
+        // renders the identical bucket portion the sidebar shows.
+        let p = Palette::catppuccin();
+        let side = OverflowSide {
+            hidden: 5,
+            hidden_blocked: 2,
+            hidden_working: 1,
+            blocked_jump_to: Some(1),
+            working_jump_to: Some(2),
+            ..OverflowSide::default()
+        };
+        let full = badge_spans(side, &p);
+        let segments = bucket_segment_spans(side, &p);
+        assert_eq!(full.len(), segments.len() + 1);
+        for (a, b) in full[1..].iter().zip(segments.iter()) {
+            assert_eq!(a.content, b.content);
+            assert_eq!(a.style, b.style);
+        }
     }
 
     // --- Disaggregated-bucket tests (zellij-fidelity round 2, change 5) ---

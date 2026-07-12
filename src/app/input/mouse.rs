@@ -1262,18 +1262,13 @@ impl AppState {
     }
 
     pub(super) fn tab_at(&self, col: u16, row: u16) -> Option<usize> {
-        self.view
-            .tab_hit_areas
-            .iter()
-            .enumerate()
-            .find_map(|(idx, area)| {
-                (area.width > 0
-                    && row >= area.y
-                    && row < area.y + area.height
-                    && col >= area.x
-                    && col < area.x + area.width)
-                    .then_some(idx)
-            })
+        // Column containment delegates to the shared `hit_index` predicate
+        // (also exercised directly by the tab-bar round-trip tests); the row
+        // check is done once against the matched rect since every tab rect
+        // shares the bar's single row.
+        let idx = crate::ui::hit_index(&self.view.tab_hit_areas, col)?;
+        let area = self.view.tab_hit_areas.get(idx)?;
+        (row >= area.y && row < area.y + area.height).then_some(idx)
     }
 
     pub(super) fn on_tab_bar(&self, col: u16, row: u16) -> bool {

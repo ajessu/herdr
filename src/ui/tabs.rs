@@ -13,22 +13,21 @@ use super::widgets::panel_contrast_fg;
 use crate::app::AppState;
 use crate::config::TabStatusMode;
 
-const MIN_TAB_WIDTH: u16 = 10;
 const NEW_TAB_WIDTH: u16 = 3;
 /// Each tab owns its own left + right separator columns (zellij convention).
 /// Adjacent tabs abut directly: the right separator of T<sub>N</sub> sits next
 /// to the left separator of T<sub>N+1</sub>, producing two back-to-back wedges
 /// that blend against `panel_bg` from both sides.
 const TAB_SEPARATOR_OVERHEAD: u16 = 2;
-/// Width of a collapsed `←+N` / `+N→` overflow indicator, rendered as a proper
-/// zellij tile (left arrow + interior + right arrow). Six cells = 2 separator
-/// cols + 4 interior cols, keeping a touch-adequate hit zone (NFR5) — never a
-/// 1-cell target — and fitting the widest label (`←+9+` / `+9+→`) without
-/// clipping. Under `AlternatingBg` the 2 separator cols become interior
-/// padding.
-const OVERFLOW_INDICATOR_WIDTH: u16 = 6;
-/// Interior width of an overflow indicator = total minus the 2 separator cols.
-const OVERFLOW_INDICATOR_INTERIOR: u16 = OVERFLOW_INDICATOR_WIDTH - TAB_SEPARATOR_OVERHEAD;
+/// Base width of a collapsed ` ← +N ` / ` +N → ` overflow indicator, rendered
+/// as a proper zellij tile (left arrow + interior + right arrow). Eight cells
+/// = 2 separator cols + 6 interior cols: zellij's single-digit ` ← +N `
+/// interior. The tile grows past this base with the count (full count, `many`
+/// past 9999 — zellij `left_more_message`/`right_more_message`) and the
+/// mouse-chrome badge segments; `tab_indicator_width` computes the demanded
+/// width per side. Also a touch-adequate hit zone (NFR5) — never a 1-cell
+/// target. Under `AlternatingBg` the 2 separator cols become interior padding.
+const OVERFLOW_INDICATOR_WIDTH: u16 = 8;
 
 /// The Powerline "right arrow" separator glyph (U+E0B0). Rendered only when
 /// `SeparatorStyle::Powerline` is selected; the `AlternatingBg` path emits zero
@@ -102,29 +101,6 @@ fn is_bidi_override(c: char) -> bool {
     )
 }
 
-/// Truncate `s` to at most `budget` display columns, appending `…` (1 column)
-/// when anything was dropped. Accumulates per-grapheme display width so wide
-/// (CJK) glyphs are never split across the truncation boundary.
-fn truncate_to_width(s: &str, budget: u16) -> String {
-    if budget == 0 {
-        return String::new();
-    }
-    // Reserve one column for the trailing ellipsis.
-    let content_budget = usize::from(budget.saturating_sub(1));
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in s.chars() {
-        let ch_w = ch.to_string().width();
-        if used + ch_w > content_budget {
-            break;
-        }
-        out.push(ch);
-        used += ch_w;
-    }
-    out.push('…');
-    out
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct TabStatusDot {
     pub glyph: &'static str,
@@ -150,60 +126,56 @@ pub(crate) struct TabChrome {
 }
 
 impl TabChrome {
-    pub fn display_width(&self, mode: TabStatusMode) -> u16 {
-        let status_w: u16 = if matches!(mode, TabStatusMode::Off) {
-            0
-        } else {
-            2
-        };
+    /// Columns the inline status dot occupies: the dot's measured display
+    /// width plus one separating space, or 0 when this chrome has no dot.
+    /// Single source of truth shared by `display_width` (sizing) and
+    /// `to_spans` (fill) — if the two derived this independently a tab could
+    /// be sized for a slot the fill doesn't emit, or vice versa.
+    fn status_cols(&self) -> u16 {
+        self.status
+            .as_ref()
+            .map(|dot| {
+                u16::try_from(dot.glyph.width())
+                    .unwrap_or(u16::MAX)
+                    .saturating_add(1)
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn display_width(&self) -> u16 {
         // Unicode display width (not char count): CJK/wide glyphs occupy two
         // columns and combining/ZWJ sequences fewer, so char count would
         // mis-size the tab and break the position→index round-trip. The
         // sanitized name is what actually reaches the buffer, so measure it.
         let name_w = u16::try_from(sanitize_display_name(&self.name).width()).unwrap_or(u16::MAX);
         let mod_w: u16 = if self.zoomed { 2 } else { 0 };
-        status_w.saturating_add(name_w).saturating_add(mod_w)
+        self.status_cols()
+            .saturating_add(name_w)
+            .saturating_add(mod_w)
     }
 
-    /// Render the tab label into spans padded to `rect_width`. The name is
-    /// sanitized (control/bidi stripped) at this render chokepoint. The active
-    /// tab is always laid out at its natural width, so truncation only happens
-    /// for a single over-wide tab that alone exceeds the bar — in that case the
-    /// name is shortened by Unicode display width with a trailing `…`.
-    pub fn to_spans(&self, mode: TabStatusMode, rect_width: u16) -> Vec<Span<'static>> {
+    /// Render the tab label into spans padded to `rect_width` (the tab's
+    /// interior, excluding the 2 separator cols). The name is sanitized
+    /// (control/bidi stripped) at this render chokepoint. Interior layout is
+    /// zellij's ` name ` — one space each side — with the status dot inline
+    /// (` ● name `) only when present. The name is never truncated: a single
+    /// over-wide active tab renders at natural width and the render path clips
+    /// it at the bar edge with no ellipsis, matching zellij.
+    pub fn to_spans(&self, rect_width: u16) -> Vec<Span<'static>> {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(6);
 
         // Leading space
         spans.push(Span::raw(" "));
 
-        // Status slot (only when mode != Off)
-        if !matches!(mode, TabStatusMode::Off) {
-            if let Some(ref dot) = self.status {
-                spans.push(Span::styled(dot.glyph, dot.style));
-                spans.push(Span::raw(" "));
-            } else {
-                spans.push(Span::raw("  "));
-            }
+        // Inline status dot (only when present): dot + separating space,
+        // exactly the `status_cols()` columns `display_width` sized for.
+        if let Some(ref dot) = self.status {
+            spans.push(Span::styled(dot.glyph, dot.style));
+            spans.push(Span::raw(" "));
         }
 
-        let status_w: u16 = if matches!(mode, TabStatusMode::Off) {
-            0
-        } else {
-            2
-        };
-        let mod_w: u16 = if self.zoomed { 2 } else { 0 };
-        // 1 col for the leading space, plus the status slot and zoom suffix.
-        let name_budget = rect_width
-            .saturating_sub(1)
-            .saturating_sub(status_w)
-            .saturating_sub(mod_w);
         let name = sanitize_display_name(&self.name);
-        let name_cols = u16::try_from(name.width()).unwrap_or(u16::MAX);
-        if name_budget > 0 && name_cols > name_budget {
-            spans.push(Span::raw(truncate_to_width(&name, name_budget)));
-        } else {
-            spans.push(Span::raw(name.into_owned()));
-        }
+        spans.push(Span::raw(name.into_owned()));
 
         // Zoom modifier
         if self.zoomed {
@@ -388,6 +360,8 @@ pub(crate) struct TabBarView {
     /// keep `width == 0`; visible tabs round-trip through `tab_at`.
     pub tab_hit_areas: Vec<Rect>,
     pub tab_chrome: Vec<TabChrome>,
+    /// Diagnostics only: dot presence is baked into each `TabChrome.status`
+    /// at chrome-build time, so rendering no longer consults the mode.
     pub tab_status_mode: TabStatusMode,
     /// Collapsed hidden-tab indicators on each overflowing side, with their
     /// clickable/marker rects. `None`/default when nothing overflows.
@@ -405,42 +379,72 @@ fn chrome_is_attention(state: crate::detect::AgentState, seen: bool) -> bool {
         || matches!((state, seen), (AgentState::Idle, false))
 }
 
+/// Uncapped hidden-count text for the zellij-format overflow indicator: the
+/// full count, or `many` past 9999 — matching zellij's `left_more_message` /
+/// `right_more_message`. Tab-bar-local on purpose: the sidebar's badge keeps
+/// the capped `overflow::count_label` (`9+`), which this does NOT replace.
+fn indicator_count_text(count: usize) -> String {
+    if count > 9999 {
+        "many".to_string()
+    } else {
+        count.to_string()
+    }
+}
+
+/// Display columns of `indicator_count_text(count)`, computed arithmetically
+/// so the sizing path (which runs inside the per-frame reserve-convergence
+/// loop) allocates nothing. Exact because the count digits are width-1 ASCII
+/// and `many` is 4 columns; pinned to the text by a lockstep test.
+fn indicator_count_cols(count: usize) -> u16 {
+    if count > 9999 {
+        return 4;
+    }
+    let mut n = count;
+    let mut digits = 1u16;
+    while n >= 10 {
+        n /= 10;
+        digits += 1;
+    }
+    digits
+}
+
 /// Columns an overflow indicator tile needs for `count` hidden tabs whose
 /// disaggregated badge breakdown is `side`. The tile owns 2 separator cols
-/// (left + right Powerline arrow) plus its interior. Without any badge it is
-/// the base `OVERFLOW_INDICATOR_WIDTH` (touch-adequate, NFR5); with badges the
-/// interior grows to fit `←+N` plus each non-zero bucket segment. Badges only
-/// show under mouse chrome (non-mouse markers are count-only).
+/// (left + right Powerline arrow) plus the zellij ` ← +N ` / ` +N → `
+/// interior: leading space + arrow + space + `+` + count text + trailing
+/// space = 5 columns plus the count, sized from the UNCAPPED count on every
+/// path so the reserve always matches the render. Badge segments (mouse
+/// chrome only) sit between the count and the trailing space and widen the
+/// interior further. Count columns come from the allocation-free
+/// `indicator_count_cols` since this runs in the per-frame sizing loop.
 fn tab_indicator_width(
     count: usize,
     side: super::overflow::OverflowSide,
     mouse_chrome: bool,
 ) -> u16 {
-    if !mouse_chrome || side.hidden_attention() == 0 {
-        return OVERFLOW_INDICATOR_WIDTH;
-    }
-    // Interior = directional-arrow(1) + "+"(1) + count text + badge columns
-    // (`badge_attention_width` already includes a leading space per non-zero
-    // bucket segment); plus the 2 separator cols for the tile's Powerline
-    // wedges. Count text is measured by display width to match the rest of the
-    // tab-bar sizing.
-    let count_w = u16::try_from(super::overflow::count_label(count).width()).unwrap_or(u16::MAX);
-    let badge_w = super::overflow::badge_attention_width(side);
-    let interior = (2 + count_w + badge_w).max(OVERFLOW_INDICATOR_INTERIOR);
+    let count_w = indicator_count_cols(count);
+    let badge_w = if mouse_chrome {
+        super::overflow::badge_attention_width(side)
+    } else {
+        0
+    };
+    let interior = 5u16.saturating_add(count_w).saturating_add(badge_w);
     interior
         .saturating_add(TAB_SEPARATOR_OVERHEAD)
         .max(OVERFLOW_INDICATOR_WIDTH)
 }
 
-fn tab_width(chrome: &TabChrome, mode: TabStatusMode) -> u16 {
-    // Interior (text + " name " padding) + 2 separator cols owned by the tab
-    // (left arrow + right arrow under Powerline, equivalent padding under
-    // AlternatingBg). Adjacent tabs abut, so there is no extra inter-tab gap.
+fn tab_width(chrome: &TabChrome) -> u16 {
+    // Interior (` name ` — one space each side, zellij tab.rs:59) + 2
+    // separator cols owned by the tab (left arrow + right arrow under
+    // Powerline, equivalent padding under AlternatingBg). Adjacent tabs abut,
+    // so there is no extra inter-tab gap. No minimum-width floor: zellij has
+    // none, and the tightest real tab (1-col name) is still 5 cols and
+    // clickable.
     chrome
-        .display_width(mode)
-        .saturating_add(4)
+        .display_width()
+        .saturating_add(2)
         .saturating_add(TAB_SEPARATOR_OVERHEAD)
-        .max(MIN_TAB_WIDTH)
 }
 
 /// Trailing x just past the last visible (width>0) tab, for placing the
@@ -470,7 +474,6 @@ fn trailing_tab_controls_x(tab_hit_areas: &[Rect], fallback_x: u16) -> u16 {
 fn centered_active_fill(
     chromes: &[TabChrome],
     active_tab: usize,
-    mode: TabStatusMode,
     area: Rect,
     reserve_left: u16,
     reserve_right: u16,
@@ -490,7 +493,7 @@ fn centered_active_fill(
     let footprint = |lo: usize, hi: usize| -> u16 {
         let mut total: u16 = 0;
         for chrome in &chromes[lo..=hi] {
-            total = total.saturating_add(tab_width(chrome, mode));
+            total = total.saturating_add(tab_width(chrome));
         }
         if lo > 0 {
             total = total.saturating_add(reserve_left);
@@ -530,11 +533,11 @@ fn centered_active_fill(
         let mut progressed = false;
         if (total_left <= total_right || !right_fits) && left_fits {
             lo -= 1;
-            total_left = total_left.saturating_add(tab_width(&chromes[lo], mode));
+            total_left = total_left.saturating_add(tab_width(&chromes[lo]));
             progressed = true;
         } else if right_fits {
             hi += 1;
-            total_right = total_right.saturating_add(tab_width(&chromes[hi], mode));
+            total_right = total_right.saturating_add(tab_width(&chromes[hi]));
             progressed = true;
         }
 
@@ -554,7 +557,7 @@ fn centered_active_fill(
     let mut x = area.x.saturating_add(left_gutter);
     let right_limit = area.x.saturating_add(area.width);
     for idx in lo..=hi {
-        let desired = tab_width(&chromes[idx], mode);
+        let desired = tab_width(&chromes[idx]);
         let remaining = right_limit.saturating_sub(x);
         if remaining == 0 {
             break;
@@ -565,6 +568,17 @@ fn centered_active_fill(
     }
 
     rects
+}
+
+/// Column-containment lookup over a dense hit-area vec: the index of the
+/// visible (width>0) rect containing `col`, if any. The single hit predicate
+/// shared by the production mouse mapping (`AppState::tab_at`) and the
+/// hit-test round-trip tests, so both exercise identical containment logic.
+/// Row containment stays with the caller (all tab rects share the bar's row).
+pub(crate) fn hit_index(rects: &[Rect], col: u16) -> Option<usize> {
+    rects
+        .iter()
+        .position(|area| area.width > 0 && col >= area.x && col < area.x + area.width)
 }
 
 /// First and last visible (width>0) tab indices in a dense hit-area vec.
@@ -596,7 +610,7 @@ pub(crate) fn compute_tab_bar_view(
     );
 
     // First pass: no indicator reservation, to learn whether anything overflows.
-    let probe = centered_active_fill(&chromes, active_tab, mode, tabs_area, 0, 0);
+    let probe = centered_active_fill(&chromes, active_tab, tabs_area, 0, 0);
     let tab_count = chromes.len();
     let probe_overflow = probe.iter().any(|r| r.width == 0) && tab_count > 0;
 
@@ -654,7 +668,6 @@ pub(crate) fn compute_tab_bar_view(
         let mut rects = centered_active_fill(
             &chromes,
             active_tab,
-            mode,
             tabs_area,
             OVERFLOW_INDICATOR_WIDTH,
             OVERFLOW_INDICATOR_WIDTH,
@@ -695,7 +708,6 @@ pub(crate) fn compute_tab_bar_view(
             rects = centered_active_fill(
                 &chromes,
                 active_tab,
-                mode,
                 tabs_area,
                 left_w.max(OVERFLOW_INDICATOR_WIDTH),
                 right_w.max(OVERFLOW_INDICATOR_WIDTH),
@@ -706,13 +718,15 @@ pub(crate) fn compute_tab_bar_view(
         }
 
         // Indicator rects occupy the columns the final fill reserved for them.
-        // The left indicator hugs area.x; the right sits at the right edge of
-        // the tabs area (before any new-tab button). At pathologically narrow
-        // widths the active tab (always visible) can consume more than the
-        // reserve left for an indicator, so clamp each indicator away from the
-        // visible tabs: the left indicator's right edge must not pass the first
-        // visible tab, and the right indicator's left edge must not precede the
-        // last visible tab. The indicator content clips if the clamp shrinks it.
+        // The left indicator hugs area.x; the right abuts the last visible tab
+        // directly (zellij left-packs: tabs, then the collapsed indicator, then
+        // bar-bg fill to the edge — no dead gap, and the tile stays compact at
+        // its demanded width instead of stretching to the edge). At
+        // pathologically narrow widths the active tab (always visible) can
+        // consume more than the reserve left for an indicator, so clamp: the
+        // left indicator's right edge must not pass the first visible tab, and
+        // the right indicator clips at the tabs-area edge. The indicator
+        // content clips if the clamp shrinks it.
         let (vis_first, vis_last) = visible_bounds(&rects).unwrap_or((active_tab, active_tab));
         let first_visible_x = rects.get(vis_first).map(|r| r.x).unwrap_or(area.x);
         let last_visible_right = rects.get(vis_last).map(|r| r.x + r.width).unwrap_or(area.x);
@@ -727,11 +741,9 @@ pub(crate) fn compute_tab_bar_view(
         };
         let right_hit_area = if right.is_some() {
             let tabs_right = tabs_area.x + tabs_area.width;
-            let rx = tabs_right
-                .saturating_sub(right_w)
-                .max(area.x)
-                .max(last_visible_right);
-            Rect::new(rx, area.y, tabs_right.saturating_sub(rx), 1)
+            let rx = last_visible_right.min(tabs_right);
+            let rw = right_w.min(tabs_right.saturating_sub(rx));
+            Rect::new(rx, area.y, rw, 1)
         } else {
             Rect::default()
         };
@@ -950,19 +962,16 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     };
 
     // Overflow indicators render as proper zellij tiles (left arrow + interior
-    // + right arrow), matching a regular inactive tab. Under mouse chrome the
-    // interior is a clickable `←+N` affordance plus up to three disaggregated
-    // Blocked/Working/Done-unseen badge segments; without mouse chrome it is a
-    // non-clickable `← N` / `N →` marker (count only). Counts cap at `9+`.
-    let fmt_count = |n: usize| -> String {
-        if n > 9 {
-            "9+".to_string()
-        } else {
-            n.to_string()
-        }
-    };
-    let interior_text_style = Style::default().fg(p.overlay1).bg(indicator_tile_bg);
-    // Re-tint the shared `badge_spans` (which uses transparent bg) onto the
+    // + right arrow), matching a regular inactive tab. The interior is
+    // zellij's exact format — ` ← +N ` / ` +N → `, full count (`many` past
+    // 9999), bold, unselected-ribbon styling. Under mouse chrome the tile is
+    // clickable and up to three disaggregated Blocked/Working/Done-unseen
+    // badge segments follow the count inside the same interior.
+    let interior_text_style = Style::default()
+        .fg(p.overlay1)
+        .bg(indicator_tile_bg)
+        .add_modifier(Modifier::BOLD);
+    // Re-tint the shared bucket segments (which use transparent bg) onto the
     // tile bg so the badge sits on the indicator tile, not the panel.
     let on_tile = |spans: Vec<Span<'static>>| -> Vec<Span<'static>> {
         spans
@@ -976,16 +985,16 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if let Some(group) = overflow.left {
         if overflow.left_hit_area.width > 0 {
             let mut interior: Vec<Span<'static>> = Vec::new();
+            interior.push(Span::styled(
+                format!(" ← +{}", indicator_count_text(group.count)),
+                interior_text_style,
+            ));
             if app.mouse_capture {
-                // `←` + the shared badge (`+N` plus bucket segments), re-tinted.
-                interior.push(Span::styled("←", interior_text_style));
-                interior.extend(on_tile(super::overflow::badge_spans(group.side, p)));
-            } else {
-                interior.push(Span::styled(
-                    format!("←{} ", fmt_count(group.count)),
-                    interior_text_style,
-                ));
+                interior.extend(on_tile(super::overflow::bucket_segment_spans(
+                    group.side, p,
+                )));
             }
+            interior.push(Span::styled(" ", interior_text_style));
             render_overflow_tile(
                 frame,
                 area,
@@ -1000,16 +1009,16 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if let Some(group) = overflow.right {
         if overflow.right_hit_area.width > 0 {
             let mut interior: Vec<Span<'static>> = Vec::new();
+            interior.push(Span::styled(
+                format!(" +{}", indicator_count_text(group.count)),
+                interior_text_style,
+            ));
             if app.mouse_capture {
-                // The shared badge then a trailing `→`.
-                interior.extend(on_tile(super::overflow::badge_spans(group.side, p)));
-                interior.push(Span::styled("→", interior_text_style));
-            } else {
-                interior.push(Span::styled(
-                    format!(" {}→", fmt_count(group.count)),
-                    interior_text_style,
-                ));
+                interior.extend(on_tile(super::overflow::bucket_segment_spans(
+                    group.side, p,
+                )));
             }
+            interior.push(Span::styled(" → ", interior_text_style));
             render_overflow_tile(
                 frame,
                 area,
@@ -1078,7 +1087,29 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             if interior_w > 0 {
                 let interior_rect = Rect::new(interior_x, area.y, interior_w, 1);
                 let spans = if let Some(chrome) = app.view.tab_chrome.get(idx) {
-                    chrome.to_spans(app.view.tab_status_mode, interior_w)
+                    chrome.to_spans(interior_w)
+                } else {
+                    vec![Span::raw(" ".repeat(interior_w as usize))]
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)).style(interior_style),
+                    interior_rect,
+                );
+            }
+        } else if rect.width >= TAB_SEPARATOR_OVERHEAD {
+            // AlternatingBg path: the 2 separator cols become one tab-bg
+            // padding column on each side, and the label interior sits between
+            // them — the same symmetric peel as the Powerline branch, so the
+            // interior renders ` name ` under both separator styles.
+            frame.render_widget(
+                Paragraph::new(" ".repeat(rect.width as usize)).style(interior_style),
+                rect,
+            );
+            let interior_w = rect.width - 2;
+            if interior_w > 0 {
+                let interior_rect = Rect::new(rect.x + 1, area.y, interior_w, 1);
+                let spans = if let Some(chrome) = app.view.tab_chrome.get(idx) {
+                    chrome.to_spans(interior_w)
                 } else {
                     vec![Span::raw(" ".repeat(interior_w as usize))]
                 };
@@ -1088,10 +1119,9 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
                 );
             }
         } else {
-            // AlternatingBg path (or rect too narrow for arrows): full-width
-            // interior with tab bg. The 2 separator cols become extra padding.
+            // Rect too narrow for any separator columns: fill what remains.
             let spans = if let Some(chrome) = app.view.tab_chrome.get(idx) {
-                chrome.to_spans(app.view.tab_status_mode, rect.width)
+                chrome.to_spans(rect.width)
             } else {
                 vec![Span::raw(" ".repeat(rect.width as usize))]
             };
@@ -1260,7 +1290,7 @@ mod tests {
             Rect::new(0, 0, 40, 1),
             true,
         );
-        let natural = tab_width(&chromes[active], TabStatusMode::Off);
+        let natural = tab_width(&chromes[active]);
         assert!(view.tab_hit_areas[active].width > 0);
         assert_eq!(
             view.tab_hit_areas[active].width, natural,
@@ -1707,8 +1737,9 @@ mod tests {
 
     #[test]
     fn zoom_marker_counts_toward_tab_width() {
-        // tab_width = display_width (8 name + 2 zoom) + 4 interior padding
-        //           + 2 separator overhead (zellij left+right arrow cols).
+        // tab_width = display_width (8 name + 2 zoom) + 2 interior padding
+        //           (one space each side, zellij) + 2 separator overhead
+        //           (zellij left+right arrow cols).
         let chrome = TabChrome {
             status: None,
             name: "abcdefgh".into(),
@@ -1716,7 +1747,7 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        assert_eq!(tab_width(&chrome, TabStatusMode::Off), 16);
+        assert_eq!(tab_width(&chrome), 14);
     }
 
     #[test]
@@ -1729,7 +1760,7 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        assert_eq!(c.display_width(TabStatusMode::Off), 4);
+        assert_eq!(c.display_width(), 4);
 
         // Combining mark contributes 0 columns: "a" + U+0300 = 1 column.
         let c = TabChrome {
@@ -1739,7 +1770,7 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        assert_eq!(c.display_width(TabStatusMode::Off), 1);
+        assert_eq!(c.display_width(), 1);
     }
 
     #[test]
@@ -1751,7 +1782,7 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        assert_eq!(c.display_width(TabStatusMode::Off), 5);
+        assert_eq!(c.display_width(), 5);
         let c = TabChrome {
             status: None,
             name: "hello".into(),
@@ -1759,7 +1790,10 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        assert_eq!(c.display_width(TabStatusMode::Off), 7);
+        assert_eq!(c.display_width(), 7);
+        // A dot-less chrome has NO status reserve — width is name-only
+        // regardless of the display mode (the dot Option already encodes
+        // whether anything renders).
         let c = TabChrome {
             status: None,
             name: "hello".into(),
@@ -1767,7 +1801,9 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        assert_eq!(c.display_width(TabStatusMode::All), 7);
+        assert_eq!(c.display_width(), 5);
+        // A dotted chrome adds the dot's width + 1 separating space: 5 name
+        // + 2 zoom + 2 dot = 9.
         let c = TabChrome {
             status: Some(TabStatusDot {
                 glyph: "●",
@@ -1778,7 +1814,40 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        assert_eq!(c.display_width(TabStatusMode::All), 9);
+        assert_eq!(c.display_width(), 9);
+    }
+
+    #[test]
+    fn dot_adds_exactly_its_width_plus_one() {
+        // AC3: a dotted tab is exactly dot.width() + 1 cols wider than its
+        // dot-less form — a 1-col glyph adds 2, a synthetic 2-col glyph adds 3.
+        let base = TabChrome {
+            status: None,
+            name: "hello".into(),
+            zoomed: false,
+            is_attention: false,
+            agent_state: None,
+        };
+        let narrow_dot = TabChrome {
+            status: Some(TabStatusDot {
+                glyph: "●",
+                style: Style::default(),
+            }),
+            ..base.clone()
+        };
+        assert_eq!("●".width(), 1);
+        assert_eq!(tab_width(&narrow_dot), tab_width(&base) + 2);
+        // Synthetic wide dot: all real dots are 1 col today (the glyph set is
+        // width-uniform), so the 2-col branch is exercised synthetically.
+        let wide_dot = TabChrome {
+            status: Some(TabStatusDot {
+                glyph: "字",
+                style: Style::default(),
+            }),
+            ..base.clone()
+        };
+        assert_eq!("字".width(), 2);
+        assert_eq!(tab_width(&wide_dot), tab_width(&base) + 3);
     }
 
     #[test]
@@ -1793,7 +1862,7 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        let spans = c.to_spans(TabStatusMode::All, 15);
+        let spans = c.to_spans(15);
         assert_eq!(spans[0].content.as_ref(), " ");
         assert_eq!(spans[1].content.as_ref(), "●");
         assert_eq!(spans[2].content.as_ref(), " ");
@@ -1801,6 +1870,8 @@ mod tests {
         assert_eq!(spans[4].content.as_ref(), " Z");
         assert_eq!(spans[5].content.len(), 6);
 
+        // Dot-less chrome: symmetric ` name ` at the natural interior width —
+        // no phantom two-space status slot.
         let c = TabChrome {
             status: None,
             name: "abc".into(),
@@ -1808,12 +1879,12 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        let spans = c.to_spans(TabStatusMode::All, 10);
+        let spans = c.to_spans(5);
         assert_eq!(spans[0].content.as_ref(), " ");
-        assert_eq!(spans[1].content.as_ref(), "  ");
-        assert!(spans[1].style.fg.is_none(), "empty slot must not set fg");
-        assert_eq!(spans[2].content.as_ref(), "abc");
-        assert_eq!(spans[3].content.len(), 4);
+        assert_eq!(spans[1].content.as_ref(), "abc");
+        assert_eq!(spans[2].content.as_ref(), " ");
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " abc ", "interior is symmetric ` name `");
 
         let c = TabChrome {
             status: None,
@@ -1822,14 +1893,18 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        let spans = c.to_spans(TabStatusMode::Off, 8);
+        let spans = c.to_spans(8);
         assert_eq!(spans[0].content.as_ref(), " ");
         assert_eq!(spans[1].content.as_ref(), "xyz");
         assert_eq!(spans[2].content.len(), 4);
     }
 
     #[test]
-    fn to_spans_truncates_over_wide_name_by_display_width() {
+    fn to_spans_never_truncates_or_adds_ellipsis() {
+        // C5/AC6: zellij never renders an ellipsis. An over-wide name is
+        // emitted at natural width — the render path's fixed interior rect
+        // clips it at the bar edge. No `…` appears in any span, and the
+        // emitted content is the natural ` name` prefix.
         let c = TabChrome {
             status: None,
             name: "longername".into(),
@@ -1837,11 +1912,10 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        // mode=Off, no zoom: name_budget = rect_width - 1 = 4 → "lon…".
-        let spans = c.to_spans(TabStatusMode::Off, 5);
+        let spans = c.to_spans(5);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains('…'), "expected ellipsis truncation: {text:?}");
-        assert!(text.contains("lon"), "kept a prefix of the name: {text:?}");
+        assert!(!text.contains('…'), "no ellipsis ever: {text:?}");
+        assert_eq!(text, " longername", "natural name, clipped by the rect");
     }
 
     #[test]
@@ -1853,10 +1927,529 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        let spans = c.to_spans(TabStatusMode::Off, 8);
+        let spans = c.to_spans(8);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("abc"));
         assert!(!text.contains('…'));
+    }
+
+    #[test]
+    fn dotless_main_tab_is_eight_columns_like_zellij() {
+        // AC1: ` main ` between two arrow cells = 8 cols, zellij's per-tab
+        // column count for the same tab.
+        let chrome = TabChrome {
+            status: None,
+            name: "main".into(),
+            zoomed: false,
+            is_attention: false,
+            agent_state: None,
+        };
+        assert_eq!(tab_width(&chrome), 8);
+        // And the emitted interior is exactly ` main `.
+        let spans = chrome.to_spans(6);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " main ");
+    }
+
+    #[test]
+    fn no_phantom_status_reserve_when_no_dot() {
+        // AC2: a dot-less chrome has the same width whether tab status display
+        // is on or off — the dot Option is the only signal, so "all" mode with
+        // no dots present costs zero columns.
+        let dotless = TabChrome {
+            status: None,
+            name: "server".into(),
+            zoomed: false,
+            is_attention: false,
+            agent_state: Some((crate::detect::AgentState::Unknown, true)),
+        };
+        // Width is a pure function of the chrome; both modes see the same
+        // chrome when no dot was built.
+        assert_eq!(tab_width(&dotless), 6 + 2 + 2);
+        // Interior symmetric under Powerline (peeled interior)…
+        let text: String = dotless
+            .to_spans(8)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(text, " server ");
+    }
+
+    #[test]
+    fn alternating_bg_interior_is_symmetric() {
+        // AC2 (AlternatingBg branch): with powerline off the label still
+        // renders symmetric ` name ` — one padding column each side from the
+        // separator overhead, then the one-space interior padding.
+        let mut app = app_with_tab_bar(&["abc", "def"], 0, Rect::new(0, 0, 40, 1), false);
+        app.tabs_powerline = false;
+        let rect = app.view.tab_hit_areas[1];
+        let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+        let row: String = (rect.x..rect.x + rect.width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect();
+        assert_eq!(
+            row, "  def  ",
+            "AlternatingBg tab cell: 1 separator-pad + ` def ` interior + 1 \
+             separator-pad — symmetric"
+        );
+        // The name starts at col 2: separator pad + one interior space —
+        // symmetric with the Powerline branch, no 1-left/3-right asymmetry.
+        assert_eq!(buffer[(rect.x + 2, 0)].symbol(), "d");
+    }
+
+    #[test]
+    fn denser_than_before_for_short_names() {
+        // AC5: at a fixed bar width and tab set, the new sizing shows at least
+        // as many tabs as the old (old width: name + 2 status + 4 pad + 2
+        // arrows, min 10), and strictly more for ≤8-char names.
+        let names: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let old_tab_width = |chrome: &TabChrome| -> u16 {
+            // The pre-change formula under show_tab_status="all".
+            let name_w = u16::try_from(chrome.name.width()).unwrap_or(u16::MAX);
+            (name_w + 2 + 4 + 2).max(10)
+        };
+        for width in [30u16, 40, 50, 60] {
+            let chromes = chromes_from_names(&refs);
+            let old_fit: u16 = {
+                // Old capacity under the same chrome budget: bar minus the
+                // ` + ` button (3) minus the old fixed indicator (6), divided
+                // by the old per-tab width (uniform 2-char names → 10).
+                let per = old_tab_width(&chromes[0]);
+                width.saturating_sub(NEW_TAB_WIDTH + 6) / per
+            };
+            let view = compute_tab_bar_view(
+                chromes,
+                0,
+                TabStatusMode::All,
+                Rect::new(0, 0, width, 1),
+                true,
+            );
+            let visible = view.tab_hit_areas.iter().filter(|r| r.width > 0).count();
+            assert!(
+                visible as u16 >= old_fit,
+                "width={width}: {visible} visible < old capacity {old_fit}"
+            );
+            assert!(
+                visible as u16 > old_fit,
+                "width={width}: strictly denser for 2-char names"
+            );
+        }
+    }
+
+    #[test]
+    fn indicator_interior_matches_zellij_format() {
+        // AC7: interiors read exactly ` ← +N ` / ` +N → ` — full count,
+        // ` +many ` past 9999, no `9+`, no `←N ` short form. Swept over the
+        // non-mouse and mouse paths (no attention, so no badge segments).
+        assert_eq!(indicator_count_text(7), "7");
+        assert_eq!(indicator_count_text(42), "42");
+        assert_eq!(indicator_count_text(9999), "9999");
+        assert_eq!(indicator_count_text(10000), "many");
+
+        for mouse in [false, true] {
+            let names: Vec<String> = (0..15).map(|i| format!("t{i}")).collect();
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            // Active last → >9 hidden on the left only.
+            let app = app_with_tab_bar(&refs, 14, Rect::new(0, 0, 30, 1), mouse);
+            let count = app.view.tab_overflow.left.expect("left overflow").count;
+            assert!(count > 9);
+            let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+            let row = buffer_row_text(&buffer, app.view.tab_bar_rect, 0);
+            assert!(
+                row.contains(&format!("← +{count}")),
+                "mouse={mouse}: zellij left format with full count: {row:?}"
+            );
+            assert!(!row.contains("9+"), "mouse={mouse}: no 9+ cap: {row:?}");
+        }
+    }
+
+    #[test]
+    fn indicator_count_cols_matches_count_text_width() {
+        // The allocation-free sizing arithmetic must agree with the rendered
+        // text's measured width for every count regime.
+        for count in [
+            0usize, 1, 5, 9, 10, 42, 99, 100, 999, 1000, 9999, 10000, 123456,
+        ] {
+            assert_eq!(
+                indicator_count_cols(count) as usize,
+                indicator_count_text(count).width(),
+                "count={count}"
+            );
+        }
+    }
+
+    #[test]
+    fn indicator_reserved_width_equals_rendered_width_on_all_paths() {
+        // AC8: `tab_indicator_width` must size from the same uncapped count
+        // the render emits, on all three paths — non-mouse, mouse with zero
+        // attention, mouse with attention — at ≥100 and `many` counts.
+        use super::super::overflow::OverflowSide;
+        let no_attention = OverflowSide::default();
+        let with_attention = OverflowSide {
+            hidden: 120,
+            hidden_blocked: 2,
+            blocked_jump_to: Some(1),
+            ..OverflowSide::default()
+        };
+        for count in [1usize, 9, 42, 120, 10000] {
+            let text = indicator_count_text(count);
+            // ` ← +N ` interior = 5 + count columns; +2 separator cols.
+            let base_demand =
+                5 + u16::try_from(text.width()).unwrap_or(u16::MAX) + TAB_SEPARATOR_OVERHEAD;
+            // Non-mouse and mouse-no-attention agree (no badge segments).
+            for (mouse, side) in [(false, no_attention), (true, no_attention)] {
+                assert_eq!(
+                    tab_indicator_width(count, side, mouse),
+                    base_demand.max(OVERFLOW_INDICATOR_WIDTH),
+                    "count={count} mouse={mouse}"
+                );
+            }
+            // Mouse + attention adds exactly the badge columns.
+            let badge_w = super::super::overflow::badge_attention_width(with_attention);
+            assert_eq!(
+                tab_indicator_width(count, with_attention, true),
+                (base_demand + badge_w).max(OVERFLOW_INDICATOR_WIDTH),
+                "count={count} with attention"
+            );
+        }
+    }
+
+    #[test]
+    fn indicator_no_overlap_at_large_counts_all_paths() {
+        // AC8 extension of `indicator_hit_areas_never_overlap_visible_tabs`:
+        // a ≥100 hidden count must not overrun the adjacent tab on the
+        // non-mouse path or the mouse-no-attention path (previously only
+        // mouse+attention was swept).
+        let names: Vec<String> = (0..120).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for mouse in [false, true] {
+            for active in [5usize, 115] {
+                for width in [28u16, 34, 40, 46] {
+                    let chromes = chromes_from_names(&refs);
+                    let view = compute_tab_bar_view(
+                        chromes,
+                        active,
+                        TabStatusMode::Off,
+                        Rect::new(0, 0, width, 1),
+                        mouse,
+                    );
+                    let left = view.overflow.left.map(|g| g.count).unwrap_or(0);
+                    let right = view.overflow.right.map(|g| g.count).unwrap_or(0);
+                    assert!(left >= 100 || right >= 100, "large count on one side");
+                    for ind in [view.overflow.left_hit_area, view.overflow.right_hit_area] {
+                        if ind.width == 0 {
+                            continue;
+                        }
+                        for rect in view.tab_hit_areas.iter().filter(|r| r.width > 0) {
+                            assert!(
+                                ind.x + ind.width <= rect.x || rect.x + rect.width <= ind.x,
+                                "mouse={mouse} active={active} width={width}: \
+                                 indicator {ind:?} overlaps tab {rect:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn right_indicator_abuts_last_visible_tab_compactly() {
+        // AC10 / C7: the right indicator's x equals the last visible tab's
+        // right edge AND its width is the demanded indicator width — a compact
+        // tile, not stretched across the former gap — and the ` + ` button
+        // abuts the indicator.
+        let names: Vec<String> = (0..10).map(|i| format!("tab{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for width in [30u16, 36, 42, 48, 54] {
+            let chromes = chromes_from_names(&refs);
+            let view = compute_tab_bar_view(
+                chromes.clone(),
+                0,
+                TabStatusMode::Off,
+                Rect::new(0, 0, width, 1),
+                true,
+            );
+            let Some(right) = view.overflow.right else {
+                continue;
+            };
+            let last_right = view
+                .tab_hit_areas
+                .iter()
+                .filter(|r| r.width > 0)
+                .map(|r| r.x + r.width)
+                .max()
+                .expect("visible tabs");
+            let ind = view.overflow.right_hit_area;
+            assert_eq!(ind.x, last_right, "width={width}: indicator abuts last tab");
+            let demanded = tab_indicator_width(right.count, right.side, true);
+            assert_eq!(
+                ind.width, demanded,
+                "width={width}: compact tile at demanded width, not stretched"
+            );
+            // ` + ` button abuts the indicator.
+            assert_eq!(
+                view.new_tab_hit_area.x,
+                ind.x + ind.width,
+                "width={width}: + button follows the indicator"
+            );
+        }
+    }
+
+    #[test]
+    fn new_tab_button_abuts_last_tab_when_nothing_overflows() {
+        // AC10 mirror: no overflow → the ` + ` button abuts the last tab.
+        let view = compute_tab_bar_view(
+            chromes_from_names(&["ab", "cd"]),
+            0,
+            TabStatusMode::Off,
+            Rect::new(0, 0, 60, 1),
+            true,
+        );
+        assert!(view.overflow.right.is_none());
+        let last_right = view
+            .tab_hit_areas
+            .iter()
+            .filter(|r| r.width > 0)
+            .map(|r| r.x + r.width)
+            .max()
+            .expect("visible tabs");
+        assert_eq!(view.new_tab_hit_area.x, last_right);
+    }
+
+    #[test]
+    fn status_cols_lockstep_between_sizing_and_fill() {
+        // The single-source guard: for the same chrome, the columns
+        // `display_width` sizes for the status slot equal the columns
+        // `to_spans` actually emits for it. Measured as the delta each
+        // function shows between the dotted and dot-less form of the same
+        // chrome, swept over dot widths.
+        for glyph in ["●", "◉", "✓", "○", "⠋", "字"] {
+            let dotless = TabChrome {
+                status: None,
+                name: "name".into(),
+                zoomed: false,
+                is_attention: false,
+                agent_state: None,
+            };
+            let dotted = TabChrome {
+                status: Some(TabStatusDot {
+                    glyph,
+                    style: Style::default(),
+                }),
+                ..dotless.clone()
+            };
+            let sizing_delta = dotted.display_width() - dotless.display_width();
+            assert_eq!(sizing_delta, dotted.status_cols(), "glyph={glyph:?}");
+
+            let emitted = |c: &TabChrome| -> u16 {
+                let wide = 40; // room so padding never masks the slot
+                c.to_spans(wide)
+                    .iter()
+                    .take_while(|s| s.content.as_ref() != "name")
+                    .fold(0u16, |acc, s| {
+                        acc + u16::try_from(s.content.width()).unwrap_or(u16::MAX)
+                    })
+            };
+            let fill_delta = emitted(&dotted) - emitted(&dotless);
+            assert_eq!(
+                fill_delta, sizing_delta,
+                "glyph={glyph:?}: sizing and fill disagree on status columns"
+            );
+        }
+    }
+
+    #[test]
+    fn budget_consistency_across_separator_styles() {
+        // For every (dot, zoom, name, rect_width) — including the clip regime
+        // where rect_width < natural content — no fitting name is shortened
+        // and the emitted content equals rect_width when it fits. Both render
+        // conventions pass the interior (rect minus the 2 separator cols) to
+        // to_spans, so one sweep covers Powerline and AlternatingBg.
+        let dots = [None, Some("●"), Some("字")];
+        let names = ["a", "name", "longer-name", "你好世界"];
+        for dot in dots {
+            for zoomed in [false, true] {
+                for name in names {
+                    let chrome = TabChrome {
+                        status: dot.map(|glyph| TabStatusDot {
+                            glyph,
+                            style: Style::default(),
+                        }),
+                        name: name.into(),
+                        zoomed,
+                        is_attention: false,
+                        agent_state: None,
+                    };
+                    let natural = chrome.display_width() + 2; // ` content `
+                    for rect_width in 0..(natural + 6) {
+                        let spans = chrome.to_spans(rect_width);
+                        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+                        // The full sanitized name always survives — never
+                        // truncated, never an ellipsis.
+                        assert!(
+                            text.contains(name),
+                            "name shortened: dot={dot:?} zoomed={zoomed} \
+                             name={name:?} rect_width={rect_width} text={text:?}"
+                        );
+                        assert!(!text.contains('…'), "ellipsis at {rect_width}");
+                        let content_w = u16::try_from(text.width()).unwrap_or(u16::MAX);
+                        if rect_width >= natural {
+                            // Fits: padded to exactly rect_width, symmetric
+                            // ` content ` (leading + trailing space).
+                            assert_eq!(
+                                content_w, rect_width,
+                                "dot={dot:?} zoomed={zoomed} name={name:?}"
+                            );
+                            assert!(text.starts_with(' ') && text.ends_with(' '));
+                        } else {
+                            // Clip regime: leading space + full content, no
+                            // trailing pad (content already meets or exceeds
+                            // the rect); ratatui clips at the drawn edge.
+                            assert_eq!(
+                                content_w,
+                                chrome.display_width() + 1,
+                                "dot={dot:?} zoomed={zoomed} name={name:?} \
+                                 rect_width={rect_width}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn agent_icon_glyphs_have_uniform_width_and_stable_tab_width() {
+        use crate::detect::AgentState;
+        // Every glyph agent_icon can emit — all states × seen × a full spinner
+        // cycle — must occupy the same display columns, or the bar would
+        // reflow as the spinner animates and hit areas would move mid-click.
+        let palette = crate::app::state::Palette::catppuccin();
+        let states = [
+            AgentState::Blocked,
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Unknown,
+        ];
+        let mut widths = std::collections::BTreeSet::new();
+        for state in states {
+            for seen in [false, true] {
+                for tick in 0..100 {
+                    let (glyph, _) = super::super::status::agent_icon(state, seen, tick, &palette);
+                    widths.insert(glyph.width());
+                }
+            }
+        }
+        assert_eq!(
+            widths.len(),
+            1,
+            "agent_icon widths must be uniform: {widths:?}"
+        );
+
+        // And a dotted tab's width is invariant across spinner ticks.
+        let width_at = |tick: u32| -> u16 {
+            let (glyph, style) =
+                super::super::status::agent_icon(AgentState::Working, false, tick, &palette);
+            let chrome = TabChrome {
+                status: Some(TabStatusDot { glyph, style }),
+                name: "worker".into(),
+                zoomed: false,
+                is_attention: true,
+                agent_state: Some((AgentState::Working, false)),
+            };
+            tab_width(&chrome)
+        };
+        let w0 = width_at(0);
+        for tick in 1..100 {
+            assert_eq!(width_at(tick), w0, "tab width moved at tick {tick}");
+        }
+    }
+
+    #[test]
+    fn hit_index_round_trip_center_and_boundaries() {
+        // AC4: the production containment predicate (`tab_at` delegates to
+        // `hit_index`) round-trips the center AND both boundary columns of
+        // every visible rect — the tighter widths raise edge-adjacency risk a
+        // center-only test cannot see. Includes adversarial-unicode names.
+        let name_sets: [&[&str]; 2] = [
+            &[
+                "tab0", "tab1", "tab2", "tab3", "tab4", "tab5", "tab6", "tab7",
+            ],
+            &[
+                "你好世界",
+                "e\u{0301}ditor",
+                "👨\u{200d}💻",
+                "tab-d",
+                "넓은탭이름",
+                "f",
+                "g",
+                "h",
+            ],
+        ];
+        for names in name_sets {
+            for active in [0, 3, 7] {
+                for width in [24u16, 30, 40, 60] {
+                    let chromes = chromes_from_names(names);
+                    let view = compute_tab_bar_view(
+                        chromes,
+                        active,
+                        TabStatusMode::Off,
+                        Rect::new(0, 0, width, 1),
+                        true,
+                    );
+                    for (idx, rect) in view.tab_hit_areas.iter().enumerate() {
+                        if rect.width == 0 {
+                            continue;
+                        }
+                        for col in [rect.x, rect.x + rect.width / 2, rect.x + rect.width - 1] {
+                            assert_eq!(
+                                hit_index(&view.tab_hit_areas, col),
+                                Some(idx),
+                                "active={active} width={width} tab={idx} col={col}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_and_degenerate_names_never_underflow() {
+        // 1-char and empty names against narrow bars: fill converges, visible
+        // window stays contiguous, no u16 underflow at the right-arrow column
+        // (rendering exercises `rect.x + rect.width - 1`).
+        let name_sets: [&[&str]; 3] = [&["a", "b", "c", "d", "e", "f"], &["a"], &["x", "y"]];
+        for names in name_sets {
+            for active in 0..names.len() {
+                for width in 1u16..30 {
+                    let chromes = chromes_from_names(names);
+                    let view = compute_tab_bar_view(
+                        chromes,
+                        active,
+                        TabStatusMode::Off,
+                        Rect::new(0, 0, width, 1),
+                        true,
+                    );
+                    assert_eq!(view.tab_hit_areas.len(), names.len());
+                    let visible: Vec<usize> = view
+                        .tab_hit_areas
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| r.width > 0)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if let (Some(&first), Some(&last)) = (visible.first(), visible.last()) {
+                        assert_eq!(visible.len(), last - first + 1, "contiguous window");
+                    }
+                }
+            }
+        }
+        // Render the tightest case end-to-end to prove no arithmetic panic.
+        let app = app_with_tab_bar(&["a", "b", "c"], 1, Rect::new(0, 0, 7, 1), true);
+        let _ = render_to_buffer(&app, app.view.tab_bar_rect);
     }
 
     #[test]
@@ -1878,7 +2471,7 @@ mod tests {
             is_attention: false,
             agent_state: None,
         };
-        let spans = c.to_spans(TabStatusMode::Off, 12);
+        let spans = c.to_spans(12);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             !text.contains('\u{202e}'),
@@ -2181,29 +2774,36 @@ mod tests {
     }
 
     #[test]
-    fn render_non_mouse_marker_is_present_without_plus() {
+    fn render_non_mouse_marker_uses_zellij_format() {
         let names: Vec<String> = (0..10).map(|i| format!("t{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let app = app_with_tab_bar(&refs, 5, Rect::new(0, 0, 40, 1), false);
+        let left = app.view.tab_overflow.left.expect("left overflow").count;
         let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
         let row = buffer_row_text(&buffer, app.view.tab_bar_rect, 0);
-        // Non-mouse markers use the arrow + count, but no clickable "+".
+        // Non-mouse markers carry the same zellij ` ← +N ` interior.
         assert!(
-            row.contains('←') || row.contains('→'),
-            "marker arrow: {row:?}"
+            row.contains(&format!("← +{left}")),
+            "zellij marker format: {row:?}"
         );
     }
 
     #[test]
-    fn render_count_caps_at_nine_plus() {
+    fn render_full_count_past_nine() {
+        // Zellij format: the full hidden count renders, never a `9+` cap.
         let names: Vec<String> = (0..15).map(|i| format!("t{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         // Active near the end so >9 hidden on the left.
         let app = app_with_tab_bar(&refs, 14, Rect::new(0, 0, 30, 1), true);
-        assert!(app.view.tab_overflow.left.unwrap().count > 9);
+        let count = app.view.tab_overflow.left.unwrap().count;
+        assert!(count > 9);
         let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
         let row = buffer_row_text(&buffer, app.view.tab_bar_rect, 0);
-        assert!(row.contains("9+"), "expected 9+ cap: {row:?}");
+        assert!(
+            row.contains(&format!("+{count}")),
+            "full count, no cap: {row:?}"
+        );
+        assert!(!row.contains("9+"), "no 9+ cap: {row:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -2257,18 +2857,6 @@ mod tests {
         assert_eq!(
             tab_drop_indicator_x(&app, &app.workspaces[0], refs.len()),
             Some(expected)
-        );
-    }
-
-    #[test]
-    fn truncate_to_width_respects_wide_glyphs() {
-        // "你好世界" is 8 columns; budget 5 → 4 columns of content + ellipsis.
-        let out = truncate_to_width("你好世界", 5);
-        assert!(out.ends_with('…'));
-        assert!(
-            out.width() <= 5,
-            "must not exceed budget: {out:?} ({})",
-            out.width()
         );
     }
 }

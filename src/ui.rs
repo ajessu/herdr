@@ -91,7 +91,7 @@ pub(crate) use self::{
     },
     overflow::{resolve_jump as resolve_overflow_jump, OverflowBadgeRect},
     panes::pane_is_scrolled_back,
-    tabs::{build_tab_bar_inputs, compute_tab_bar_view, TabBarOverflow, TabChrome},
+    tabs::{build_tab_bar_inputs, compute_tab_bar_view, hit_index, TabBarOverflow, TabChrome},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 pub(crate) use crate::app::state::SidebarOverflowRects;
