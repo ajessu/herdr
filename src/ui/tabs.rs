@@ -9,6 +9,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use super::text::display_width_u16;
 use super::widgets::panel_contrast_fg;
 use crate::app::AppState;
 use crate::config::TabStatusMode;
@@ -925,7 +926,6 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(ws) = app.workspaces.get(active_ws_idx) else {
         return;
     };
-
     let p = &app.palette;
     let separator = if app.tabs_powerline {
         SeparatorStyle::Powerline
@@ -1047,7 +1047,9 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         // use the readable `text` color on the surface bg, and both are BOLD.
         // Auto-named tabs keep a herdr-only "unnamed" hint, but expressed as a
         // dimmer color (`overlay1`) rather than by dropping bold or dimming the
-        // focused tab — zellij never renders a non-bold or dimmed tab.
+        // focused tab — zellij never renders a non-bold or dimmed tab. This
+        // also covers upstream bc764c8 (keep active auto-named tab readable):
+        // the active tab is never dimmed here regardless of auto-naming.
         let fg = if active {
             panel_contrast_fg(p)
         } else if tab.is_auto_named() {
@@ -1383,6 +1385,39 @@ mod tests {
         assert_eq!(left.side.blocked_jump_to, None);
         assert_eq!(right.side.hidden_attention(), 0);
         assert_eq!(right.side.blocked_jump_to, None);
+    }
+
+    /// Port of upstream bc764c8: an active auto-named tab must stay readable —
+    /// accent background, never DIM. Adapted to the stateless zellij painter:
+    /// herdr paints every tab label BOLD (zellij fidelity) and expresses the
+    /// auto-named hint via color only, so unlike upstream we assert BOLD is
+    /// present rather than absent.
+    #[test]
+    fn active_auto_named_tab_keeps_readable_weight() {
+        let mut app = AppState::test_new();
+        let ws = Workspace::test_new("test");
+        assert!(ws.tabs[0].is_auto_named(), "tab 0 must be auto-named");
+
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.view.tab_bar_rect = Rect::new(0, 0, 30, 1);
+        let chromes = chromes_from_ws(&app.workspaces[0]);
+        let view =
+            compute_tab_bar_view(chromes, 0, TabStatusMode::Off, app.view.tab_bar_rect, false);
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.tab_chrome = view.tab_chrome;
+        app.view.tab_status_mode = view.tab_status_mode;
+        app.view.tab_overflow = view.overflow;
+        app.view.new_tab_hit_area = view.new_tab_hit_area;
+
+        let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+        let tab_rect = app.view.tab_hit_areas[0];
+        // Interior cell (skip the tab's own left separator column).
+        let style = buffer[(tab_rect.x + 1, tab_rect.y)].style();
+
+        assert_eq!(style.bg, Some(app.palette.accent));
+        assert!(!style.add_modifier.contains(Modifier::DIM));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -2270,5 +2305,35 @@ mod tests {
             "must not exceed budget: {out:?} ({})",
             out.width()
         );
+    }
+
+    /// Port of upstream b44ca3b: tab widths must use Unicode display columns,
+    /// not char counts, for CJK labels. Adapted to the fork's TabChrome-based
+    /// `tab_width(chrome, mode)` which adds 4 interior padding cols plus the
+    /// 2 zellij separator cols.
+    #[test]
+    fn tab_width_uses_display_width_for_cjk_labels() {
+        let chrome = TabChrome {
+            status: None,
+            name: "提交 herdr 的反馈".into(),
+            zoomed: false,
+            is_attention: false,
+            agent_state: None,
+        };
+
+        assert_eq!(
+            tab_width(&chrome, TabStatusMode::Off),
+            display_width_u16("提交 herdr 的反馈") + 4 + TAB_SEPARATOR_OVERHEAD
+        );
+    }
+
+    /// Port of upstream b44ca3b: the trailing wide glyph of a CJK tab label
+    /// must survive rendering (no display-width truncation mid-glyph).
+    #[test]
+    fn tab_bar_renders_trailing_cjk_character() {
+        let app = app_with_tab_bar(&["提交 herdr 的反馈"], 0, Rect::new(0, 0, 30, 1), true);
+        let buffer = render_to_buffer(&app, app.view.tab_bar_rect);
+        let row = buffer_row_text(&buffer, app.view.tab_bar_rect, 0);
+        assert!(row.contains('馈'), "tab row: {row:?}");
     }
 }

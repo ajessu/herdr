@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crossterm::terminal;
 
 use super::{
-    auto_updates_enabled, repeat_key_identity, App, Mode, ANIMATION_INTERVAL,
+    background_update_check_enabled, repeat_key_identity, App, Mode, ANIMATION_INTERVAL,
     AUTO_UPDATE_CHECK_INTERVAL, GIT_REMOTE_STATUS_REFRESH_INTERVAL, MIN_RENDER_INTERVAL,
     RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
 };
@@ -68,6 +68,20 @@ impl App {
             crate::api::schema::Method::ServerStop(_)
                 | crate::api::schema::Method::ServerLiveHandoff(_)
         );
+        if matches!(
+            &msg.request.method,
+            crate::api::schema::Method::WorktreeCreate(_)
+                | crate::api::schema::Method::WorktreeRemove(_)
+        ) {
+            self.drain_all_internal_events();
+            let deferred_changed =
+                self.handle_deferred_worktree_api_request(msg.request, msg.respond_to);
+            if !skip_default_workspace {
+                changed |= self.ensure_default_workspace();
+            }
+            self.sync_prefix_input_source(previous_mode);
+            return changed | deferred_changed;
+        }
         let response = self.handle_api_request(msg.request);
         if !skip_default_workspace {
             changed |= self.ensure_default_workspace();
@@ -159,6 +173,10 @@ impl App {
             }
             crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                 self.update_host_terminal_theme(kind, color)
+            }
+            crate::raw_input::RawInputEvent::HostColorSchemeChanged(appearance) => {
+                self.query_host_terminal_theme();
+                self.set_host_terminal_appearance(appearance, true)
             }
             crate::raw_input::RawInputEvent::Unsupported => false,
         };
@@ -268,7 +286,7 @@ impl App {
             .session_save_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            self.save_session_now();
+            self.start_background_session_save();
         }
 
         if let Some(deadline) = self
@@ -429,7 +447,7 @@ impl App {
     }
 
     pub(crate) fn run_auto_update_check(&mut self) {
-        if !auto_updates_enabled(self.no_session) {
+        if !background_update_check_enabled(self.no_session, self.update_version_check_enabled) {
             self.next_auto_update_check = None;
             return;
         }
@@ -449,7 +467,7 @@ impl App {
     }
 
     pub(crate) fn run_agent_manifest_update_check(&mut self) {
-        if !auto_updates_enabled(self.no_session) {
+        if !background_update_check_enabled(self.no_session, self.update_manifest_check_enabled) {
             self.next_agent_manifest_update_check = None;
             return;
         }
@@ -680,6 +698,7 @@ mod tests {
             rect: ratatui::layout::Rect::new(0, 0, 80, 24),
             inner_rect: ratatui::layout::Rect::new(0, 0, 80, 24),
             scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
             is_focused: true,
             stack: None,
         });
@@ -917,6 +936,7 @@ mod tests {
             rect: ratatui::layout::Rect::new(0, 0, cols, rows),
             inner_rect: ratatui::layout::Rect::new(0, 0, cols, rows),
             scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
             is_focused: true,
             stack: None,
         });

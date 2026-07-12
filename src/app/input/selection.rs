@@ -189,6 +189,7 @@ mod autoscroll_tests {
             rect: Rect::new(0, 0, 80, 24),
             inner_rect: Rect::new(0, 0, 80, 24),
             scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
             is_focused: true,
             stack: None,
         });
@@ -208,6 +209,7 @@ mod autoscroll_tests {
             rect: Rect::new(0, 5, 80, 24),
             inner_rect: Rect::new(0, 5, 80, 24),
             scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
             is_focused: true,
             stack: None,
         });

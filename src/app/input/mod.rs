@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 
 use crate::app::PaneClickState;
 use crate::input::TerminalKey;
+#[cfg(test)]
 use ratatui::layout::Direction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,18 +47,20 @@ mod terminal;
 
 pub(crate) use self::{
     modal::{
-        handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
-        handle_keybind_help_key, handle_navigator_key, handle_rename_key,
+        handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
         insert_navigator_search_text, insert_rename_input_text, move_mode_action, pane_mode_action,
         resize_mode_action, session_mode_action, tab_mode_action, ModeAction,
     },
-    navigate::terminal_direct_navigation_action,
+    navigate::{
+        terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
+    },
     settings::open_settings_at,
 };
 use self::{
     modal::{
         modal_action_from_key, ModalAction, ONBOARDING_WELCOME_ACTIONS, RELEASE_NOTES_ACTIONS,
     },
+    mouse::MouseAction,
     settings::SettingsAction,
 };
 use super::state::{AppState, Mode};
@@ -204,7 +207,7 @@ impl App {
                 return;
             }
             Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                handle_rename_key(&mut self.state, key_event);
+                self.handle_rename_key_via_api(key_event);
                 return;
             }
             Mode::NewLinkedWorktree => {
@@ -220,11 +223,11 @@ impl App {
                 return;
             }
             Mode::ConfirmClose => {
-                handle_confirm_close_key(&mut self.state, key_event);
+                self.handle_confirm_close_key_via_api(key_event);
                 return;
             }
             Mode::ContextMenu => {
-                handle_context_menu_key(&mut self.state, &mut self.terminal_runtimes, key_event);
+                self.handle_context_menu_key_via_api(key_event);
                 return;
             }
             Mode::Settings => {
@@ -283,12 +286,7 @@ impl App {
     }
 
     pub(super) fn execute_shared_action(&mut self, action: navigate::NavigateAction) {
-        navigate::execute_navigate_action_in_context(
-            &mut self.state,
-            &mut self.terminal_runtimes,
-            action,
-            navigate::ActionContext::Direct,
-        );
+        self.execute_tui_navigate_action(action, navigate::ActionContext::Direct);
     }
 
     /// Resolve mode-entry keys and shared bindings ahead of mode-specific
@@ -331,12 +329,7 @@ impl App {
                 self.state.mode = Mode::normal_mode(self.state.active.is_some());
             }
             ModeAction::Navigate(nav_action) => {
-                navigate::execute_navigate_action_in_context(
-                    &mut self.state,
-                    &mut self.terminal_runtimes,
-                    nav_action,
-                    navigate::ActionContext::Sticky,
-                );
+                self.execute_tui_navigate_action(nav_action, navigate::ActionContext::Sticky);
             }
             ModeAction::SidebarNavigate(dir) => match dir {
                 NavDirection::Up => {
@@ -411,6 +404,20 @@ impl App {
                     return false;
                 }
                 insert_navigator_search_text(&mut self.state, &self.terminal_runtimes, text);
+                true
+            }
+            Mode::Copy => {
+                let Some(prompt) = self
+                    .state
+                    .copy_mode
+                    .as_mut()
+                    .and_then(|copy_mode| copy_mode.search.prompt.as_mut())
+                else {
+                    return false;
+                };
+                prompt
+                    .query
+                    .extend(text.chars().filter(|ch| !ch.is_control()));
                 true
             }
             _ => false,
@@ -520,24 +527,74 @@ impl App {
         let previous_agent_panel_sort = self.state.agent_panel_sort;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
+            let right_button = matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Right)
+                    | MouseEventKind::Up(MouseButton::Right)
+                    | MouseEventKind::Drag(MouseButton::Right)
+            );
+            let intentional_pane_press = matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
+            );
+            if !right_button
+                && intentional_pane_press
+                && matches!(self.state.mode, Mode::Terminal | Mode::Resize)
+            {
+                if let (Some(ws_idx), Some(info)) = (
+                    self.state.active,
+                    self.state.pane_at(mouse.column, mouse.row).cloned(),
+                ) {
+                    self.focus_pane_internal_via_api(ws_idx, info.id);
+                }
+            }
             if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
                 match action {
-                    SettingsAction::SaveTheme(name) => self.save_theme(&name),
-                    SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                    SettingsAction::SaveToastDelivery(delivery) => {
-                        self.save_toast_delivery(delivery)
+                    MouseAction::Settings(action) => match action {
+                        SettingsAction::SaveTheme(name) => self.save_theme(&name),
+                        SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
+                        SettingsAction::SaveToastDelivery(delivery) => {
+                            self.save_toast_delivery(delivery)
+                        }
+                        SettingsAction::SaveAgentBorderLabels(enabled) => {
+                            self.save_agent_border_labels(enabled)
+                        }
+                        SettingsAction::SavePaneHistory(enabled) => {
+                            self.save_pane_history_persistence(enabled)
+                        }
+                        SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
+                            self.save_switch_ascii_input_source_in_prefix(enabled)
+                        }
+                        SettingsAction::InstallRecommendedIntegrations => {
+                            self.install_recommended_integrations()
+                        }
+                    },
+                    MouseAction::FocusWorkspace { ws_idx } => {
+                        self.focus_workspace_idx_via_api(ws_idx)
                     }
-                    SettingsAction::SaveAgentBorderLabels(enabled) => {
-                        self.save_agent_border_labels(enabled)
+                    MouseAction::FocusTab { tab_idx } => self.focus_tab_idx_via_api(tab_idx),
+                    MouseAction::FocusPane { ws_idx, pane_id } => {
+                        self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
-                    SettingsAction::SavePaneHistory(enabled) => {
-                        self.save_pane_history_persistence(enabled)
+                    MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
+                    MouseAction::MoveWorkspace {
+                        source_ws_idx,
+                        insert_idx,
+                    } => self.move_workspace_via_api(source_ws_idx, insert_idx),
+                    MouseAction::MoveTab {
+                        ws_idx,
+                        source_tab_idx,
+                        insert_idx,
+                    } => self.move_tab_via_api(ws_idx, source_tab_idx, insert_idx),
+                    MouseAction::SetSplitRatio { path, ratio } => {
+                        self.set_split_ratio_via_api(path, ratio)
                     }
-                    SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
-                        self.save_switch_ascii_input_source_in_prefix(enabled)
+                    MouseAction::RenameModal(action) => {
+                        self.apply_rename_mouse_action_via_api(action)
                     }
-                    SettingsAction::InstallRecommendedIntegrations => {
-                        self.install_recommended_integrations()
+                    MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
+                    MouseAction::ContextMenu { menu, idx } => {
+                        self.apply_context_menu_action_via_api(menu, idx)
                     }
                 }
             }
@@ -606,6 +663,11 @@ impl App {
     }
 
     fn handle_pane_double_click(&mut self, mouse: MouseEvent) -> bool {
+        if !self.state.copy_on_select {
+            self.last_pane_click = None;
+            return false;
+        }
+
         // A pane press stops being a double-click candidate once it becomes
         // a drag or completes as a real text selection.
         match mouse.kind {
@@ -765,6 +827,10 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
             .as_ref()
             .is_some_and(|open| open.search_focused),
         Mode::Navigator => state.navigator.search_focused,
+        Mode::Copy => state
+            .copy_mode
+            .as_ref()
+            .is_some_and(|copy_mode| copy_mode.search.prompt.is_some()),
         _ => false,
     }
 }
@@ -969,6 +1035,7 @@ impl AppState {
         self.mark_session_dirty();
     }
 
+    #[cfg(test)]
     pub(crate) fn split_pane(
         &mut self,
         terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
@@ -992,7 +1059,8 @@ impl AppState {
             .and_then(|i| self.workspaces.get(i))
             .and_then(|ws| {
                 let tab = ws.active_tab()?;
-                tab.cwd_for_pane(tab.focused_pane_id(), &self.terminals, terminal_runtimes)
+                let pane_id = tab.focused_pane_id();
+                tab.follow_cwd_for_pane(pane_id, &self.terminals, terminal_runtimes)
             });
         let cwd = Some(super::creation::resolve_new_terminal_cwd(
             &self.new_terminal_cwd,

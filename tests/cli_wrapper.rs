@@ -1029,6 +1029,9 @@ fn help_commands_exit_successfully() {
     let help_cases: &[&[&str]] = &[
         &["-h"],
         &["--help"],
+        &["api", "-h"],
+        &["api", "schema", "-h"],
+        &["completion", "-h"],
         &["status", "-h"],
         &["server", "-h"],
         &["workspace", "-h"],
@@ -1058,6 +1061,46 @@ fn help_commands_exit_successfully() {
 }
 
 #[test]
+fn completion_command_prints_zsh_script_without_session_startup() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["completion", "zsh"])
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "status={:?} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("#compdef herdr"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("bash elvish fish powershell zsh"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("'--direction[]:DIRECTION:(right down)'"),
+        "pane split/plugin pane open should complete --direction right|down without requiring equals: {stdout}"
+    );
+    assert!(
+        !stdout.contains("--cwd=[]"),
+        "zsh completions should not suggest equals-style values unsupported by most manual parsers: {stdout}"
+    );
+    assert!(
+        !stdout.contains("--direction=[]"),
+        "zsh completions should not suggest equals-style direction values: {stdout}"
+    );
+    assert!(
+        !stdout.contains("live-handoff"),
+        "internal server handoff command should not be completed: {stdout}"
+    );
+}
+
+#[test]
 fn root_help_hides_explicit_client_command() {
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .arg("--help")
@@ -1070,6 +1113,142 @@ fn root_help_hides_explicit_client_command() {
         !stdout.contains("herdr client"),
         "root help should not advertise the internal client command: {stdout}"
     );
+}
+
+#[test]
+fn root_help_advertises_api_schema_command_group() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("herdr api <subcommand>"),
+        "root help should advertise the api command group: {stdout}"
+    );
+}
+
+#[test]
+fn api_schema_default_output_is_a_short_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["api", "schema"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Herdr API schema"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("Use `herdr api schema --json`"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.len() < 400,
+        "summary should stay small enough for terminal output: {stdout}"
+    );
+}
+
+#[test]
+fn api_schema_json_prints_bundled_schema() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["api", "schema", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(schema
+        .get("protocol")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|protocol| protocol > 0));
+    assert_eq!(
+        schema
+            .get("schemas")
+            .and_then(serde_json::Value::as_object)
+            .map(serde_json::Map::len),
+        Some(5)
+    );
+}
+
+#[test]
+fn api_snapshot_prints_live_session_snapshot() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn({
+        let socket_path = socket_path.clone();
+        move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(700);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut line = String::new();
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        reader.read_line(&mut line).unwrap();
+                        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                        assert_eq!(request["method"], "session.snapshot");
+                        assert_eq!(request["id"], "cli:api:snapshot");
+
+                        let response = serde_json::json!({
+                            "id": "cli:api:snapshot",
+                            "result": {
+                                "type": "ok",
+                                "marker": "snapshot-passthrough"
+                            }
+                        });
+                        writeln!(stream, "{response}").unwrap();
+                        stream.flush().unwrap();
+                        let _ = fs::remove_file(socket_path);
+                        return;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept failed: {err}"),
+                }
+            }
+            panic!("CLI did not connect to fake API socket");
+        }
+    });
+
+    let value = run_cli_json(&socket_path, &["api", "snapshot"]);
+
+    assert_eq!(value["result"]["marker"], "snapshot-passthrough");
+    server.join().unwrap();
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn api_schema_output_writes_bundled_schema_to_file() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let schema_path = base.join("herdr-api.schema.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["api", "schema", "--output"])
+        .arg(&schema_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("wrote API schema"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let schema: serde_json::Value =
+        serde_json::from_slice(&fs::read(&schema_path).unwrap()).unwrap();
+    assert!(schema
+        .get("protocol")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|protocol| protocol > 0));
+
+    cleanup_test_base(&base);
 }
 
 #[test]
@@ -1351,7 +1530,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));
     let status_stdout = String::from_utf8_lossy(&integration_status.stdout);
-    assert!(status_stdout.contains("pi: current (v2)"));
+    assert!(status_stdout.contains("pi: current (v5)"));
     assert!(status_stdout.contains("claude: not installed"));
 
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_herdr"))
@@ -1447,7 +1626,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  protocol: 14"),
+        full_stdout.contains("  protocol: 16"),
         "stdout: {full_stdout}"
     );
     assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
@@ -1480,7 +1659,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains("protocol: 14"),
+        server_stdout.contains("protocol: 16"),
         "stdout: {server_stdout}"
     );
 
@@ -1492,7 +1671,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
-        client_stdout.contains("protocol: 14"),
+        client_stdout.contains("protocol: 16"),
         "stdout: {client_stdout}"
     );
     assert!(
@@ -1502,7 +1681,7 @@ fn status_commands_report_client_and_server_versions() {
 
     let full_json = run_cli_json(&socket_path, &["status", "--json"]);
     assert_eq!(full_json["client"]["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(full_json["client"]["protocol"], 14);
+    assert_eq!(full_json["client"]["protocol"], 16);
     assert_eq!(full_json["server"]["status"], "running");
     assert_eq!(full_json["server"]["running"], true);
     assert_eq!(full_json["server"]["compatible"], true);
@@ -1516,12 +1695,12 @@ fn status_commands_report_client_and_server_versions() {
     let server_json = run_cli_json(&socket_path, &["status", "server", "--json"]);
     assert_eq!(server_json["status"], "running");
     assert_eq!(server_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(server_json["protocol"], 14);
+    assert_eq!(server_json["protocol"], 16);
     assert_eq!(server_json["compatible"], true);
 
     let client_json = run_cli_json(&socket_path, &["status", "client", "--json"]);
     assert_eq!(client_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(client_json["protocol"], 14);
+    assert_eq!(client_json["protocol"], 16);
     assert!(client_json["binary"]
         .as_str()
         .is_some_and(|path| !path.is_empty()));
@@ -1583,25 +1762,19 @@ fn server_stop_command_shuts_down_running_server() {
         "server stop should not print stdout: {}",
         String::from_utf8_lossy(&stopped.stdout)
     );
+    assert!(
+        !socket_path.exists() || UnixStream::connect(&socket_path).is_err(),
+        "api socket should be removed or stale before server stop returns"
+    );
+    assert!(
+        !client_socket.exists() || UnixStream::connect(&client_socket).is_err(),
+        "client socket should be removed or stale before server stop returns"
+    );
 
     let pid = herdr.child.process_id();
     let exit_status = herdr.child.wait().unwrap();
     unregister_spawned_herdr_pid(pid);
     assert!(exit_status.success(), "server stop should exit cleanly");
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline && (socket_path.exists() || client_socket.exists()) {
-        thread::sleep(Duration::from_millis(25));
-    }
-
-    assert!(
-        !socket_path.exists() || UnixStream::connect(&socket_path).is_err(),
-        "api socket should be removed or stale after server stop"
-    );
-    assert!(
-        !client_socket.exists() || UnixStream::connect(&client_socket).is_err(),
-        "client socket should be removed or stale after server stop"
-    );
 
     cleanup_spawned_herdr(herdr, base);
 }
@@ -2014,6 +2187,76 @@ fn worktree_management_commands_work() {
 }
 
 #[test]
+fn forced_worktree_remove_terminates_processes_inside_checkout() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let repo = base.join("repo");
+    let checkout = base.join("checkout-with-process");
+    create_committed_repo(&repo);
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli_json(
+        &socket_path,
+        &[
+            "worktree",
+            "create",
+            "--cwd",
+            repo.to_str().unwrap(),
+            "--branch",
+            "worktree/force-process",
+            "--path",
+            checkout.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let child_workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let pid_file = base.join("worktree-remove-force.pid");
+    let command = format!(
+        "python3 -c 'import os,time,pathlib; pathlib.Path(r\"{}\").write_text(str(os.getpid())); time.sleep(1000)'",
+        pid_file.display()
+    );
+    let ran = run_cli(&socket_path, &["pane", "run", &pane_id, &command]);
+    assert!(
+        ran.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(5)).unwrap_or_else(|err| {
+        panic!("failed to read pane child pid: {err}");
+    });
+    assert!(process_exists(pid), "child process was not running");
+
+    let removed = run_cli_json(
+        &socket_path,
+        &[
+            "worktree",
+            "remove",
+            "--workspace",
+            &child_workspace_id,
+            "--force",
+            "--json",
+        ],
+    );
+    assert_eq!(removed["result"]["type"], "worktree_removed");
+    assert!(wait_for_pid_exit(pid, Duration::from_secs(3)));
+    assert!(!checkout.exists());
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn worktree_open_existing_checkout_by_path_and_branch() {
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -2127,6 +2370,98 @@ fn worktree_open_existing_checkout_by_path_and_branch() {
     assert_eq!(removed["result"]["type"], "worktree_removed");
 
     cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn config_check_reports_invalid_config_without_server() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let config_dir = config_home.join(app_dir_name());
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[keys\nnew_workspace = \"g\"\n",
+    )
+    .unwrap();
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+
+    assert_eq!(checked.status.code(), Some(1));
+    assert!(
+        checked.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("config: issues found"), "{stdout}");
+    assert!(stdout.contains("TOML parse error"), "{stdout}");
+    assert!(stdout.contains("line 1"), "{stdout}");
+
+    fs::write(
+        config_dir.join("config.toml"),
+        "[ui]\nsidebar_min_width = 50\nsidebar_max_width = 30\n",
+    )
+    .unwrap();
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert_eq!(checked.status.code(), Some(1));
+    assert!(stdout.contains("sidebar_min_width (50)"), "{stdout}");
+    assert!(stdout.contains("sidebar_max_width (30)"), "{stdout}");
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn config_check_reports_unreadable_config_path() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let config_path = config_home.join(app_dir_name()).join("config.toml");
+    fs::create_dir_all(&config_path).unwrap();
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+
+    assert_eq!(checked.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("config: issues found"), "{stdout}");
+    assert!(stdout.contains("config read error"), "{stdout}");
+    assert!(stdout.contains("using defaults"), "{stdout}");
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn config_check_reports_ok_when_config_is_missing() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+
+    assert!(checked.status.success());
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("config: ok"), "{stdout}");
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn config_check_rejects_json_output() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check", "--json"]);
+
+    assert_eq!(checked.status.code(), Some(2));
+    assert!(checked.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&checked.stderr),
+        "usage: herdr config check\n"
+    );
+
+    cleanup_test_base(&base);
 }
 
 #[test]
@@ -4021,6 +4356,48 @@ fn wait_agent_status_exits_immediately_when_status_already_matches() {
     assert_eq!(waited_json["event"], "pane.agent_status_changed");
     assert_eq!(waited_json["data"]["agent_status"], "idle");
     assert_eq!(waited_json["data"]["agent"], "pi");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn wait_agent_status_times_out_when_status_does_not_match() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_cli_timeout_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(created["result"]["type"], "workspace_created");
+
+    let waited = run_cli(
+        &socket_path,
+        &[
+            "wait",
+            "agent-status",
+            "1-1",
+            "--status",
+            "blocked",
+            "--timeout",
+            "100",
+        ],
+    );
+    assert!(!waited.status.success());
+    assert!(
+        String::from_utf8_lossy(&waited.stderr)
+            .contains("timed out waiting for agent status change"),
+        "stderr: {}",
+        String::from_utf8_lossy(&waited.stderr)
+    );
 
     cleanup_spawned_herdr(herdr, base);
 }

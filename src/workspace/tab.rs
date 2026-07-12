@@ -429,6 +429,12 @@ impl Tab {
         FocusTarget::Tiled(self.layout.focused())
     }
 
+    #[cfg(test)]
+    pub fn close_focused(&mut self) -> Option<DetachedPane> {
+        let pane_id = self.layout.focused();
+        self.detach_pane(pane_id)
+    }
+
     pub fn focused_pane_id(&self) -> PaneId {
         self.focused_target().pane_id()
     }
@@ -624,5 +630,15 @@ impl Tab {
         terminal_runtimes
             .get(terminal_id)
             .and_then(|rt| rt.foreground_cwd())
+    }
+
+    pub fn follow_cwd_for_pane(
+        &self,
+        pane_id: PaneId,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<PathBuf> {
+        self.foreground_cwd_for_pane(pane_id, terminal_runtimes)
+            .or_else(|| self.cwd_for_pane(pane_id, terminals, terminal_runtimes))
     }
 }

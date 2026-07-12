@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::scrollbar::{render_scrollbar, should_show_scrollbar, SCROLLBAR_THUMB};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
+use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
@@ -115,7 +116,7 @@ pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect 
     }
 
     let label = agent_panel_sort_label(sort);
-    let width = label.chars().count() as u16;
+    let width = display_width_u16(label);
     Rect::new(
         area.x + area.width.saturating_sub(width),
         area.y + 1,
@@ -195,30 +196,15 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
     }
 }
 
-fn truncate_text(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
-    format!("{prefix}…")
-}
-
 fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -> String {
     let Some(tab_label) = entry.primary_tab_label.as_deref() else {
-        return truncate_text(&entry.primary_label, max_width);
+        return truncate_end(&entry.primary_label, max_width);
     };
 
     let separator = " · ";
-    let separator_width = separator.chars().count();
+    let separator_width = display_width(separator);
     if max_width <= separator_width + 2 {
-        return truncate_text(
+        return truncate_end(
             &format!("{}{}{}", entry.primary_label, separator, tab_label),
             max_width,
         );
@@ -232,8 +218,8 @@ fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -
         .max(1);
     let mut tab_budget = available.saturating_sub(workspace_budget);
 
-    let workspace_len = entry.primary_label.chars().count();
-    let tab_len = tab_label.chars().count();
+    let workspace_len = display_width(&entry.primary_label);
+    let tab_len = display_width(tab_label);
 
     if workspace_len < workspace_budget {
         let spare = workspace_budget - workspace_len;
@@ -248,9 +234,9 @@ fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -
 
     format!(
         "{}{}{}",
-        truncate_text(&entry.primary_label, workspace_budget),
+        truncate_end(&entry.primary_label, workspace_budget),
         separator,
-        truncate_text(tab_label, tab_budget)
+        truncate_end(tab_label, tab_budget)
     )
 }
 
@@ -305,7 +291,11 @@ pub(crate) fn workspace_parent_group_state(
     })
 }
 
-fn grouped_child_display_label(label: &str, branch: Option<&str>, has_custom_name: bool) -> String {
+pub(crate) fn grouped_child_display_label(
+    label: &str,
+    branch: Option<&str>,
+    has_custom_name: bool,
+) -> String {
     if has_custom_name {
         return label.to_string();
     }
@@ -323,7 +313,7 @@ pub(crate) enum WorkspaceListEntry {
     Workspace { ws_idx: usize, indented: bool },
 }
 
-fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
+pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
     matches!(
         entries.get(idx.saturating_add(1)),
         Some(WorkspaceListEntry::Workspace { indented: true, .. })
@@ -346,6 +336,17 @@ pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested:
 }
 
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
+    workspace_list_entries_inner(app, false)
+}
+
+/// Like [`workspace_list_entries`] but always expands worktree groups, ignoring
+/// `collapsed_space_keys`. The mobile switcher has no collapse affordance and
+/// always shows the full worktree tree.
+pub(crate) fn workspace_list_entries_expanded(app: &AppState) -> Vec<WorkspaceListEntry> {
+    workspace_list_entries_inner(app, true)
+}
+
+fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<WorkspaceListEntry> {
     let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
         if let Some(space) = ws.worktree_space() {
@@ -414,7 +415,7 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
             });
             continue;
         };
-        let collapsed = app.collapsed_space_keys.contains(&space.key);
+        let collapsed = !force_expanded && app.collapsed_space_keys.contains(&space.key);
         entries.push(WorkspaceListEntry::Workspace {
             ws_idx: parent_idx,
             indented: false,
@@ -949,6 +950,10 @@ fn entry_state(app: &AppState, entries: &[WorkspaceListEntry], idx: usize) -> (A
 /// Renders button-like rows with full-row background on active/selected, a
 /// leading 1-col attention marker, the row number, and a trailing state icon.
 pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let is_navigating = matches!(app.mode, Mode::Navigate);
 
     let p = &app.palette;
@@ -1056,6 +1061,13 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     let detail_above = app.view.sidebar_overflow.collapsed_detail_above;
     let detail_below = app.view.sidebar_overflow.collapsed_detail_below;
     if detail_content_area != Rect::default() {
+        // TODO(upstream-merge): port 552aa8c (source collapsed agent rows from
+        // agent_panel_entries across all workspaces) and 0cd0b1a (number rows by
+        // list position, `{position:<2}` layout). Entangled: the fork rail's
+        // per-workspace anchored window here must stay in sync with
+        // collapsed_detail_window() and the click mapping in
+        // src/app/input/sidebar.rs, plus upstream's collapsed_sidebar_numbers_*
+        // tests assume the upstream row layout.
         if let Some((ws_idx, details, anchor)) = collapsed_detail_details(app) {
             if let Some(ws) = app.workspaces.get(ws_idx) {
                 let win = super::overflow::anchored_window(
@@ -1334,11 +1346,7 @@ fn render_workspace_list(
                     })
                     .unwrap_or(0);
                 let max_branch_len = (card.rect.width as usize).saturating_sub(5 + reserved);
-                let branch_display = if branch.len() > max_branch_len {
-                    format!("{}…", &branch[..max_branch_len.saturating_sub(1)])
-                } else {
-                    branch
-                };
+                let branch_display = truncate_end(&branch, max_branch_len);
                 let branch_color = if selected || is_active {
                     p.mauve
                 } else {
@@ -1741,6 +1749,125 @@ mod tests {
         assert_eq!(labels, ["four", "two", "one", "three"]);
     }
 
+    // TODO(upstream-merge): port 552aa8c/0cd0b1a — upstream tests
+    // collapsed_sidebar_numbers_grouped_agents_by_list_position,
+    // collapsed_sidebar_keeps_status_visible_for_two_digit_positions, and
+    // collapsed_sidebar_numbers_priority_agents_by_list_position assert the
+    // upstream collapsed-row layout (agent_panel_entries source, `{position:<2}`
+    // numbering). Reinstate them when that layout is ported into the fork rail.
+    #[cfg(any())]
+    #[test]
+    fn collapsed_sidebar_numbers_grouped_agents_by_list_position() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+
+        for ws_idx in 0..app.workspaces.len() {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        }
+
+        let area = Rect::new(0, 0, 4, 12);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .expect("collapsed sidebar should render");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(detail_area.x, detail_area.y)].symbol(), "1");
+        assert_eq!(buffer[(detail_area.x, detail_area.y + 1)].symbol(), "2");
+    }
+
+    // TODO(upstream-merge): port 0cd0b1a — see note above.
+    #[cfg(any())]
+    #[test]
+    fn collapsed_sidebar_keeps_status_visible_for_two_digit_positions() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = (1..=10)
+            .map(|idx| Workspace::test_new(&format!("workspace-{idx}")))
+            .collect();
+        app.ensure_test_terminals();
+
+        for ws_idx in 0..app.workspaces.len() {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        }
+
+        let area = Rect::new(0, 0, 4, 25);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .expect("collapsed sidebar should render");
+
+        let tenth_row = detail_area.y + 9;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(detail_area.x, tenth_row)].symbol(), "1");
+        assert_eq!(buffer[(detail_area.x + 1, tenth_row)].symbol(), "0");
+        assert_eq!(buffer[(detail_area.x + 2, tenth_row)].symbol(), "○");
+    }
+
+    // TODO(upstream-merge): port 0cd0b1a — see note above.
+    #[cfg(any())]
+    #[test]
+    fn collapsed_sidebar_numbers_priority_agents_by_list_position() {
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let mut second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+        let urgent_pane = second.test_split(ratatui::layout::Direction::Horizontal);
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![first, second];
+        app.ensure_test_terminals();
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
+
+        let set_state = |app: &mut crate::app::state::AppState, ws_idx: usize, pane_id, state| {
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = state;
+        };
+        set_state(&mut app, 0, first_pane, AgentState::Working);
+        set_state(&mut app, 1, second_pane, AgentState::Working);
+        set_state(&mut app, 1, urgent_pane, AgentState::Blocked);
+
+        assert_eq!(app.workspaces[1].public_pane_number(urgent_pane), Some(2));
+        assert_eq!(agent_panel_entries(&app)[0].pane_id, urgent_pane);
+
+        let area = Rect::new(0, 0, 4, 16);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .expect("collapsed sidebar should render");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(detail_area.x, detail_area.y)].symbol(), "1");
+        assert_eq!(buffer[(detail_area.x, detail_area.y + 1)].symbol(), "2");
+        assert_eq!(buffer[(detail_area.x, detail_area.y + 2)].symbol(), "3");
+        assert_eq!(buffer[(detail_area.x + 2, detail_area.y)].symbol(), "◉");
+        assert_eq!(
+            buffer[(detail_area.x + 2, detail_area.y)].style().fg,
+            Some(app.palette.red)
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn all_workspaces_agent_panel_entries_use_live_root_runtime_cwd_for_workspace_label() {
@@ -1886,6 +2013,31 @@ mod tests {
             grouped_child_display_label("herdr-issue", Some("worktree/issue-137"), false),
             "issue-137"
         );
+    }
+
+    #[test]
+    fn workspace_list_truncates_cjk_branch_without_panic() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("repo");
+        ws.cached_git_branch = Some("feature/中文-分支-644".into());
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
+            ws_idx: 0,
+            rect: Rect::new(0, 1, 15, 2),
+            indented: false,
+        }];
+
+        let mut terminal = Terminal::new(TestBackend::new(15, 6)).expect("test terminal");
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        terminal
+            .draw(|frame| {
+                render_workspace_list(&app, &runtimes, frame, Rect::new(0, 0, 15, 6), false)
+            })
+            .expect("workspace list should render");
     }
 
     fn workspace_with_worktree_space(

@@ -7,6 +7,9 @@ use ratatui::{
 };
 
 use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
+#[cfg(test)]
+use super::text::display_width;
+use super::text::truncate_end;
 use super::widgets::panel_contrast_fg;
 use crate::app::state::{FloatingPaneInfo, Palette};
 use crate::app::{AppState, Mode};
@@ -18,28 +21,13 @@ pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
         .is_some_and(|metrics| metrics.offset_from_bottom > 0)
 }
 
-fn truncate_label(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
-    format!("{prefix}…")
-}
-
-fn pane_border_title(label: &str, pane_width: u16) -> Option<String> {
+fn pane_border_title(label: &str, pane_width: u16, _focused: bool) -> Option<String> {
     let label = label.trim();
     if label.is_empty() || pane_width <= 4 {
         return None;
     }
     let max_label_width = pane_width.saturating_sub(4) as usize;
-    Some(format!(" {} ", truncate_label(label, max_label_width)))
+    Some(format!(" {} ", truncate_end(label, max_label_width)))
 }
 
 fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
@@ -55,11 +43,11 @@ fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
     )
 }
 
-fn pane_inner_rect(area: Rect, framed: bool) -> Rect {
-    if framed {
-        Block::default().borders(Borders::ALL).inner(area)
-    } else {
+pub(crate) fn pane_inner_rect(area: Rect, borders: Borders) -> Rect {
+    if borders.is_empty() {
         area
+    } else {
+        Block::default().borders(borders).inner(area)
     }
 }
 
@@ -76,10 +64,88 @@ fn pane_inner_for(info: &PaneInfo, area: Rect, multi_pane: bool) -> Rect {
         return info.rect;
     }
     if multi_pane {
-        Block::default().borders(Borders::ALL).inner(info.rect)
+        // Honor the border set computed by `apply_pane_chrome` (which accounts
+        // for pane gaps), not an unconditional `Borders::ALL`.
+        pane_inner_rect(info.rect, info.borders)
     } else {
         area
     }
+}
+
+fn ranges_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> bool {
+    a_start < b_start.saturating_add(b_len) && b_start < a_start.saturating_add(a_len)
+}
+
+fn pane_to_right<'a>(info: &PaneInfo, panes: &'a [PaneInfo]) -> Option<&'a PaneInfo> {
+    let right = info.rect.x.saturating_add(info.rect.width);
+    panes.iter().find(|other| {
+        other.id != info.id
+            && other.rect.x == right
+            && ranges_overlap(
+                info.rect.y,
+                info.rect.height,
+                other.rect.y,
+                other.rect.height,
+            )
+    })
+}
+
+fn pane_below<'a>(info: &PaneInfo, panes: &'a [PaneInfo]) -> Option<&'a PaneInfo> {
+    let bottom = info.rect.y.saturating_add(info.rect.height);
+    panes.iter().find(|other| {
+        other.id != info.id
+            && other.rect.y == bottom
+            && ranges_overlap(info.rect.x, info.rect.width, other.rect.x, other.rect.width)
+    })
+}
+
+fn shrink_for_one_cell_gap(size: u16) -> u16 {
+    if size > 1 {
+        size - 1
+    } else {
+        size
+    }
+}
+
+pub(crate) fn apply_pane_chrome(
+    panes: Vec<PaneInfo>,
+    pane_borders: bool,
+    pane_gaps: bool,
+) -> Vec<PaneInfo> {
+    let multi_pane = panes.len() > 1;
+    panes
+        .iter()
+        .cloned()
+        .map(|mut info| {
+            let right_neighbor = multi_pane.then(|| pane_to_right(&info, &panes)).flatten();
+            let below_neighbor = multi_pane.then(|| pane_below(&info, &panes)).flatten();
+
+            if multi_pane && pane_gaps && !pane_borders {
+                if right_neighbor.is_some() {
+                    info.rect.width = shrink_for_one_cell_gap(info.rect.width);
+                }
+                if below_neighbor.is_some() {
+                    info.rect.height = shrink_for_one_cell_gap(info.rect.height);
+                }
+            }
+
+            info.borders = if !multi_pane || !pane_borders {
+                Borders::NONE
+            } else {
+                let mut borders = Borders::ALL;
+                if !pane_gaps {
+                    if right_neighbor.is_some() {
+                        borders.remove(Borders::RIGHT);
+                    }
+                    if below_neighbor.is_some() {
+                        borders.remove(Borders::BOTTOM);
+                    }
+                }
+                borders
+            };
+            info
+        })
+        .collect()
 }
 
 fn runtime_for_tab_pane<'a>(
@@ -129,7 +195,12 @@ pub(super) fn resize_tab_panes(
     if tab.zoomed {
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, focused_id) {
-            let pane_inner = pane_inner_rect(area, multi_pane);
+            let borders = if multi_pane && app.pane_borders {
+                Borders::ALL
+            } else {
+                Borders::NONE
+            };
+            let pane_inner = pane_inner_rect(area, borders);
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -143,7 +214,7 @@ pub(super) fn resize_tab_panes(
         return;
     }
 
-    for info in tab.layout.panes(area) {
+    for info in apply_pane_chrome(tab.layout.panes(area), app.pane_borders, app.pane_gaps) {
         let pane_inner = pane_inner_for(&info, area, multi_pane);
 
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
@@ -179,7 +250,12 @@ pub(super) fn compute_pane_infos(
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
-        let pane_inner = pane_inner_rect(area, multi_pane);
+        let borders = if multi_pane && app.pane_borders {
+            Borders::ALL
+        } else {
+            Borders::NONE
+        };
+        let pane_inner = pane_inner_rect(area, borders);
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
@@ -202,18 +278,20 @@ pub(super) fn compute_pane_infos(
             rect: area,
             inner_rect,
             scrollbar_rect,
+            borders,
             is_focused: true,
             stack: None,
         }];
     }
 
-    let mut pane_infos = ws.layout.panes(area);
+    let mut pane_infos = apply_pane_chrome(ws.layout.panes(area), app.pane_borders, app.pane_gaps);
 
     for info in &mut pane_infos {
         // `Block::inner` subtracts a symmetric 1-row/1-col inset regardless of
         // which border set draws it, so the thick-vs-plain choice does not change
         // the inner rect. `pane_inner_for` covers the collapsed-bypass and
-        // single-pane cases; this loop just consumes its result.
+        // single-pane cases and honors the gap-aware borders from
+        // `apply_pane_chrome`; this loop just consumes its result.
         let pane_inner = pane_inner_for(info, area, multi_pane);
 
         let mut inner_rect = pane_inner;
@@ -269,41 +347,6 @@ pub(super) fn render_panes(
         }
 
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            if multi_pane {
-                let (border_style, border_set) = if info.is_focused && terminal_active {
-                    (
-                        Style::default().fg(app.palette.accent),
-                        ratatui::symbols::border::THICK,
-                    )
-                } else if info.is_focused {
-                    (
-                        Style::default().fg(app.palette.accent),
-                        ratatui::symbols::border::PLAIN,
-                    )
-                } else {
-                    (
-                        Style::default().fg(app.palette.overlay0),
-                        ratatui::symbols::border::PLAIN,
-                    )
-                };
-
-                let mut block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .border_set(border_set);
-                if let Some(title) = ws
-                    .pane_state(info.id)
-                    .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-                    .and_then(|terminal| {
-                        terminal.border_label(app.show_agent_labels_on_pane_borders)
-                    })
-                    .and_then(|label| pane_border_title(&label, info.rect.width))
-                {
-                    block = block.title(Line::from(Span::styled(title, border_style)));
-                }
-                frame.render_widget(block, info.rect);
-            }
-
             let show_cursor = info.is_focused
                 && terminal_active
                 && !pane_is_scrolled_back(rt)
@@ -323,6 +366,17 @@ pub(super) fn render_panes(
                 }
             }
 
+            let (copy_search_top, copy_search_bottom, copy_search_matches) =
+                validated_copy_mode_search_matches(app, info, rt);
+            render_copy_mode_search_highlights(
+                app,
+                frame,
+                info,
+                copy_search_top,
+                copy_search_bottom,
+                &copy_search_matches,
+                false,
+            );
             render_selection_highlight(
                 &app.selection,
                 frame,
@@ -332,8 +386,266 @@ pub(super) fn render_panes(
                 &app.palette,
                 app.host_terminal_theme,
             );
+            render_copy_mode_search_highlights(
+                app,
+                frame,
+                info,
+                copy_search_top,
+                copy_search_bottom,
+                &copy_search_matches,
+                true,
+            );
             render_copy_mode_cursor(app, frame, info);
         }
+    }
+
+    render_pane_borders(app, ws, frame);
+}
+
+#[derive(Clone, Copy, Default)]
+struct LineCell {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+fn render_pane_borders(app: &AppState, ws: &crate::workspace::Workspace, frame: &mut Frame) {
+    if !app.pane_borders
+        || app
+            .view
+            .pane_infos
+            .iter()
+            .all(|info| info.borders.is_empty())
+    {
+        return;
+    }
+
+    let mut cells = std::collections::HashMap::<(u16, u16), LineCell>::new();
+    for info in &app.view.pane_infos {
+        add_pane_border_cells(&mut cells, info);
+    }
+    add_split_border_cells(app, &mut cells);
+
+    let buf = frame.buffer_mut();
+    let area = buf.area;
+    for ((x, y), line) in cells {
+        if x < area.x
+            || x >= area.x.saturating_add(area.width)
+            || y < area.y
+            || y >= area.y.saturating_add(area.height)
+        {
+            continue;
+        }
+        let focused = app
+            .view
+            .pane_infos
+            .iter()
+            .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
+        let symbol = line_cell_symbol(line);
+        if symbol.is_empty() {
+            continue;
+        }
+        let cell = &mut buf[(x, y)];
+        cell.set_symbol(symbol);
+        let color = if focused {
+            app.palette.accent
+        } else {
+            app.palette.overlay0
+        };
+        cell.set_style(Style::default().fg(color));
+    }
+
+    render_pane_border_titles(app, ws, frame);
+}
+
+fn add_split_border_cells(
+    app: &AppState,
+    cells: &mut std::collections::HashMap<(u16, u16), LineCell>,
+) {
+    if app.pane_gaps {
+        return;
+    }
+
+    for split in &app.view.split_borders {
+        match split.direction {
+            ratatui::layout::Direction::Horizontal => {
+                let x = split.pos;
+                let end = split.area.y.saturating_add(split.area.height);
+                for y in split.area.y..=end {
+                    if !cells.contains_key(&(x, y)) {
+                        continue;
+                    }
+                    let left = x
+                        .checked_sub(1)
+                        .and_then(|left_x| cells.get(&(left_x, y)))
+                        .is_some_and(|cell| cell.left || cell.right);
+                    let right = cells
+                        .get(&(x.saturating_add(1), y))
+                        .is_some_and(|cell| cell.left || cell.right);
+                    let cell = cells.entry((x, y)).or_default();
+                    cell.up |= y > split.area.y;
+                    cell.down |= y + 1 < end;
+                    cell.left |= left;
+                    cell.right |= right;
+                }
+            }
+            ratatui::layout::Direction::Vertical => {
+                let y = split.pos;
+                let end = split.area.x.saturating_add(split.area.width);
+                for x in split.area.x..=end {
+                    if !cells.contains_key(&(x, y)) {
+                        continue;
+                    }
+                    let up = y
+                        .checked_sub(1)
+                        .and_then(|up_y| cells.get(&(x, up_y)))
+                        .is_some_and(|cell| cell.up || cell.down);
+                    let down = cells
+                        .get(&(x, y.saturating_add(1)))
+                        .is_some_and(|cell| cell.up || cell.down);
+                    let cell = cells.entry((x, y)).or_default();
+                    cell.left |= x > split.area.x;
+                    cell.right |= x + 1 < end;
+                    cell.up |= up;
+                    cell.down |= down;
+                }
+            }
+        }
+    }
+}
+
+fn add_pane_border_cells(
+    cells: &mut std::collections::HashMap<(u16, u16), LineCell>,
+    info: &PaneInfo,
+) {
+    let rect = info.rect;
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let right = rect.x.saturating_add(rect.width).saturating_sub(1);
+    let bottom = rect.y.saturating_add(rect.height).saturating_sub(1);
+
+    if info.borders.contains(Borders::TOP) {
+        for x in rect.x..=right {
+            let cell = cells.entry((x, rect.y)).or_default();
+            cell.left |= x > rect.x;
+            cell.right |= x < right;
+        }
+    }
+    if info.borders.contains(Borders::BOTTOM) {
+        for x in rect.x..=right {
+            let cell = cells.entry((x, bottom)).or_default();
+            cell.left |= x > rect.x;
+            cell.right |= x < right;
+        }
+    }
+    if info.borders.contains(Borders::LEFT) {
+        for y in rect.y..=bottom {
+            let cell = cells.entry((rect.x, y)).or_default();
+            cell.up |= y > rect.y;
+            cell.down |= y < bottom;
+        }
+    }
+    if info.borders.contains(Borders::RIGHT) {
+        for y in rect.y..=bottom {
+            let cell = cells.entry((right, y)).or_default();
+            cell.up |= y > rect.y;
+            cell.down |= y < bottom;
+        }
+    }
+}
+
+fn line_touches_pane(x: u16, y: u16, info: &PaneInfo, pane_gaps: bool) -> bool {
+    let rect = info.rect;
+    if rect.width == 0 || rect.height == 0 {
+        return false;
+    }
+    let right = rect.x.saturating_add(rect.width).saturating_sub(1);
+    let bottom = rect.y.saturating_add(rect.height).saturating_sub(1);
+    let in_rows = y >= rect.y && y <= bottom;
+    let in_cols = x >= rect.x && x <= right;
+    let own_border =
+        (in_rows && (x == rect.x || x == right)) || (in_cols && (y == rect.y || y == bottom));
+
+    if pane_gaps {
+        return own_border;
+    }
+
+    let shared_right = rect.x.saturating_add(rect.width);
+    let shared_bottom = rect.y.saturating_add(rect.height);
+    own_border
+        || (in_rows && x == shared_right)
+        || (in_cols && y == shared_bottom)
+        || (x == shared_right && y == shared_bottom)
+}
+
+fn render_pane_border_titles(app: &AppState, ws: &crate::workspace::Workspace, frame: &mut Frame) {
+    let buf = frame.buffer_mut();
+    let area = buf.area;
+    for info in &app.view.pane_infos {
+        if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
+            continue;
+        }
+        let Some(title) = ws
+            .pane_state(info.id)
+            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+            .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
+        else {
+            continue;
+        };
+        let y = info.rect.y;
+        if y < area.y || y >= area.y.saturating_add(area.height) {
+            continue;
+        }
+        let start_x = info.rect.x.saturating_add(1);
+        let end_x = info
+            .rect
+            .x
+            .saturating_add(info.rect.width)
+            .saturating_sub(1)
+            .min(area.x.saturating_add(area.width));
+        if start_x >= end_x {
+            continue;
+        }
+        let color = if info.is_focused {
+            app.palette.accent
+        } else {
+            app.palette.overlay0
+        };
+        let mut style = Style::default().fg(color);
+        if info.is_focused {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        buf.set_stringn(
+            start_x,
+            y,
+            title,
+            end_x.saturating_sub(start_x) as usize,
+            style,
+        );
+    }
+}
+
+fn line_cell_symbol(line: LineCell) -> &'static str {
+    match (line.up, line.down, line.left, line.right) {
+        (true, true, true, true) => "┼",
+        (true, true, true, false) => "┤",
+        (true, true, false, true) => "├",
+        (true, false, true, true) => "┴",
+        (false, true, true, true) => "┬",
+        (true, true, false, false) | (true, false, false, false) | (false, true, false, false) => {
+            "│"
+        }
+        (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => {
+            "─"
+        }
+        (false, true, false, true) => "┌",
+        (false, true, true, false) => "┐",
+        (true, false, false, true) => "└",
+        (true, false, true, false) => "┘",
+        _ => "",
     }
 }
 
@@ -408,7 +720,7 @@ fn render_copy_mode_cursor(app: &AppState, frame: &mut Frame, info: &PaneInfo) {
     if app.mode != Mode::Copy {
         return;
     }
-    let Some(copy_mode) = app.copy_mode else {
+    let Some(copy_mode) = app.copy_mode.as_ref() else {
         return;
     };
     if copy_mode.pane_id != info.id
@@ -427,6 +739,96 @@ fn render_copy_mode_cursor(app: &AppState, frame: &mut Frame, info: &PaneInfo) {
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
+}
+
+fn validated_copy_mode_search_matches(
+    app: &AppState,
+    info: &PaneInfo,
+    rt: &crate::terminal::TerminalRuntime,
+) -> (u32, u32, Vec<(usize, crate::pane::TerminalTextMatch)>) {
+    let Some(copy_mode) = app.copy_mode.as_ref() else {
+        return (0, 0, Vec::new());
+    };
+    if copy_mode.pane_id != info.id {
+        return (0, 0, Vec::new());
+    }
+    let Some(metrics) = rt.scroll_metrics() else {
+        return (0, 0, Vec::new());
+    };
+    let top = metrics
+        .max_offset_from_bottom
+        .saturating_sub(metrics.offset_from_bottom)
+        .min(u32::MAX as usize) as u32;
+    let bottom = top.saturating_add(u32::from(info.inner_rect.height.saturating_sub(1)));
+    let first_visible = copy_mode
+        .search
+        .matches
+        .partition_point(|text_match| text_match.end.row < top);
+    let visible = &copy_mode.search.matches[first_visible..];
+    let visible_len = visible.partition_point(|text_match| text_match.start.row <= bottom);
+    let candidates = visible[..visible_len].to_vec();
+    let validity = rt.text_matches_are_current(&candidates);
+
+    let matches = candidates
+        .into_iter()
+        .zip(validity)
+        .enumerate()
+        .filter_map(|(offset, (text_match, is_current))| {
+            is_current.then_some((first_visible + offset, text_match))
+        })
+        .collect();
+    (top, bottom, matches)
+}
+
+fn render_copy_mode_search_highlights(
+    app: &AppState,
+    frame: &mut Frame,
+    info: &PaneInfo,
+    top: u32,
+    bottom: u32,
+    matches: &[(usize, crate::pane::TerminalTextMatch)],
+    current_only: bool,
+) {
+    let Some(copy_mode) = app.copy_mode.as_ref() else {
+        return;
+    };
+    let current = copy_mode.search.current;
+    let style = if current_only {
+        Style::default()
+            .fg(panel_contrast_fg(&app.palette))
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface1)
+    };
+
+    for &(index, text_match) in matches {
+        if (current == Some(index)) != current_only {
+            continue;
+        }
+        let start_row = text_match.start.row.max(top);
+        let end_row = text_match.end.row.min(bottom);
+        for absolute_row in start_row..=end_row {
+            let viewport_row = absolute_row.saturating_sub(top) as u16;
+            let start_col = if absolute_row == text_match.start.row {
+                text_match.start.col
+            } else {
+                0
+            };
+            let end_col = if absolute_row == text_match.end.row {
+                text_match.end.col
+            } else {
+                info.inner_rect.width.saturating_sub(1)
+            };
+            for col in start_col..=end_col.min(info.inner_rect.width.saturating_sub(1)) {
+                let x = info.inner_rect.x.saturating_add(col);
+                let y = info.inner_rect.y.saturating_add(viewport_row);
+                frame.buffer_mut()[(x, y)].set_style(style);
+            }
+        }
+    }
 }
 
 fn render_selection_highlight(
@@ -717,17 +1119,275 @@ mod tests {
     use crate::layout::PaneId;
     use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
+    use crate::terminal::TerminalState;
     use crate::workspace::Workspace;
 
     #[test]
     fn pane_border_title_trims_and_truncates() {
         assert_eq!(
-            pane_border_title(" claude ", 20).as_deref(),
+            pane_border_title(" claude ", 20, false).as_deref(),
             Some(" claude ")
         );
-        assert_eq!(pane_border_title("", 20), None);
-        assert_eq!(pane_border_title("abcdef", 8).as_deref(), Some(" abc… "));
-        assert_eq!(pane_border_title("abcdef", 4), None);
+        assert_eq!(
+            pane_border_title(" claude ", 20, true).as_deref(),
+            Some(" claude ")
+        );
+        assert_eq!(pane_border_title("", 20, false), None);
+        assert_eq!(
+            pane_border_title("abcdef", 8, false).as_deref(),
+            Some(" abc… ")
+        );
+        assert_eq!(
+            pane_border_title("abcdef", 8, true).as_deref(),
+            Some(" abc… ")
+        );
+        assert_eq!(pane_border_title("abcdef", 4, false), None);
+    }
+
+    #[test]
+    fn pane_border_title_truncates_cjk_by_display_width() {
+        let title = pane_border_title("1 模块组织（已定）", 12, false).unwrap();
+
+        assert_eq!(title, " 1 模块… ");
+        assert!(display_width(title.as_str()) <= 10);
+    }
+
+    #[test]
+    fn pane_border_renderer_places_adjacent_cjk_by_display_width() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.view.terminal_area = Rect::new(0, 0, 12, 3);
+        let ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        app.view.pane_infos = vec![PaneInfo {
+            id: pane_id,
+            rect: Rect::new(0, 0, 12, 3),
+            inner_rect: Rect::default(),
+            scrollbar_rect: None,
+            borders: Borders::ALL,
+            is_focused: false,
+        }];
+
+        let terminal_id = ws.tabs[0].panes[&pane_id].attached_terminal_id.clone();
+        let mut terminal_state = TerminalState::new(terminal_id.clone(), "/tmp".into());
+        terminal_state.set_manual_label("1 模块组织（已定）".into());
+        app.terminals.insert(terminal_id, terminal_state);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 3)).unwrap();
+        terminal
+            .draw(|frame| render_pane_borders(&app, &ws, frame))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(4, 0)].symbol(), "模");
+        assert_eq!(buffer[(5, 0)].symbol(), " ");
+        assert_eq!(buffer[(6, 0)].symbol(), "块");
+    }
+
+    #[test]
+    fn default_horizontal_split_uses_one_shared_divider_column() {
+        let mut workspace = Workspace::test_new("test");
+        let root = workspace.tabs[0].root_pane;
+        let right = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(root);
+
+        let infos = apply_pane_chrome(
+            workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
+            true,
+            false,
+        );
+        let left = infos.iter().find(|info| info.id == root).unwrap();
+        let right = infos.iter().find(|info| info.id == right).unwrap();
+
+        assert_eq!(left.rect.x + left.rect.width, right.rect.x);
+        assert!(!left.borders.contains(Borders::RIGHT));
+        assert!(right.borders.contains(Borders::LEFT));
+    }
+
+    #[test]
+    fn default_vertical_split_uses_one_shared_divider_row() {
+        let mut workspace = Workspace::test_new("test");
+        let root = workspace.tabs[0].root_pane;
+        let bottom = workspace.test_split(ratatui::layout::Direction::Vertical);
+        workspace.tabs[0].layout.focus_pane(root);
+
+        let infos = apply_pane_chrome(
+            workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
+            true,
+            false,
+        );
+        let top = infos.iter().find(|info| info.id == root).unwrap();
+        let bottom = infos.iter().find(|info| info.id == bottom).unwrap();
+
+        assert_eq!(top.rect.y + top.rect.height, bottom.rect.y);
+        assert!(!top.borders.contains(Borders::BOTTOM));
+        assert!(bottom.borders.contains(Borders::TOP));
+    }
+
+    #[test]
+    fn pane_gaps_keep_independent_bordered_panes() {
+        let mut workspace = Workspace::test_new("test");
+        let root = workspace.tabs[0].root_pane;
+        let right = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(root);
+
+        let infos = apply_pane_chrome(
+            workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
+            true,
+            true,
+        );
+        let left = infos.iter().find(|info| info.id == root).unwrap();
+        let right = infos.iter().find(|info| info.id == right).unwrap();
+
+        assert_eq!(left.rect.x + left.rect.width, right.rect.x);
+        assert_eq!(left.borders, Borders::ALL);
+        assert_eq!(right.borders, Borders::ALL);
+    }
+
+    #[test]
+    fn borderless_pane_gaps_add_one_empty_cell_between_panes() {
+        let mut workspace = Workspace::test_new("test");
+        let root = workspace.tabs[0].root_pane;
+        let right = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(root);
+
+        let infos = apply_pane_chrome(
+            workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
+            false,
+            true,
+        );
+        let left = infos.iter().find(|info| info.id == root).unwrap();
+        let right = infos.iter().find(|info| info.id == right).unwrap();
+
+        assert_eq!(left.rect, Rect::new(0, 0, 49, 20));
+        assert_eq!(right.rect, Rect::new(50, 0, 50, 20));
+        assert!(left.borders.is_empty());
+        assert!(right.borders.is_empty());
+    }
+
+    #[test]
+    fn disabled_pane_borders_make_inner_rect_equal_visual_rect() {
+        let mut workspace = Workspace::test_new("test");
+        workspace.test_split(ratatui::layout::Direction::Horizontal);
+
+        let infos = apply_pane_chrome(
+            workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
+            false,
+            false,
+        );
+
+        for info in infos {
+            assert!(info.borders.is_empty());
+            assert_eq!(pane_inner_rect(info.rect, info.borders), info.rect);
+        }
+    }
+
+    #[test]
+    fn global_pane_border_renderer_composes_junctions_and_focus_style() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.view.terminal_area = Rect::new(0, 0, 4, 4);
+        app.view.pane_infos = vec![
+            PaneInfo {
+                id: PaneId::from_raw(1),
+                rect: Rect::new(0, 0, 2, 2),
+                inner_rect: Rect::default(),
+                scrollbar_rect: None,
+                borders: Borders::TOP | Borders::LEFT,
+                is_focused: true,
+            },
+            PaneInfo {
+                id: PaneId::from_raw(2),
+                rect: Rect::new(2, 0, 2, 2),
+                inner_rect: Rect::default(),
+                scrollbar_rect: None,
+                borders: Borders::TOP | Borders::LEFT | Borders::RIGHT,
+                is_focused: false,
+            },
+            PaneInfo {
+                id: PaneId::from_raw(3),
+                rect: Rect::new(0, 2, 2, 2),
+                inner_rect: Rect::default(),
+                scrollbar_rect: None,
+                borders: Borders::TOP | Borders::LEFT | Borders::BOTTOM,
+                is_focused: false,
+            },
+            PaneInfo {
+                id: PaneId::from_raw(4),
+                rect: Rect::new(2, 2, 2, 2),
+                inner_rect: Rect::default(),
+                scrollbar_rect: None,
+                borders: Borders::ALL,
+                is_focused: false,
+            },
+        ];
+        app.view.split_borders = vec![
+            crate::layout::SplitBorder {
+                pos: 2,
+                direction: ratatui::layout::Direction::Horizontal,
+                ratio: 0.5,
+                area: Rect::new(0, 0, 4, 4),
+                path: vec![],
+            },
+            crate::layout::SplitBorder {
+                pos: 2,
+                direction: ratatui::layout::Direction::Vertical,
+                ratio: 0.5,
+                area: Rect::new(0, 0, 4, 4),
+                path: vec![false],
+            },
+        ];
+        let ws = Workspace::test_new("test");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(4, 4)).unwrap();
+
+        terminal
+            .draw(|frame| render_pane_borders(&app, &ws, frame))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(2, 2)].symbol(), "┼");
+        assert_eq!(buffer[(2, 2)].style().fg, Some(app.palette.accent));
+        assert_eq!(buffer[(2, 1)].symbol(), "│");
+        assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.accent));
+    }
+
+    #[test]
+    fn gapped_pane_focus_does_not_color_neighbor_border() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.pane_gaps = true;
+        app.view.terminal_area = Rect::new(0, 0, 4, 3);
+        app.view.pane_infos = vec![
+            PaneInfo {
+                id: PaneId::from_raw(1),
+                rect: Rect::new(0, 0, 2, 3),
+                inner_rect: Rect::default(),
+                scrollbar_rect: None,
+                borders: Borders::ALL,
+                is_focused: true,
+            },
+            PaneInfo {
+                id: PaneId::from_raw(2),
+                rect: Rect::new(2, 0, 2, 3),
+                inner_rect: Rect::default(),
+                scrollbar_rect: None,
+                borders: Borders::ALL,
+                is_focused: false,
+            },
+        ];
+        let ws = Workspace::test_new("test");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(4, 3)).unwrap();
+
+        terminal
+            .draw(|frame| render_pane_borders(&app, &ws, frame))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(1, 1)].style().fg, Some(app.palette.accent));
+        assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.overlay0));
     }
 
     #[tokio::test]

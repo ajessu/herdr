@@ -630,7 +630,8 @@ mod tests {
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path, App};
     use crate::{
         app::state::{AgentPanelSort, DragState, DragTarget, Mode},
-        detect::Agent,
+        config::SidebarCollapsedModeConfig,
+        detect::{Agent, AgentState},
         workspace::Workspace,
     };
 
@@ -1200,6 +1201,51 @@ mod tests {
     }
 
     #[test]
+    fn clicking_collapsed_priority_agent_row_switches_to_matching_workspace() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_collapsed = true;
+        app.state.agent_panel_sort = AgentPanelSort::Priority;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
+        app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
+
+        let set_state = |app: &mut crate::app::App, ws_idx: usize, pane_id, state| {
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = state;
+        };
+        set_state(&mut app, 0, first_pane, AgentState::Working);
+        set_state(&mut app, 1, second_pane, AgentState::Blocked);
+
+        let (_, _, detail_area) =
+            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x,
+            detail_area.y,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.selected, 1);
+        assert_eq!(
+            app.state.workspaces[1].tabs[0].layout.focused(),
+            second_pane
+        );
+    }
+
+    #[test]
     fn clicking_collapsed_sidebar_toggle_expands_sidebar() {
         let mut app = app_for_mouse_test();
         app.state.sidebar_collapsed = true;
@@ -1214,6 +1260,19 @@ mod tests {
         ));
 
         assert!(!app.state.sidebar_collapsed);
+    }
+
+    #[test]
+    fn hidden_collapsed_sidebar_has_no_mouse_expand_hotspot() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_collapsed = true;
+        app.state.sidebar_collapsed_mode = SidebarCollapsedModeConfig::Hidden;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 0, 20);
+        app.state.view.terminal_area = Rect::new(0, 0, 80, 20);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 19));
+
+        assert!(app.state.sidebar_collapsed);
     }
 
     #[test]
