@@ -50,7 +50,6 @@ fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
 pub(crate) struct ExpandedSidebarLayout {
     pub spaces: Rect,
     pub detail: Rect,
-    pub close_button: Rect,
 }
 
 pub(crate) fn compute_expanded_sidebar_layout(
@@ -62,34 +61,18 @@ pub(crate) fn compute_expanded_sidebar_layout(
         return ExpandedSidebarLayout {
             spaces: Rect::default(),
             detail: Rect::default(),
-            close_button: Rect::default(),
         };
     }
 
     let (ws_h, detail_h) = sidebar_section_heights(content.height, split_ratio);
     let spaces = Rect::new(content.x, content.y, content.width, ws_h);
     let detail = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
-    let close_button = expanded_sidebar_close_button_rect(detail);
-    ExpandedSidebarLayout {
-        spaces,
-        detail,
-        close_button,
-    }
+    ExpandedSidebarLayout { spaces, detail }
 }
 
 pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
     let layout = compute_expanded_sidebar_layout(area, split_ratio);
     (layout.spaces, layout.detail)
-}
-
-pub(crate) fn expanded_sidebar_close_button_rect(detail_area: Rect) -> Rect {
-    if detail_area.width < 4 || detail_area.height == 0 {
-        return Rect::default();
-    }
-    let w = detail_area.width.saturating_sub(1).min(3);
-    let x = detail_area.x + detail_area.width - 1 - w;
-    let y = detail_area.y + detail_area.height.saturating_sub(1);
-    Rect::new(x, y, w, 1)
 }
 
 pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
@@ -1195,7 +1178,6 @@ pub(super) fn render_sidebar(
     render_overflow_badge(frame, ov.expanded_agents_below, p);
 
     render_sidebar_toggle(app, frame, area, false, p);
-    render_expanded_close_button(app, frame, layout.close_button, p);
 }
 
 fn render_workspace_list(
@@ -1550,9 +1532,8 @@ pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
     if content_w == 0 || area.height == 0 {
         return Rect::default();
     }
-    let toggle_w = content_w.min(3);
-    let x = area.x + (content_w.saturating_sub(toggle_w)) / 2;
-    Rect::new(x, bottom_y, toggle_w, 1)
+    let x = area.x + content_w / 2;
+    Rect::new(x, bottom_y, 1, 1)
 }
 
 pub(crate) fn expanded_sidebar_toggle_rect(area: Rect) -> Rect {
@@ -1565,25 +1546,6 @@ pub(crate) fn expanded_sidebar_toggle_rect(area: Rect) -> Rect {
         1,
         1,
     )
-}
-
-fn render_expanded_close_button(app: &AppState, frame: &mut Frame, rect: Rect, p: &Palette) {
-    if rect == Rect::default() {
-        return;
-    }
-    let has_badge = app.global_menu_attention_badge_visible();
-    let mut style = Style::default().fg(p.accent).bg(p.surface_dim);
-    if has_badge {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    let buf = frame.buffer_mut();
-    for x in rect.x..rect.x + rect.width {
-        buf[(x, rect.y)].set_style(Style::default().bg(p.surface_dim));
-    }
-    frame.render_widget(
-        Paragraph::new(Span::styled("«", style)).alignment(Alignment::Center),
-        rect,
-    );
 }
 
 fn render_sidebar_toggle(
@@ -1602,30 +1564,12 @@ fn render_sidebar_toggle(
         return;
     }
     let icon = if collapsed { "»" } else { "«" };
-    let has_badge = app.global_menu_attention_badge_visible();
-    let icon_style = if collapsed {
-        // The enlarged collapsed toggle is always prominent (accent fg + chip
-        // bg); bold is reserved to preserve the pending-update attention signal.
-        let mut style = Style::default().fg(p.accent).bg(p.surface_dim);
-        if has_badge {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        style
-    } else if has_badge {
+    let icon_style = if collapsed && app.global_menu_attention_badge_visible() {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(p.overlay0)
     };
-    if collapsed {
-        let buf = frame.buffer_mut();
-        for x in toggle_area.x..toggle_area.x + toggle_area.width {
-            buf[(x, toggle_area.y)].set_style(Style::default().bg(p.surface_dim));
-        }
-    }
-    frame.render_widget(
-        Paragraph::new(Span::styled(icon, icon_style)).alignment(Alignment::Center),
-        toggle_area,
-    );
+    frame.render_widget(Paragraph::new(Span::styled(icon, icon_style)), toggle_area);
 }
 
 #[cfg(test)]
@@ -2208,12 +2152,12 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_toggle_rect_is_at_least_3_wide() {
+    fn collapsed_toggle_rect_is_single_cell_centered() {
         let area = Rect::new(0, 0, 7, 20);
         let toggle = collapsed_sidebar_toggle_rect(area);
-        assert!(toggle.width >= 3);
+        assert_eq!(toggle.width, 1);
         assert_eq!(toggle.y, area.y + area.height - 1);
-        assert!(toggle.x + toggle.width <= area.x + area.width.saturating_sub(1));
+        assert_eq!(toggle.x, area.x + (area.width - 1) / 2);
     }
 
     #[test]
@@ -2363,7 +2307,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_toggle_renders_accent_style() {
+    fn collapsed_toggle_renders_overlay0_without_badge() {
         let app = crate::app::state::AppState::test_new();
         let area = Rect::new(0, 0, 7, 20);
         let mut terminal =
@@ -2374,10 +2318,11 @@ mod tests {
             .expect("sidebar toggle should render");
 
         let toggle = collapsed_sidebar_toggle_rect(area);
-        let cell = &terminal.backend().buffer()[(toggle.x + toggle.width / 2, toggle.y)];
+        let cell = &terminal.backend().buffer()[(toggle.x, toggle.y)];
         assert_eq!(cell.symbol(), "»");
-        assert_eq!(cell.style().fg, Some(app.palette.accent));
-        assert_eq!(cell.style().bg, Some(app.palette.surface_dim));
+        assert_eq!(cell.style().fg, Some(app.palette.overlay0));
+        // No chip background (upstream draws no surface_dim fill).
+        assert_ne!(cell.style().bg, Some(app.palette.surface_dim));
         // No pending badge → not bold (bold is reserved for the attention signal).
         assert!(!cell.style().add_modifier.contains(Modifier::BOLD));
     }
@@ -2419,86 +2364,22 @@ mod tests {
     }
 
     #[test]
-    fn expanded_close_button_rect_anchors_bottom_right_of_detail_area() {
-        let detail = Rect::new(5, 10, 20, 12);
-        let btn = expanded_sidebar_close_button_rect(detail);
-        assert_eq!(btn.y, detail.y + detail.height - 1);
-        assert!(btn.x + btn.width <= detail.x + detail.width);
-        assert!(btn.x >= detail.x);
-    }
-
-    #[test]
-    fn expanded_close_button_is_at_least_3_wide_for_touch_adequate_hit_zone() {
-        for w in 3..=40u16 {
-            let detail = Rect::new(0, 0, w, 10);
-            let btn = expanded_sidebar_close_button_rect(detail);
-            if btn != Rect::default() {
-                assert!(
-                    btn.width >= 3,
-                    "width {} too narrow at detail.width={}",
-                    btn.width,
-                    w
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn expanded_close_button_does_not_collide_with_agent_panel_scrollbar() {
-        let app = crate::app::state::AppState::test_new();
-        let area = Rect::new(0, 0, 26, 30);
-        let layout = compute_expanded_sidebar_layout(area, app.sidebar_section_split);
-        let scrollbar = agent_panel_scrollbar_rect(&app, layout.detail);
-        if let Some(sb) = scrollbar {
-            let btn = layout.close_button;
-            if btn != Rect::default() {
-                let btn_right = btn.x + btn.width;
-                assert!(
-                    btn_right <= sb.x
-                        || btn.x >= sb.x + sb.width
-                        || btn.y + btn.height <= sb.y
-                        || btn.y >= sb.y + sb.height,
-                    "close button {btn:?} collides with scrollbar {sb:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn expanded_close_button_render_rect_equals_hit_rect() {
+    fn expanded_toggle_stays_overlay0_when_attention_badge_pending() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.update_available = Some("9.9.9".into());
+        assert!(app.global_menu_attention_badge_visible());
         let area = Rect::new(0, 0, 26, 20);
-        let layout = compute_expanded_sidebar_layout(area, 0.5);
-        let btn_rect = layout.close_button;
-        assert_ne!(btn_rect, Rect::default());
-        let hit_rect = expanded_sidebar_close_button_rect(layout.detail);
-        assert_eq!(btn_rect, hit_rect);
-    }
-
-    #[test]
-    fn expanded_close_button_renders_collapse_glyph() {
-        let app = crate::app::state::AppState::test_new();
-        let area = Rect::new(0, 0, 26, 20);
-        let layout = compute_expanded_sidebar_layout(area, app.sidebar_section_split);
-        let btn = layout.close_button;
-        assert_ne!(btn, Rect::default());
-
         let mut terminal =
             Terminal::new(TestBackend::new(26, 20)).expect("test terminal should initialize");
+
         terminal
-            .draw(|frame| render_expanded_close_button(&app, frame, btn, &app.palette))
-            .expect("close button should render");
+            .draw(|frame| render_sidebar_toggle(&app, frame, area, false, &app.palette))
+            .expect("sidebar toggle should render");
 
-        let buf = terminal.backend().buffer();
-        let has_glyph = (btn.x..btn.x + btn.width).any(|x| buf[(x, btn.y)].symbol() == "«");
-        assert!(has_glyph, "close button should render « glyph");
-    }
-
-    #[test]
-    fn expanded_close_button_empty_when_detail_too_narrow() {
-        for w in 0..4u16 {
-            let detail = Rect::new(0, 0, w, 10);
-            let btn = expanded_sidebar_close_button_rect(detail);
-            assert_eq!(btn, Rect::default(), "should be empty at width={w}");
-        }
+        let toggle = expanded_sidebar_toggle_rect(area);
+        let cell = &terminal.backend().buffer()[(toggle.x, toggle.y)];
+        assert_eq!(cell.symbol(), "«");
+        assert_eq!(cell.style().fg, Some(app.palette.overlay0));
+        assert!(!cell.style().add_modifier.contains(Modifier::BOLD));
     }
 }

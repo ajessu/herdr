@@ -551,7 +551,7 @@ impl AppState {
                     }
 
                     // Overflow badge clicks (FR8) on the expanded surfaces take
-                    // priority over the close button when they share the bottom row.
+                    // priority over the sidebar toggle when they share the bottom row.
                     if self.on_expanded_overflow_badge(mouse.column, mouse.row) {
                         self.mode = Mode::Terminal;
                         return None;
