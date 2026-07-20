@@ -945,3 +945,57 @@ fn web_already_running_response_without_mode_defaults_to_standalone() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+fn agent_info_without_labels() -> AgentInfo {
+    AgentInfo {
+        terminal_id: "term_1".into(),
+        name: None,
+        agent: Some("claude".into()),
+        title: None,
+        display_agent: None,
+        agent_status: AgentStatus::Working,
+        screen_detection_skipped: false,
+        custom_status: None,
+        state_labels: HashMap::new(),
+        agent_session: None,
+        workspace_id: "w1".into(),
+        tab_id: "w1:t1".into(),
+        pane_id: "w1:p1".into(),
+        tab_label: None,
+        workspace_label: None,
+        focused: false,
+        cwd: None,
+        foreground_cwd: None,
+        revision: 0,
+    }
+}
+
+#[test]
+fn agent_info_missing_label_fields_deserializes_to_none() {
+    let json = r#"{"terminal_id":"term_1","agent_status":"working","workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1","focused":false,"revision":0}"#;
+    let info: AgentInfo = serde_json::from_str(json).unwrap();
+    assert!(info.tab_label.is_none());
+    assert!(info.workspace_label.is_none());
+}
+
+#[test]
+fn agent_info_omits_none_labels_when_serialized() {
+    let info = agent_info_without_labels();
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(!json.contains("tab_label"));
+    assert!(!json.contains("workspace_label"));
+}
+
+#[test]
+fn agent_info_with_labels_round_trips() {
+    let info = AgentInfo {
+        tab_label: Some("renamed-tab".into()),
+        workspace_label: Some("herdr".into()),
+        ..agent_info_without_labels()
+    };
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(json.contains(r#""tab_label":"renamed-tab""#));
+    assert!(json.contains(r#""workspace_label":"herdr""#));
+    let restored: AgentInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, info);
+}

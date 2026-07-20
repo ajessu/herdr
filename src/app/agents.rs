@@ -5,19 +5,36 @@ use crate::api::schema::{AgentStartParams, SplitDirection};
 
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
-        self.state
-            .workspaces
-            .iter()
-            .enumerate()
-            .flat_map(|(ws_idx, ws)| {
-                ws.tabs.iter().flat_map(move |tab| {
-                    tab.layout
-                        .pane_ids()
-                        .into_iter()
-                        .filter_map(move |pane_id| self.agent_info(ws_idx, pane_id))
-                })
-            })
-            .collect()
+        self.collect_agent_infos_inner(true)
+    }
+
+    /// Shared collector. `resolve_workspace_label` gates the git-root walk in
+    /// `display_name_from`: the list/get paths want the label, but the
+    /// duplicate-name conflict scan reads only `name`/`terminal_id`, so it skips
+    /// the walk and leaves `workspace_label` unresolved (`None`).
+    fn collect_agent_infos_inner(
+        &self,
+        resolve_workspace_label: bool,
+    ) -> Vec<crate::api::schema::AgentInfo> {
+        let mut infos = Vec::new();
+        for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
+            // display_name_from walks the git root and is identical for every
+            // pane in the workspace, so resolve it once here, not per pane.
+            let workspace_label = resolve_workspace_label
+                .then(|| ws.display_name_from(&self.state.terminals, &self.terminal_runtimes));
+            for tab in &ws.tabs {
+                for pane_id in tab.layout.pane_ids() {
+                    if let Some(info) = self.agent_info_with_workspace_label(
+                        ws_idx,
+                        pane_id,
+                        workspace_label.as_deref(),
+                    ) {
+                        infos.push(info);
+                    }
+                }
+            }
+        }
+        infos
     }
 
     pub(super) fn agent_info_for_target(
@@ -410,11 +427,25 @@ impl App {
         pane_id: crate::layout::PaneId,
     ) -> Option<crate::api::schema::AgentInfo> {
         let ws = self.state.workspaces.get(ws_idx)?;
+        let workspace_label = ws.display_name_from(&self.state.terminals, &self.terminal_runtimes);
+        self.agent_info_with_workspace_label(ws_idx, pane_id, Some(&workspace_label))
+    }
+
+    fn agent_info_with_workspace_label(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        workspace_label: Option<&str>,
+    ) -> Option<crate::api::schema::AgentInfo> {
+        let ws = self.state.workspaces.get(ws_idx)?;
         let pane_state = ws.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane_state.attached_terminal_id)?;
         if !terminal.is_agent_terminal() {
             return None;
         }
+        let tab_label = ws
+            .find_tab_index_for_pane(pane_id)
+            .and_then(|tab_idx| ws.tab_display_name(tab_idx));
         let pane = self.pane_info(ws_idx, pane_id)?;
         Some(crate::api::schema::AgentInfo {
             terminal_id: pane.terminal_id,
@@ -430,6 +461,8 @@ impl App {
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,
             pane_id: pane.pane_id,
+            tab_label,
+            workspace_label: workspace_label.map(str::to_string),
             focused: pane.focused,
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
@@ -442,12 +475,133 @@ impl App {
         name: &str,
         except_terminal_id: &str,
     ) -> Vec<crate::api::schema::AgentInfo> {
-        self.collect_agent_infos()
+        // Conflict candidates are only stringified into the error message; they
+        // never serialize labels, so skip the workspace-label git-root walk.
+        self.collect_agent_infos_inner(false)
             .into_iter()
             .filter(|agent| {
                 agent.name.as_deref() == Some(name) && agent.terminal_id != except_terminal_id
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+
+    fn test_app_with_agent() -> (App, crate::layout::PaneId) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("labels-ws");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("terminal id");
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal should exist")
+            .set_agent_name("claude".into());
+        (app, pane_id)
+    }
+
+    #[test]
+    fn agent_info_carries_workspace_and_tab_labels() {
+        let (app, _pane_id) = test_app_with_agent();
+
+        let infos = app.collect_agent_infos();
+        assert_eq!(infos.len(), 1);
+        // Workspace label is what `workspace list` reports (custom name here).
+        assert_eq!(infos[0].workspace_label.as_deref(), Some("labels-ws"));
+        // Un-renamed tab: label is the positional ordinal.
+        assert_eq!(infos[0].tab_label.as_deref(), Some("1"));
+
+        // The single-target path carries the same labels as the list path.
+        let target = infos[0].pane_id.clone();
+        let single = app
+            .agent_info_for_target(&target)
+            .expect("agent by pane id");
+        assert_eq!(single.workspace_label, infos[0].workspace_label);
+        assert_eq!(single.tab_label, infos[0].tab_label);
+    }
+
+    #[test]
+    fn agent_info_tab_label_reflects_tab_custom_name() {
+        let (mut app, _pane_id) = test_app_with_agent();
+        app.state.workspaces[0].tabs[0].set_custom_name("renamed-tab".into());
+
+        let infos = app.collect_agent_infos();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].tab_label.as_deref(), Some("renamed-tab"));
+    }
+
+    #[test]
+    fn conflict_scan_skips_workspace_label_but_keeps_tab_label() {
+        // The duplicate-name conflict scan passes resolve_workspace_label=false
+        // so the label is neither resolved nor assigned. This pins the gating:
+        // workspace_label stays None there, while the cheap in-memory tab_label
+        // is still populated. (test_new sets a custom_name, so display_name_from
+        // short-circuits before the git walk regardless of the flag; this asserts
+        // the assignment is gated, not that the walk itself is skipped.)
+        let (app, _pane_id) = test_app_with_agent();
+
+        let infos = app.collect_agent_infos_inner(false);
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].workspace_label.is_none());
+        assert_eq!(infos[0].tab_label.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn collect_agent_infos_labels_each_workspace_with_its_own_name() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        // Two workspaces with distinct custom names, one agent pane each. This
+        // guards the once-per-workspace label hoisting: a bug that reused the
+        // first workspace's label for every pane would slip past a single-ws test.
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("alpha-ws"),
+            crate::workspace::Workspace::test_new("beta-ws"),
+        ];
+        app.state.ensure_test_terminals();
+        for ws in &app.state.workspaces {
+            let terminal_id = ws
+                .terminal_id(ws.tabs[0].root_pane)
+                .cloned()
+                .expect("terminal id");
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("test terminal should exist")
+                .set_agent_name(format!("claude-{}", ws.display_name()));
+        }
+
+        let infos = app.collect_agent_infos();
+        assert_eq!(infos.len(), 2);
+        // Assert the pairing, not just the set: each agent is named
+        // `claude-<ws>`, so its workspace_label must be that same `<ws>`. This
+        // catches a label/workspace mis-pairing that an unordered set check
+        // (both labels present, wrong agents) would miss.
+        for info in &infos {
+            let name = info.name.as_deref().expect("agent name");
+            let expected = name.strip_prefix("claude-").expect("claude- prefix");
+            assert_eq!(info.workspace_label.as_deref(), Some(expected));
+        }
     }
 }
 
