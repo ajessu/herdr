@@ -248,18 +248,30 @@ fn compute_view_internal(
 
     let sidebar_overflow = sidebar::compute_sidebar_overflow(app, sidebar_area);
 
-    let tab_bar_view = app
+    // `compute_tab_bar_view` returns the clamped scroll offset alongside the
+    // view. This closure holds an immutable borrow of `app`, so the offset is
+    // carried out and handled after the closure rather than written back inside
+    // it. With no scroll offset in play the layout is the centered fill and the
+    // returned offset is unused.
+    let (tab_bar_view, _clamped_offset) = app
         .active
         .and_then(|i| app.workspaces.get(i))
         .map(|ws| {
-            let (chromes, active_tab, mode) = build_tab_bar_inputs(
+            let (chromes, active_tab, mode, scroll_offset) = build_tab_bar_inputs(
                 ws,
                 &app.terminals,
                 app.show_tab_status,
                 app.spinner_tick,
                 &app.palette,
             );
-            compute_tab_bar_view(chromes, active_tab, mode, tab_bar_rect, app.mouse_capture)
+            compute_tab_bar_view(
+                chromes,
+                active_tab,
+                mode,
+                tab_bar_rect,
+                app.mouse_capture,
+                scroll_offset,
+            )
         })
         .unwrap_or_default();
 

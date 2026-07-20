@@ -345,9 +345,12 @@ pub(crate) fn build_tab_bar_inputs(
     show_tab_status: TabStatusMode,
     spinner_tick: u32,
     palette: &crate::app::state::Palette,
-) -> (Vec<TabChrome>, usize, TabStatusMode) {
+) -> (Vec<TabChrome>, usize, TabStatusMode, Option<usize>) {
     let chromes = build_tab_chromes(ws, terminals, show_tab_status, spinner_tick, palette);
-    (chromes, ws.active_tab, show_tab_status)
+    // No scroll offset resolved here yet: the resting layout is the centered
+    // fill. This seam is where a wheel-driven browse offset would be resolved
+    // from workspace state and returned.
+    (chromes, ws.active_tab, show_tab_status, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +461,69 @@ fn trailing_tab_controls_x(tab_hit_areas: &[Rect], fallback_x: u16) -> u16 {
         .unwrap_or(fallback_x)
 }
 
+/// Total columns the window `[lo, hi]` occupies: each tab's width (which
+/// already includes its own separator columns) plus an indicator reservation
+/// on each side that still hides tabs — a fully-shown side reclaims its
+/// reserved columns. Adjacent tabs abut directly, so there is no inter-tab gap.
+/// Shared by the centered fill, the scrolled fill, and the `max_scroll` walk so
+/// all three measure a window identically.
+fn window_footprint(
+    chromes: &[TabChrome],
+    lo: usize,
+    hi: usize,
+    reserve_left: u16,
+    reserve_right: u16,
+) -> u16 {
+    let n = chromes.len();
+    let mut total: u16 = 0;
+    for chrome in &chromes[lo..=hi] {
+        total = total.saturating_add(tab_width(chrome));
+    }
+    if lo > 0 {
+        total = total.saturating_add(reserve_left);
+    }
+    if hi + 1 < n {
+        total = total.saturating_add(reserve_right);
+    }
+    total
+}
+
+/// Lay the visible window `[lo, hi]` left-to-right starting at `area.x` (after
+/// the left indicator reservation when `lo > 0`). Adjacent tabs abut directly
+/// (each carries its own separator cols, no inter-tab gap). A single tab wider
+/// than the remaining width is clipped to the bar so the row is never blank.
+/// Returns a dense rect vec (len == `chromes.len()`, off-window tabs `width 0`).
+///
+/// The single placement routine shared by `centered_active_fill` and
+/// `scrolled_fill`: the two fills differ only in how they choose `[lo, hi]`.
+fn lay_window(
+    chromes: &[TabChrome],
+    lo: usize,
+    hi: usize,
+    area: Rect,
+    reserve_left: u16,
+) -> Vec<Rect> {
+    let n = chromes.len();
+    let mut rects = vec![Rect::default(); n];
+    if n == 0 || area.width == 0 || area.height == 0 {
+        return rects;
+    }
+    let left_gutter = if lo > 0 { reserve_left } else { 0 };
+    let mut x = area.x.saturating_add(left_gutter);
+    let right_limit = area.x.saturating_add(area.width);
+    for idx in lo..=hi.min(n - 1) {
+        let desired = tab_width(&chromes[idx]);
+        let remaining = right_limit.saturating_sub(x);
+        if remaining == 0 {
+            break;
+        }
+        let width = desired.min(remaining);
+        rects[idx] = Rect::new(x, area.y, width, 1);
+        x = x.saturating_add(width);
+    }
+    rects
+}
+
 /// Stateless centered-active batch fill (zellij model).
 ///
 /// Returns the dense per-tab rect vec (len == `chromes.len()`, hidden tabs
@@ -479,30 +545,13 @@ fn centered_active_fill(
     reserve_right: u16,
 ) -> Vec<Rect> {
     let n = chromes.len();
-    let mut rects = vec![Rect::default(); n];
     if n == 0 || area.width == 0 || area.height == 0 {
-        return rects;
+        return vec![Rect::default(); n];
     }
     let active = active_tab.min(n - 1);
 
-    // Total columns the window [lo, hi] would occupy: tab widths (each tab
-    // already includes its own separator columns) + an indicator reservation
-    // on each side that still hides tabs (a fully-shown side reclaims its
-    // reserved columns). Adjacent tabs abut directly, so there is no inter-
-    // tab gap.
-    let footprint = |lo: usize, hi: usize| -> u16 {
-        let mut total: u16 = 0;
-        for chrome in &chromes[lo..=hi] {
-            total = total.saturating_add(tab_width(chrome));
-        }
-        if lo > 0 {
-            total = total.saturating_add(reserve_left);
-        }
-        if hi + 1 < n {
-            total = total.saturating_add(reserve_right);
-        }
-        total
-    };
+    let footprint =
+        |lo: usize, hi: usize| window_footprint(chromes, lo, hi, reserve_left, reserve_right);
 
     // Window of visible tab indices [lo, hi], grown around the active tab.
     let mut lo = active;
@@ -546,28 +595,52 @@ fn centered_active_fill(
         }
     }
 
-    // Lay the window [lo, hi] left-to-right starting at area.x (after the
-    // left indicator reservation when present). Adjacent tabs abut directly
-    // (each tab carries its own separator cols, no inter-tab gap). A single
-    // active tab wider than the bar is clipped to the remaining width so the
-    // row is never blank. `footprint` already reserved the right indicator's
-    // columns when growing the window, so a fully-fit window never reaches
-    // into them; the clip below only bounds a single over-wide tab.
-    let left_gutter = if lo > 0 { reserve_left } else { 0 };
-    let mut x = area.x.saturating_add(left_gutter);
-    let right_limit = area.x.saturating_add(area.width);
-    for idx in lo..=hi {
-        let desired = tab_width(&chromes[idx]);
-        let remaining = right_limit.saturating_sub(x);
-        if remaining == 0 {
-            break;
+    // Lay the window [lo, hi] via the shared placement routine. `footprint`
+    // already reserved the right indicator's columns when growing the window,
+    // so a fully-fit window never reaches into them; `lay_window`'s clip only
+    // bounds a single over-wide tab so the row is never blank.
+    lay_window(chromes, lo, hi, area, reserve_left)
+}
+
+/// Left-packed scrolled fill: place tabs starting at `offset` and pack right
+/// until the bar is full. Differs from `centered_active_fill` only in window
+/// selection — the visible run begins at `offset` (clamped into range) and
+/// grows rightward. `reserve_left`/`reserve_right` reserve indicator columns on
+/// a side that still hides tabs, matching the centered fill's convention. The
+/// window end `hi` is the last tab that fits after reserving the right
+/// indicator when tabs remain past it. A single tab at `offset` wider than the
+/// bar is clipped by `lay_window` so the row is never blank.
+fn scrolled_fill(
+    chromes: &[TabChrome],
+    offset: usize,
+    area: Rect,
+    reserve_left: u16,
+    reserve_right: u16,
+) -> Vec<Rect> {
+    let n = chromes.len();
+    if n == 0 || area.width == 0 || area.height == 0 {
+        return vec![Rect::default(); n];
+    }
+    let lo = offset.min(n - 1);
+
+    // Choose the window end `hi` as the largest tab index for which the
+    // contiguous window `[lo, hi]` fits the usable width. `window_footprint`
+    // accounts the left reserve (present whenever lo > 0) and the right reserve
+    // (present only while tabs remain hidden past hi), so the fit test sees the
+    // same columns the render reserves. The footprint is NOT monotonic in `hi`
+    // at the final tab: reaching `n-1` drops the right reserve, so a full window
+    // to the end can fit even when an intermediate prefix (which still pays the
+    // right reserve) does not. Scanning all candidates and taking the max that
+    // fits — rather than breaking on the first miss — is what lets the fill
+    // reach the last tab exactly at `max_scroll`, matching `max_scroll_offset`.
+    let mut hi = lo;
+    for candidate in (lo + 1)..n {
+        if window_footprint(chromes, lo, candidate, reserve_left, reserve_right) <= area.width {
+            hi = candidate;
         }
-        let width = desired.min(remaining);
-        rects[idx] = Rect::new(x, area.y, width, 1);
-        x = x.saturating_add(width);
     }
 
-    rects
+    lay_window(chromes, lo, hi, area, reserve_left)
 }
 
 /// Column-containment lookup over a dense hit-area vec: the index of the
@@ -588,15 +661,231 @@ fn visible_bounds(rects: &[Rect]) -> Option<(usize, usize)> {
     Some((first, last))
 }
 
+/// Build the dense hit rects and overflow indicators for an overflowing strip,
+/// given a `fill(reserve_left, reserve_right) -> rects` closure. This is the
+/// badge-aware reserve-convergence loop plus indicator-rect placement, factored
+/// out so the centered and scrolled fills share it verbatim: the two differ
+/// only in how `fill` chooses the visible window. `fallback_index` is the
+/// visible-bounds default for a degenerate (nothing-visible) fill.
+fn build_overflow_layout(
+    chromes: &[TabChrome],
+    tabs_area: Rect,
+    area: Rect,
+    mouse_chrome: bool,
+    fallback_index: usize,
+    fill: impl Fn(u16, u16) -> Vec<Rect>,
+) -> (Vec<Rect>, TabBarOverflow) {
+    let tab_count = chromes.len();
+    // Hidden groups reuse the shared `overflow::side_above`/`side_below` so the
+    // tab bar and the sidebar surfaces classify hidden items into the same
+    // Working/Blocked/Done-unseen buckets with one nearest-to-edge walk over
+    // only the hidden ranges [0..first) and (last..n). A tab with no
+    // agent_state (TabStatusMode::Off) classifies as Unknown, which
+    // `AttnBucket::classify` treats as non-badge-worthy.
+    let state_of = |i: usize| {
+        chromes
+            .get(i)
+            .and_then(|c| c.agent_state)
+            .unwrap_or((crate::detect::AgentState::Unknown, true))
+    };
+    let groups_for = |rects: &[Rect]| -> (Option<HiddenGroup>, Option<HiddenGroup>) {
+        let (first, last) = visible_bounds(rects).unwrap_or((fallback_index, fallback_index));
+        let left_hidden = first;
+        let right_hidden = tab_count.saturating_sub(last + 1);
+
+        let window = super::overflow::ListWindow {
+            first,
+            count: last.saturating_sub(first) + 1,
+            hidden_above: left_hidden,
+            hidden_below: right_hidden,
+        };
+        let left = (left_hidden > 0).then(|| {
+            let side = super::overflow::side_above(window, state_of);
+            HiddenGroup {
+                count: left_hidden,
+                jump_to: first.saturating_sub(1),
+                side,
+            }
+        });
+        let right = (right_hidden > 0).then(|| {
+            let side = super::overflow::side_below(window, tab_count, state_of);
+            HiddenGroup {
+                count: right_hidden,
+                jump_to: last + 1,
+                side,
+            }
+        });
+        (left, right)
+    };
+
+    // First reserve the base indicator width on each side. We don't yet know
+    // which sides overflow, so reserve on both; the fill's "last hidden tab
+    // removes the indicator" logic reclaims a side that ends up fully shown.
+    let mut rects = fill(OVERFLOW_INDICATOR_WIDTH, OVERFLOW_INDICATOR_WIDTH);
+    let (mut left, mut right) = groups_for(&rects);
+
+    // An attention badge widens the indicator past the base reservation. The
+    // fill's per-side reserve must equal the rendered/hit-tested width or a
+    // widened indicator overlaps the adjacent visible tab (and a click there
+    // mis-navigates). Iterate reserve = badge-aware-width until the reserve
+    // fed to the fill matches the width the resulting groups demand — so
+    // reserved-width == hit-width by construction. Bounded: widening only
+    // hides more tabs (monotonic), so this converges in a few passes; cap at
+    // 4 as a backstop. `left_w`/`right_w` always hold the reserves that
+    // produced the final `rects`/`left`/`right`.
+    let want_w = |g: &Option<HiddenGroup>| {
+        g.map(|g| tab_indicator_width(g.count, g.side, mouse_chrome))
+            .unwrap_or(0)
+    };
+    let mut left_w = OVERFLOW_INDICATOR_WIDTH;
+    let mut right_w = OVERFLOW_INDICATOR_WIDTH;
+    for _ in 0..4 {
+        let need_left = want_w(&left).max(if left.is_some() {
+            OVERFLOW_INDICATOR_WIDTH
+        } else {
+            0
+        });
+        let need_right = want_w(&right).max(if right.is_some() {
+            OVERFLOW_INDICATOR_WIDTH
+        } else {
+            0
+        });
+        if need_left == left_w && need_right == right_w {
+            break;
+        }
+        left_w = need_left;
+        right_w = need_right;
+        rects = fill(
+            left_w.max(OVERFLOW_INDICATOR_WIDTH),
+            right_w.max(OVERFLOW_INDICATOR_WIDTH),
+        );
+        let (l2, r2) = groups_for(&rects);
+        left = l2;
+        right = r2;
+    }
+
+    // Indicator rects occupy the columns the final fill reserved for them.
+    // The left indicator hugs area.x; the right abuts the last visible tab
+    // directly (zellij left-packs: tabs, then the collapsed indicator, then
+    // bar-bg fill to the edge — no dead gap, and the tile stays compact at
+    // its demanded width instead of stretching to the edge). At
+    // pathologically narrow widths the active tab (always visible) can
+    // consume more than the reserve left for an indicator, so clamp: the
+    // left indicator's right edge must not pass the first visible tab, and
+    // the right indicator clips at the tabs-area edge. The indicator
+    // content clips if the clamp shrinks it.
+    let (vis_first, vis_last) = visible_bounds(&rects).unwrap_or((fallback_index, fallback_index));
+    let first_visible_x = rects.get(vis_first).map(|r| r.x).unwrap_or(area.x);
+    let last_visible_right = rects.get(vis_last).map(|r| r.x + r.width).unwrap_or(area.x);
+
+    let left_hit_area = if left.is_some() {
+        let lw = left_w
+            .min(area.width)
+            .min(first_visible_x.saturating_sub(area.x));
+        Rect::new(area.x, area.y, lw, 1)
+    } else {
+        Rect::default()
+    };
+    let right_hit_area = if right.is_some() {
+        let tabs_right = tabs_area.x + tabs_area.width;
+        let rx = last_visible_right.min(tabs_right);
+        let rw = right_w.min(tabs_right.saturating_sub(rx));
+        Rect::new(rx, area.y, rw, 1)
+    } else {
+        Rect::default()
+    };
+
+    (
+        rects,
+        TabBarOverflow {
+            left,
+            right,
+            left_hit_area,
+            right_hit_area,
+        },
+    )
+}
+
+/// The maximum scroll position — the last tab flush-right, with no scrolling
+/// past it. That position is reached at the *smallest* `offset` whose
+/// left-packed window `[offset, n-1]` fits the usable width; scrolling further
+/// (a larger offset) would only push the last tab off the right, so this
+/// smallest fitting offset is the clamp ceiling. Computed with the badge-aware
+/// left-indicator reserve the hidden-left range demands (and no right reserve,
+/// since the last tab being shown means
+/// nothing is hidden on the right). Derived from the same
+/// `window_footprint`/`tab_indicator_width` machinery the scrolled fill uses,
+/// so the clamp and the fill agree at the boundary even when a badge widens the
+/// indicator. Returns `n-1` when even a single tab cannot fit (the fill clips
+/// it; the row is still non-blank).
+fn max_scroll_offset(
+    chromes: &[TabChrome],
+    usable_width: u16,
+    mouse_chrome: bool,
+    state_of: &impl Fn(usize) -> (crate::detect::AgentState, bool),
+) -> usize {
+    let n = chromes.len();
+    if n == 0 {
+        return 0;
+    }
+    for offset in 0..n {
+        let reserve_left = if offset > 0 {
+            let window = super::overflow::ListWindow {
+                first: offset,
+                count: n - offset,
+                hidden_above: offset,
+                hidden_below: 0,
+            };
+            let side = super::overflow::side_above(window, state_of);
+            tab_indicator_width(offset, side, mouse_chrome).max(OVERFLOW_INDICATOR_WIDTH)
+        } else {
+            0
+        };
+        if window_footprint(chromes, offset, n - 1, reserve_left, 0) <= usable_width {
+            return offset;
+        }
+    }
+    n - 1
+}
+
+/// Defensive consistency predicate for a scrolled fill result, release-safe and
+/// testable in isolation (fed hand-crafted bad windows). A consistent window
+/// has at least one visible tab, packs within the usable area, and — when
+/// nothing is hidden on the right — shows the final tab (its dense rect is
+/// non-zero-width). A `false` result routes the compute path back to the
+/// centered fill rather than tripping a `debug_assert!`.
+fn window_is_consistent(rects: &[Rect], area: Rect, hidden_right_count: usize) -> bool {
+    let mut any_visible = false;
+    let right_limit = area.x.saturating_add(area.width);
+    for r in rects.iter().filter(|r| r.width > 0) {
+        any_visible = true;
+        if r.x.saturating_add(r.width) > right_limit {
+            return false;
+        }
+    }
+    if !any_visible {
+        return false;
+    }
+    if hidden_right_count == 0 {
+        if let Some(last) = rects.last() {
+            if last.width == 0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub(crate) fn compute_tab_bar_view(
     chromes: Vec<TabChrome>,
     active_tab: usize,
     mode: TabStatusMode,
     area: Rect,
     mouse_chrome: bool,
-) -> TabBarView {
+    scroll_offset: Option<usize>,
+) -> (TabBarView, Option<usize>) {
     if area.width == 0 || area.height == 0 {
-        return TabBarView::default();
+        return (TabBarView::default(), None);
     }
 
     let area_right = area.x + area.width;
@@ -609,154 +898,96 @@ pub(crate) fn compute_tab_bar_view(
         area.height,
     );
 
-    // First pass: no indicator reservation, to learn whether anything overflows.
+    // Whether the strip overflows is a property of the strip and bar, not the
+    // scroll offset: probe with the centered fill and no reserve.
     let probe = centered_active_fill(&chromes, active_tab, tabs_area, 0, 0);
     let tab_count = chromes.len();
     let probe_overflow = probe.iter().any(|r| r.width == 0) && tab_count > 0;
 
-    let (tab_hit_areas, overflow) = if !probe_overflow {
-        // Everything fits — no indicators.
-        (probe, TabBarOverflow::default())
+    // Shared badge classifier for the scrolled clamp (same mapping the layout
+    // builder uses internally).
+    let state_of = |i: usize| {
+        chromes
+            .get(i)
+            .and_then(|c| c.agent_state)
+            .unwrap_or((crate::detect::AgentState::Unknown, true))
+    };
+
+    let (tab_hit_areas, overflow, resolved_offset) = if !probe_overflow {
+        // Everything fits — no indicators, and any requested offset resolves to
+        // no-offset (centered layout).
+        (probe, TabBarOverflow::default(), None)
     } else {
-        // Build the hidden groups for a given fill result, reusing the shared
-        // `overflow::side_above`/`side_below` so the tab bar and the sidebar
-        // surfaces classify hidden items into the same Working/Blocked/Done-
-        // unseen buckets with the same single-walk, nearest-to-edge semantics.
-        // The walk covers only the hidden ranges [0..first) and (last..n) — no
-        // second full-tab scan. A tab with no agent_state (TabStatusMode::Off)
-        // classifies as Unknown, which `AttnBucket::classify` treats as
-        // non-badge-worthy.
-        let state_of = |i: usize| {
-            chromes
-                .get(i)
-                .and_then(|c| c.agent_state)
-                .unwrap_or((crate::detect::AgentState::Unknown, true))
-        };
-        let groups_for = |rects: &[Rect]| -> (Option<HiddenGroup>, Option<HiddenGroup>) {
-            let (first, last) = visible_bounds(rects).unwrap_or((active_tab, active_tab));
-            let left_hidden = first;
-            let right_hidden = tab_count.saturating_sub(last + 1);
-
-            let window = super::overflow::ListWindow {
-                first,
-                count: last.saturating_sub(first) + 1,
-                hidden_above: left_hidden,
-                hidden_below: right_hidden,
-            };
-            let left = (left_hidden > 0).then(|| {
-                let side = super::overflow::side_above(window, state_of);
-                HiddenGroup {
-                    count: left_hidden,
-                    jump_to: first.saturating_sub(1),
-                    side,
-                }
-            });
-            let right = (right_hidden > 0).then(|| {
-                let side = super::overflow::side_below(window, tab_count, state_of);
-                HiddenGroup {
-                    count: right_hidden,
-                    jump_to: last + 1,
-                    side,
-                }
-            });
-            (left, right)
-        };
-
-        // First reserve the base indicator width on each side. We don't yet know
-        // which sides overflow, so reserve on both; the fill's "last hidden tab
-        // removes the indicator" logic reclaims a side that ends up fully shown.
-        let mut rects = centered_active_fill(
-            &chromes,
-            active_tab,
-            tabs_area,
-            OVERFLOW_INDICATOR_WIDTH,
-            OVERFLOW_INDICATOR_WIDTH,
-        );
-        let (mut left, mut right) = groups_for(&rects);
-
-        // An attention badge widens the indicator past the base reservation. The
-        // fill's per-side reserve must equal the rendered/hit-tested width or a
-        // widened indicator overlaps the adjacent visible tab (and a click there
-        // mis-navigates). Iterate reserve = badge-aware-width until the reserve
-        // fed to the fill matches the width the resulting groups demand — so
-        // reserved-width == hit-width by construction. Bounded: widening only
-        // hides more tabs (monotonic), so this converges in a few passes; cap at
-        // 4 as a backstop. `left_w`/`right_w` always hold the reserves that
-        // produced the final `rects`/`left`/`right`.
-        let want_w = |g: &Option<HiddenGroup>| {
-            g.map(|g| tab_indicator_width(g.count, g.side, mouse_chrome))
-                .unwrap_or(0)
-        };
-        let mut left_w = OVERFLOW_INDICATOR_WIDTH;
-        let mut right_w = OVERFLOW_INDICATOR_WIDTH;
-        for _ in 0..4 {
-            let need_left = want_w(&left).max(if left.is_some() {
-                OVERFLOW_INDICATOR_WIDTH
-            } else {
-                0
-            });
-            let need_right = want_w(&right).max(if right.is_some() {
-                OVERFLOW_INDICATOR_WIDTH
-            } else {
-                0
-            });
-            if need_left == left_w && need_right == right_w {
-                break;
+        match scroll_offset {
+            None => {
+                let (rects, overflow) = build_overflow_layout(
+                    &chromes,
+                    tabs_area,
+                    area,
+                    mouse_chrome,
+                    active_tab,
+                    |l, r| centered_active_fill(&chromes, active_tab, tabs_area, l, r),
+                );
+                (rects, overflow, None)
             }
-            left_w = need_left;
-            right_w = need_right;
-            rects = centered_active_fill(
-                &chromes,
-                active_tab,
-                tabs_area,
-                left_w.max(OVERFLOW_INDICATOR_WIDTH),
-                right_w.max(OVERFLOW_INDICATOR_WIDTH),
-            );
-            let (l2, r2) = groups_for(&rects);
-            left = l2;
-            right = r2;
+            Some(requested) => {
+                // Clamp to the largest offset keeping the last tab fully
+                // visible, derived from the badge-aware converged reserves.
+                let max_scroll =
+                    max_scroll_offset(&chromes, tabs_area.width, mouse_chrome, &state_of);
+                let offset = requested.min(max_scroll);
+                let (rects, overflow) = build_overflow_layout(
+                    &chromes,
+                    tabs_area,
+                    area,
+                    mouse_chrome,
+                    offset,
+                    |l, r| scrolled_fill(&chromes, offset, tabs_area, l, r),
+                );
+                let hidden_right = overflow.right.map(|g| g.count).unwrap_or(0);
+                if window_is_consistent(&rects, tabs_area, hidden_right) {
+                    (rects, overflow, Some(offset))
+                } else {
+                    // Inconsistent scrolled window. Normal offsets can't reach
+                    // here — the clamp keeps the last tab visible — but a
+                    // pathologically narrow bar can: when a badge-widened
+                    // hidden-left reserve is itself as wide as the usable area,
+                    // even the clamped last-tab window packs to nothing, so this
+                    // branch is a genuine (if rare) runtime path, not dead code.
+                    // Discard the offset, re-run the centered fill, and emit one
+                    // structured warn. Returning `None` clears the offset; when
+                    // a caller writes that back (the wheel-browse seam), the next
+                    // frame resolves to `None` and does not re-enter this path,
+                    // so the warn is edge-triggered by the exit rather than
+                    // re-emitted per frame.
+                    let visible_count = rects.iter().filter(|r| r.width > 0).count();
+                    let packed_width = rects
+                        .iter()
+                        .filter(|r| r.width > 0)
+                        .map(|r| r.x.saturating_add(r.width))
+                        .max()
+                        .unwrap_or(tabs_area.x)
+                        .saturating_sub(tabs_area.x);
+                    tracing::warn!(
+                        offset,
+                        max_scroll,
+                        packed_width,
+                        usable_width = tabs_area.width,
+                        visible_count,
+                        "scrolled tab window inconsistent; falling back to centered layout"
+                    );
+                    let (rects, overflow) = build_overflow_layout(
+                        &chromes,
+                        tabs_area,
+                        area,
+                        mouse_chrome,
+                        active_tab,
+                        |l, r| centered_active_fill(&chromes, active_tab, tabs_area, l, r),
+                    );
+                    (rects, overflow, None)
+                }
+            }
         }
-
-        // Indicator rects occupy the columns the final fill reserved for them.
-        // The left indicator hugs area.x; the right abuts the last visible tab
-        // directly (zellij left-packs: tabs, then the collapsed indicator, then
-        // bar-bg fill to the edge — no dead gap, and the tile stays compact at
-        // its demanded width instead of stretching to the edge). At
-        // pathologically narrow widths the active tab (always visible) can
-        // consume more than the reserve left for an indicator, so clamp: the
-        // left indicator's right edge must not pass the first visible tab, and
-        // the right indicator clips at the tabs-area edge. The indicator
-        // content clips if the clamp shrinks it.
-        let (vis_first, vis_last) = visible_bounds(&rects).unwrap_or((active_tab, active_tab));
-        let first_visible_x = rects.get(vis_first).map(|r| r.x).unwrap_or(area.x);
-        let last_visible_right = rects.get(vis_last).map(|r| r.x + r.width).unwrap_or(area.x);
-
-        let left_hit_area = if left.is_some() {
-            let lw = left_w
-                .min(area.width)
-                .min(first_visible_x.saturating_sub(area.x));
-            Rect::new(area.x, area.y, lw, 1)
-        } else {
-            Rect::default()
-        };
-        let right_hit_area = if right.is_some() {
-            let tabs_right = tabs_area.x + tabs_area.width;
-            let rx = last_visible_right.min(tabs_right);
-            let rw = right_w.min(tabs_right.saturating_sub(rx));
-            Rect::new(rx, area.y, rw, 1)
-        } else {
-            Rect::default()
-        };
-
-        (
-            rects,
-            TabBarOverflow {
-                left,
-                right,
-                left_hit_area,
-                right_hit_area,
-            },
-        )
     };
 
     let new_tab_hit_area = if mouse_chrome {
@@ -790,13 +1021,16 @@ pub(crate) fn compute_tab_bar_view(
         "tab bar overflow"
     );
 
-    TabBarView {
-        tab_hit_areas,
-        tab_chrome: chromes,
-        tab_status_mode: mode,
-        overflow,
-        new_tab_hit_area,
-    }
+    (
+        TabBarView {
+            tab_hit_areas,
+            tab_chrome: chromes,
+            tab_status_mode: mode,
+            overflow,
+            new_tab_hit_area,
+        },
+        resolved_offset,
+    )
 }
 
 fn tab_drop_indicator_x(
@@ -1165,6 +1399,20 @@ mod tests {
     use crate::workspace::Workspace;
     use ratatui::{backend::TestBackend, Terminal};
 
+    /// No-offset (centered) wrapper: the vast majority of tab-bar tests predate
+    /// the scroll offset and only care about the centered layout, so they call
+    /// this thin adapter that passes `scroll_offset = None` and returns just the
+    /// view. Scroll-specific tests call `compute_tab_bar_view` directly.
+    fn cbv(
+        chromes: Vec<TabChrome>,
+        active_tab: usize,
+        mode: TabStatusMode,
+        area: Rect,
+        mouse_chrome: bool,
+    ) -> TabBarView {
+        compute_tab_bar_view(chromes, active_tab, mode, area, mouse_chrome, None).0
+    }
+
     fn buffer_row_text(buffer: &ratatui::buffer::Buffer, area: Rect, row: u16) -> String {
         (area.x..area.x + area.width)
             .map(|x| buffer[(x, row)].symbol())
@@ -1269,8 +1517,7 @@ mod tests {
     #[test]
     fn all_tabs_visible_when_they_fit() {
         let chromes = chromes_from_names(&["ab", "cd", "ef"]);
-        let view =
-            compute_tab_bar_view(chromes, 0, TabStatusMode::Off, Rect::new(0, 0, 60, 1), true);
+        let view = cbv(chromes, 0, TabStatusMode::Off, Rect::new(0, 0, 60, 1), true);
         assert!(view.tab_hit_areas.iter().all(|r| r.width > 0));
         assert_eq!(view.overflow, TabBarOverflow::default());
     }
@@ -1283,7 +1530,7 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let chromes = chromes_from_names(&refs);
         let active = 5;
-        let view = compute_tab_bar_view(
+        let view = cbv(
             chromes.clone(),
             active,
             TabStatusMode::Off,
@@ -1305,8 +1552,7 @@ mod tests {
         let names: Vec<String> = (0..10).map(|i| format!("tab{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let chromes = chromes_from_names(&refs);
-        let view =
-            compute_tab_bar_view(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
+        let view = cbv(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         let n = view.tab_hit_areas.len();
         let left = view.overflow.left.expect("left overflow");
         let right = view.overflow.right.expect("right overflow");
@@ -1325,8 +1571,7 @@ mod tests {
         let names: Vec<String> = (0..10).map(|i| format!("tab{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let chromes = chromes_from_names(&refs);
-        let view =
-            compute_tab_bar_view(chromes, 0, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
+        let view = cbv(chromes, 0, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         assert!(view.tab_hit_areas[0].width > 0);
         assert!(view.overflow.left.is_none(), "no hidden tabs to the left");
         assert!(view.overflow.right.is_some());
@@ -1338,7 +1583,7 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let chromes = chromes_from_names(&refs);
         let last = 9;
-        let view = compute_tab_bar_view(
+        let view = cbv(
             chromes,
             last,
             TabStatusMode::Off,
@@ -1375,8 +1620,7 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         // Left hidden range includes 1 (attention); right hidden includes 8 (attention).
         let chromes = chromes_with_attention(&refs, &[1, 8]);
-        let view =
-            compute_tab_bar_view(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
+        let view = cbv(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         let left = view.overflow.left.expect("left overflow");
         let right = view.overflow.right.expect("right overflow");
 
@@ -1405,8 +1649,7 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         // No attention anywhere.
         let chromes = chromes_with_attention(&refs, &[]);
-        let view =
-            compute_tab_bar_view(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
+        let view = cbv(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         let left = view.overflow.left.expect("left overflow");
         let right = view.overflow.right.expect("right overflow");
         assert_eq!(left.side.hidden_attention(), 0);
@@ -1432,8 +1675,7 @@ mod tests {
                 (10, Working, false),
             ],
         );
-        let view =
-            compute_tab_bar_view(chromes, 6, TabStatusMode::Off, Rect::new(0, 0, 36, 1), true);
+        let view = cbv(chromes, 6, TabStatusMode::Off, Rect::new(0, 0, 36, 1), true);
         let left = view.overflow.left.expect("left overflow").side;
         let right = view.overflow.right.expect("right overflow").side;
         assert_eq!(left.hidden_blocked, 1, "left blocked");
@@ -1458,8 +1700,7 @@ mod tests {
         let names: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let chromes = chromes_with_states(&refs, &[(1, Working, false), (3, Blocked, true)]);
-        let view =
-            compute_tab_bar_view(chromes, 7, TabStatusMode::Off, Rect::new(0, 0, 36, 1), true);
+        let view = cbv(chromes, 7, TabStatusMode::Off, Rect::new(0, 0, 36, 1), true);
         let left = view.overflow.left.expect("left overflow");
         let mut side = left.side;
         side.jump_to = left.jump_to;
@@ -1476,11 +1717,9 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         // Several attention tabs hidden left so the badge shows a count.
         let with = chromes_with_attention(&refs, &[0, 1, 2]);
-        let view_with =
-            compute_tab_bar_view(with, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
+        let view_with = cbv(with, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         let without = chromes_from_names(&refs);
-        let view_without =
-            compute_tab_bar_view(without, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
+        let view_without = cbv(without, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         assert!(
             view_with.overflow.left_hit_area.width > view_without.overflow.left_hit_area.width,
             "attention badge must widen the indicator past the plain-count width"
@@ -1509,7 +1748,7 @@ mod tests {
             for active in [4usize, 5, 6] {
                 for width in [28u16, 34, 40, 46] {
                     let chromes = chromes_with_attention(&refs, set);
-                    let view = compute_tab_bar_view(
+                    let view = cbv(
                         chromes,
                         active,
                         TabStatusMode::Off,
@@ -1544,8 +1783,7 @@ mod tests {
         let names: Vec<String> = (0..10).map(|i| format!("tab{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let chromes = chromes_with_attention(&refs, &[5]); // active tab itself
-        let view =
-            compute_tab_bar_view(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
+        let view = cbv(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         let left = view
             .overflow
             .left
@@ -1564,8 +1802,7 @@ mod tests {
         let names: Vec<String> = (0..10).map(|i| format!("tab{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let chromes = chromes_from_names(&refs);
-        let view =
-            compute_tab_bar_view(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
+        let view = cbv(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         assert!(
             view.overflow.left_hit_area.width >= 3,
             "left indicator must be a touch-adequate hit zone, not 1 cell"
@@ -1583,7 +1820,7 @@ mod tests {
         for active in [0, 6, 11] {
             for width in 20..60 {
                 let chromes = chromes_from_names(&refs);
-                let view = compute_tab_bar_view(
+                let view = cbv(
                     chromes,
                     active,
                     TabStatusMode::Off,
@@ -1602,8 +1839,7 @@ mod tests {
     #[test]
     fn compute_tab_bar_view_returns_default_for_zero_width_area() {
         let chromes = chromes_from_names(&["aa", "bb"]);
-        let view =
-            compute_tab_bar_view(chromes, 0, TabStatusMode::Off, Rect::new(0, 0, 0, 1), true);
+        let view = cbv(chromes, 0, TabStatusMode::Off, Rect::new(0, 0, 0, 1), true);
         assert!(view.tab_hit_areas.is_empty());
         assert_eq!(view.overflow, TabBarOverflow::default());
         assert_eq!(view.new_tab_hit_area.width, 0);
@@ -1614,7 +1850,7 @@ mod tests {
         let names: Vec<String> = (0..10).map(|i| format!("tab{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let chromes = chromes_from_names(&refs);
-        let view = compute_tab_bar_view(
+        let view = cbv(
             chromes,
             5,
             TabStatusMode::Off,
@@ -1637,8 +1873,7 @@ mod tests {
         let names: Vec<String> = (0..10).map(|i| format!("tab{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let chromes = chromes_from_names(&refs);
-        let view =
-            compute_tab_bar_view(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
+        let view = cbv(chromes, 5, TabStatusMode::Off, Rect::new(0, 0, 40, 1), true);
         for (idx, rect) in view.tab_hit_areas.iter().enumerate() {
             if rect.width == 0 {
                 continue;
@@ -1669,7 +1904,7 @@ mod tests {
             "h",
         ]);
         for active in [0, 3, 7] {
-            let view = compute_tab_bar_view(
+            let view = cbv(
                 chromes.clone(),
                 active,
                 TabStatusMode::Off,
@@ -1702,7 +1937,7 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         for width in 12..70 {
             let chromes = chromes_from_names(&refs);
-            let view = compute_tab_bar_view(
+            let view = cbv(
                 chromes,
                 3,
                 TabStatusMode::Off,
@@ -1729,6 +1964,698 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Golden characterization of the no-offset (centered) layout (T15)
+    // -----------------------------------------------------------------------
+
+    /// Absolute path to the committed golden snapshot. The snapshot is captured
+    /// from the PRE-change centered layout so the offset refactor is pinned to
+    /// reproduce it byte-for-byte in no-offset mode. Set `HERDR_BLESS_GOLDEN=1`
+    /// to (re)write it — only ever done against the pre-change code.
+    fn golden_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/tab_bar_centered_golden.txt")
+    }
+
+    /// The fixture matrix the golden pins: (label, tab count, active, area
+    /// width, mouse_chrome, status mode, attention indices). Varied over tab
+    /// count, active position, bar width, mouse chrome, and attention badges so
+    /// the snapshot exercises the fit, both-side-overflow, edge-overflow, and
+    /// badge-widened paths.
+    struct GoldenFixture {
+        label: &'static str,
+        names: Vec<String>,
+        active: usize,
+        width: u16,
+        mouse: bool,
+        mode: TabStatusMode,
+        attention: Vec<usize>,
+    }
+
+    fn golden_fixtures() -> Vec<GoldenFixture> {
+        let n = |count: usize| (0..count).map(|i| format!("tab{i}")).collect::<Vec<_>>();
+        let wide = || {
+            vec![
+                "你好世界".to_string(),
+                "editor".to_string(),
+                "👨\u{200d}💻".to_string(),
+                "tab-d".to_string(),
+                "넓은탭이름".to_string(),
+                "f".to_string(),
+                "g".to_string(),
+                "h".to_string(),
+            ]
+        };
+        let mut fx = Vec::new();
+        let mut push =
+            |label, names: Vec<String>, active, width, mouse, mode, attention: &[usize]| {
+                fx.push(GoldenFixture {
+                    label,
+                    names,
+                    active,
+                    width,
+                    mouse,
+                    mode,
+                    attention: attention.to_vec(),
+                });
+            };
+        push("fit_all", n(3), 0, 60, true, TabStatusMode::Off, &[]);
+        push(
+            "fit_all_nomouse",
+            n(3),
+            1,
+            60,
+            false,
+            TabStatusMode::Off,
+            &[],
+        );
+        push(
+            "both_overflow_mid",
+            n(10),
+            5,
+            40,
+            true,
+            TabStatusMode::Off,
+            &[],
+        );
+        push(
+            "both_overflow_nomouse",
+            n(10),
+            5,
+            40,
+            false,
+            TabStatusMode::Off,
+            &[],
+        );
+        push("first_active", n(10), 0, 40, true, TabStatusMode::Off, &[]);
+        push("last_active", n(10), 9, 40, true, TabStatusMode::Off, &[]);
+        push("narrow", n(12), 6, 28, true, TabStatusMode::Off, &[]);
+        push(
+            "badge_left",
+            n(10),
+            5,
+            40,
+            true,
+            TabStatusMode::All,
+            &[0, 1, 2],
+        );
+        push(
+            "badge_both",
+            n(12),
+            6,
+            34,
+            true,
+            TabStatusMode::All,
+            &[0, 1, 10, 11],
+        );
+        push("wide_unicode", wide(), 3, 30, true, TabStatusMode::Off, &[]);
+        push(
+            "wide_unicode_last",
+            wide(),
+            7,
+            30,
+            true,
+            TabStatusMode::Off,
+            &[],
+        );
+        push("single_tab", n(1), 0, 40, true, TabStatusMode::Off, &[]);
+        fx
+    }
+
+    /// Deterministic one-line-per-field serialization of a `TabBarView`'s
+    /// geometry: dense hit rects, both overflow groups (count + jump target +
+    /// hit rect), and the new-tab rect. Stable across runs, so it can be
+    /// diffed against the committed golden.
+    fn serialize_view(label: &str, view: &TabBarView) -> String {
+        use std::fmt::Write;
+        let mut s = String::new();
+        let rect = |r: &Rect| format!("{},{},{},{}", r.x, r.y, r.width, r.height);
+        let group = |g: &Option<HiddenGroup>| match g {
+            Some(g) => format!("count={} jump={}", g.count, g.jump_to),
+            None => "none".to_string(),
+        };
+        let _ = writeln!(s, "== {label} ==");
+        for (i, r) in view.tab_hit_areas.iter().enumerate() {
+            let _ = writeln!(s, "  tab[{i}]={}", rect(r));
+        }
+        let _ = writeln!(s, "  left={}", group(&view.overflow.left));
+        let _ = writeln!(s, "  right={}", group(&view.overflow.right));
+        let _ = writeln!(s, "  left_hit={}", rect(&view.overflow.left_hit_area));
+        let _ = writeln!(s, "  right_hit={}", rect(&view.overflow.right_hit_area));
+        let _ = writeln!(s, "  new_tab={}", rect(&view.new_tab_hit_area));
+        s
+    }
+
+    fn compute_golden_snapshot() -> String {
+        let mut out = String::new();
+        for fx in golden_fixtures() {
+            let refs: Vec<&str> = fx.names.iter().map(String::as_str).collect();
+            let chromes = chromes_with_attention(&refs, &fx.attention);
+            let view = cbv(
+                chromes,
+                fx.active,
+                fx.mode,
+                Rect::new(0, 0, fx.width, 1),
+                fx.mouse,
+            );
+            out.push_str(&serialize_view(fx.label, &view));
+        }
+        out
+    }
+
+    #[test]
+    fn no_offset_layout_matches_pre_change_golden() {
+        let snapshot = compute_golden_snapshot();
+        let path = golden_path();
+        // Only (re)write under an explicit bless. A missing golden must FAIL,
+        // not self-heal: auto-writing when the file is absent would regenerate
+        // it from the current code and make the assertion tautological,
+        // defeating the characterization guarantee on any tree where the
+        // committed golden is missing.
+        if std::env::var("HERDR_BLESS_GOLDEN").is_ok() {
+            std::fs::write(&path, &snapshot).expect("write golden snapshot");
+        }
+        let golden = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "golden snapshot missing or unreadable at {path:?} ({e}); \
+                 re-bless against pre-change code with HERDR_BLESS_GOLDEN=1"
+            )
+        });
+        assert_eq!(
+            snapshot, golden,
+            "no-offset layout drifted from the pre-change golden at {path:?}; \
+             re-bless only against pre-change code with HERDR_BLESS_GOLDEN=1"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scrolled-window geometry (offset-aware layout: T1-T7, T6b, T19)
+    // -----------------------------------------------------------------------
+
+    /// The badge classifier `max_scroll_offset` expects (no attention anywhere).
+    fn no_attention_state(_i: usize) -> (crate::detect::AgentState, bool) {
+        (crate::detect::AgentState::Unknown, true)
+    }
+
+    #[test]
+    fn t1_scrolled_fill_left_packs_from_offset() {
+        // T1: with an offset, the window starts exactly at `offset` and packs
+        // rightward with abutting widths; nothing left of the offset is visible.
+        let names: Vec<String> = (0..12).map(|i| format!("tab{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let chromes = chromes_from_names(&refs);
+        let (view, resolved) = compute_tab_bar_view(
+            chromes,
+            0,
+            TabStatusMode::Off,
+            Rect::new(0, 0, 40, 1),
+            true,
+            Some(3),
+        );
+        assert_eq!(resolved, Some(3), "mid-range offset is unchanged");
+        // Tabs before the offset are hidden.
+        for i in 0..3 {
+            assert_eq!(
+                view.tab_hit_areas[i].width, 0,
+                "tab {i} before offset hidden"
+            );
+        }
+        // Offset tab is the first visible one.
+        let (first, last) = visible_bounds(&view.tab_hit_areas).expect("some visible");
+        assert_eq!(first, 3, "window starts at the offset");
+        // Visible run is contiguous and abuts.
+        for i in first..last {
+            let a = view.tab_hit_areas[i];
+            let b = view.tab_hit_areas[i + 1];
+            assert!(a.width > 0 && b.width > 0, "contiguous visible run");
+            assert_eq!(b.x, a.x + a.width, "tabs {i},{} abut", i + 1);
+        }
+        // Left indicator counts exactly the hidden-left tabs (0..offset).
+        assert_eq!(view.overflow.left.expect("left overflow").count, 3);
+    }
+
+    #[test]
+    fn t2_clamp_and_non_overflow_resolution() {
+        let names: Vec<String> = (0..12).map(|i| format!("tab{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let area = Rect::new(0, 0, 40, 1);
+        // Offset past max clamps; last tab fully visible at the clamped offset.
+        let (view, resolved) = compute_tab_bar_view(
+            chromes_from_names(&refs),
+            0,
+            TabStatusMode::Off,
+            area,
+            true,
+            Some(9999),
+        );
+        let last = refs.len() - 1;
+        let max = resolved.expect("overflowing strip resolves to an offset");
+        let expected_max = max_scroll_offset(
+            &chromes_from_names(&refs),
+            area.width.saturating_sub(NEW_TAB_WIDTH),
+            true,
+            &no_attention_state,
+        );
+        assert_eq!(max, expected_max, "clamped to max_scroll");
+        assert!(
+            view.tab_hit_areas[last].width > 0,
+            "last tab fully visible at max_scroll"
+        );
+        assert!(view.overflow.right.is_none(), "nothing hidden right at max");
+
+        // A non-overflowing strip resolves any offset to no-offset (centered).
+        let (view, resolved) = compute_tab_bar_view(
+            chromes_from_names(&["ab", "cd", "ef"]),
+            0,
+            TabStatusMode::Off,
+            Rect::new(0, 0, 60, 1),
+            true,
+            Some(2),
+        );
+        assert_eq!(
+            resolved, None,
+            "non-overflowing strip resolves to no-offset"
+        );
+        assert!(view.tab_hit_areas.iter().all(|r| r.width > 0));
+        assert_eq!(view.overflow, TabBarOverflow::default());
+    }
+
+    #[test]
+    fn t3_overflow_counts_at_offsets_0_mid_max() {
+        let names: Vec<String> = (0..12).map(|i| format!("tab{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let area = Rect::new(0, 0, 40, 1);
+        let n = refs.len();
+        let max = max_scroll_offset(
+            &chromes_from_names(&refs),
+            area.width.saturating_sub(NEW_TAB_WIDTH),
+            true,
+            &no_attention_state,
+        );
+        for offset in [0usize, 3, max] {
+            let (view, resolved) = compute_tab_bar_view(
+                chromes_from_names(&refs),
+                0,
+                TabStatusMode::Off,
+                area,
+                true,
+                Some(offset),
+            );
+            let o = resolved.expect("overflowing");
+            let visible = view.tab_hit_areas.iter().filter(|r| r.width > 0).count();
+            let left = view.overflow.left.map(|g| g.count).unwrap_or(0);
+            let right = view.overflow.right.map(|g| g.count).unwrap_or(0);
+            assert_eq!(left, o, "hidden-left count == offset at offset {o}");
+            assert_eq!(left + visible + right, n, "counts sum to tab count");
+            if o == 0 {
+                assert!(view.overflow.left.is_none(), "no left indicator at 0");
+            }
+            if o == max {
+                assert!(view.overflow.right.is_none(), "no right indicator at max");
+            }
+        }
+    }
+
+    #[test]
+    fn t4_clamp_stays_consistent_with_badge_widened_indicators() {
+        // T4: attention badges on hidden-left tabs widen the left indicator; the
+        // clamp must derive max_scroll from the same badge-aware reserve, so the
+        // last tab stays fully visible and indicators never overlap at the
+        // boundary.
+        let names: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for width in [30u16, 36, 40, 46] {
+            let area = Rect::new(0, 0, width, 1);
+            let chromes = chromes_with_attention(&refs, &[0, 1, 2, 3]);
+            let (view, resolved) =
+                compute_tab_bar_view(chromes, 0, TabStatusMode::All, area, true, Some(9999));
+            let last = refs.len() - 1;
+            assert!(
+                view.tab_hit_areas[last].width > 0,
+                "width={width}: last tab visible at clamped max"
+            );
+            assert!(resolved.is_some(), "width={width}: resolves");
+            for ind in [view.overflow.left_hit_area, view.overflow.right_hit_area] {
+                if ind.width == 0 {
+                    continue;
+                }
+                for rect in view.tab_hit_areas.iter().filter(|r| r.width > 0) {
+                    let (ind_lo, ind_hi) = (ind.x, ind.x + ind.width);
+                    let (lo, hi) = (rect.x, rect.x + rect.width);
+                    assert!(
+                        ind_hi <= lo || hi <= ind_lo,
+                        "width={width}: indicator overlaps a visible tab at the boundary"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn t5_dense_hit_areas_and_unicode_in_scrolled_mode() {
+        // T5: dense hit-area invariant holds in scrolled mode, including
+        // adversarial unicode names.
+        let chromes_names = &[
+            "你好世界",
+            "e\u{0301}ditor",
+            "👨\u{200d}💻",
+            "tab-d",
+            "넓은탭이름",
+            "f",
+            "g",
+            "h",
+        ];
+        for offset in [0usize, 2, 4, 7, 99] {
+            for width in [20u16, 30, 40] {
+                let chromes = chromes_from_names(chromes_names);
+                let (view, _) = compute_tab_bar_view(
+                    chromes,
+                    0,
+                    TabStatusMode::Off,
+                    Rect::new(0, 0, width, 1),
+                    true,
+                    Some(offset),
+                );
+                assert_eq!(
+                    view.tab_hit_areas.len(),
+                    chromes_names.len(),
+                    "dense hit areas in scrolled mode (offset={offset} width={width})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t6_adversarial_inputs_no_panic() {
+        // T6: offset far past tab count, single over-wide tab, one-tab strip,
+        // empty strip: no panic, non-empty window for any non-empty strip.
+        // Offset far past the tab count.
+        let (view, resolved) = compute_tab_bar_view(
+            chromes_from_names(&["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"]),
+            0,
+            TabStatusMode::Off,
+            Rect::new(0, 0, 30, 1),
+            true,
+            Some(usize::MAX),
+        );
+        assert!(resolved.map(|o| o < 10).unwrap_or(true));
+        assert!(view.tab_hit_areas.iter().any(|r| r.width > 0));
+
+        // Single tab far wider than the bar: clipped, still non-empty.
+        let (view, _) = compute_tab_bar_view(
+            chromes_from_names(&["a-very-very-wide-single-tab-name-that-exceeds-the-bar"]),
+            0,
+            TabStatusMode::Off,
+            Rect::new(0, 0, 10, 1),
+            true,
+            Some(0),
+        );
+        assert_eq!(view.tab_hit_areas.len(), 1);
+
+        // One-tab strip with a large offset.
+        let (view, resolved) = compute_tab_bar_view(
+            chromes_from_names(&["only"]),
+            0,
+            TabStatusMode::Off,
+            Rect::new(0, 0, 40, 1),
+            true,
+            Some(50),
+        );
+        assert_eq!(view.tab_hit_areas.len(), 1);
+        assert_eq!(resolved, None, "single fitting tab resolves to no-offset");
+
+        // Empty strip.
+        let (view, resolved) = compute_tab_bar_view(
+            Vec::new(),
+            0,
+            TabStatusMode::Off,
+            Rect::new(0, 0, 40, 1),
+            true,
+            Some(3),
+        );
+        assert!(view.tab_hit_areas.is_empty());
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn t6b_window_is_consistent_rejects_bad_windows() {
+        // T6b: the free predicate rejects hand-crafted bad windows.
+        let area = Rect::new(0, 0, 40, 1);
+        // Empty window (nothing visible).
+        assert!(
+            !window_is_consistent(&[Rect::default(), Rect::default()], area, 0),
+            "empty window is inconsistent"
+        );
+        // Packed width exceeds the usable area.
+        let overrun = vec![Rect::new(0, 0, 20, 1), Rect::new(20, 0, 30, 1)];
+        assert!(
+            !window_is_consistent(&overrun, area, 0),
+            "over-wide packing is inconsistent"
+        );
+        // Clipped last tab with nothing hidden on the right.
+        let clipped_last = vec![Rect::new(0, 0, 10, 1), Rect::default()];
+        assert!(
+            !window_is_consistent(&clipped_last, area, 0),
+            "clipped last tab with nothing hidden right is inconsistent"
+        );
+        // A well-formed window with something hidden right is consistent even
+        // when the last dense rect is zero-width (it is legitimately hidden).
+        let ok = vec![
+            Rect::new(0, 0, 10, 1),
+            Rect::new(10, 0, 10, 1),
+            Rect::default(),
+        ];
+        assert!(
+            window_is_consistent(&ok, area, 1),
+            "hidden-right last tab is fine"
+        );
+    }
+
+    #[test]
+    fn scrolled_fallback_recenters_on_inconsistent_window() {
+        // AC6 (compute-path arm): drive `compute_tab_bar_view` itself onto the
+        // defensive fallback, not just the `window_is_consistent` predicate. A
+        // pathologically narrow bar with many attention-badged hidden-left tabs
+        // widens the left indicator until its reserve is as wide as the usable
+        // area, so even the clamped last-tab window packs to nothing and the
+        // consistency check fails. The compute path must then discard the offset
+        // (resolve to `None`), fall back to the centered fill, and keep the
+        // dense hit-area invariant — no panic, no all-zero row surfaced.
+        //
+        // Search a small width/tab-count grid for a configuration that actually
+        // trips the fallback (the exact trigger depends on badge-width math), so
+        // the test stays valid if indicator sizing shifts. `found` guards that
+        // we truly exercised the branch rather than passing vacuously.
+        let mut found = false;
+        'search: for count in [12usize, 16, 20] {
+            let names: Vec<String> = (0..count).map(|i| format!("t{i}")).collect();
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            let attention: Vec<usize> = (0..count.saturating_sub(1)).collect();
+            for width in 6u16..=16 {
+                let area = Rect::new(0, 0, width, 1);
+                // Request the far-right offset so the clamp lands at n-1, the
+                // window with the widest possible hidden-left reserve.
+                let chromes = chromes_with_attention(&refs, &attention);
+                let (view, resolved) = compute_tab_bar_view(
+                    chromes,
+                    0,
+                    TabStatusMode::All,
+                    area,
+                    true,
+                    Some(usize::MAX),
+                );
+                // Invariants that must hold on EVERY outcome (fallback or not):
+                // dense hit areas, and no rect escaping the bar.
+                assert_eq!(
+                    view.tab_hit_areas.len(),
+                    count,
+                    "dense hit areas (w={width})"
+                );
+                for r in view.tab_hit_areas.iter().filter(|r| r.width > 0) {
+                    assert!(
+                        r.x + r.width <= area.x + area.width,
+                        "rect escapes bar (w={width})"
+                    );
+                }
+                // The fallback re-centers, so the active tab (0) is placed by the
+                // centered fill and is visible; the offset resolves to None.
+                if resolved.is_none() && view.tab_hit_areas[0].width > 0 {
+                    found = true;
+                    break 'search;
+                }
+            }
+        }
+        assert!(
+            found,
+            "expected some narrow-bar/badged config to trip the compute-path fallback"
+        );
+    }
+
+    #[test]
+    fn t7_active_tab_outside_window_has_zero_width_and_no_active_styling() {
+        // T7: an active tab outside the scrolled window renders zero-width and
+        // no active (accent) styling appears anywhere in the buffer.
+        let names: Vec<String> = (0..12).map(|i| format!("tab{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let area = Rect::new(0, 0, 40, 1);
+        let mut app = AppState::test_new();
+        let mut ws = make_ws_with_tabs(&refs);
+        ws.active_tab = 0; // active is far left; scroll away from it
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.mouse_capture = true;
+        app.view.tab_bar_rect = area;
+        let chromes = chromes_from_ws(&app.workspaces[0]);
+        let (view, resolved) =
+            compute_tab_bar_view(chromes, 0, TabStatusMode::Off, area, true, Some(6));
+        assert!(resolved.is_some());
+        assert_eq!(
+            view.tab_hit_areas[0].width, 0,
+            "active tab outside the window is zero-width"
+        );
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.tab_chrome = view.tab_chrome;
+        app.view.tab_status_mode = view.tab_status_mode;
+        app.view.tab_overflow = view.overflow;
+        app.view.new_tab_hit_area = view.new_tab_hit_area;
+        let buffer = render_to_buffer(&app, area);
+        for x in area.x..area.x + area.width {
+            assert_ne!(
+                buffer[(x, 0)].bg,
+                app.palette.accent,
+                "no active-accent styling at x={x} when active tab is off-window"
+            );
+        }
+    }
+
+    #[test]
+    fn t19_property_sweep_offsets_within_area_and_non_overlapping() {
+        // T19: sweep (tab count × name widths × offset × mouse_chrome). All hit
+        // areas lie within the area and never overlap; the last tab is fully
+        // visible exactly when the clamped offset equals max_scroll.
+        let widths_sets: &[&[&str]] = &[
+            &["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"],
+            &["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"],
+        ];
+        for names in widths_sets {
+            for mouse in [false, true] {
+                for area_w in [24u16, 32, 44] {
+                    let area = Rect::new(0, 0, area_w, 1);
+                    let usable = if mouse {
+                        area_w.saturating_sub(NEW_TAB_WIDTH)
+                    } else {
+                        area_w
+                    };
+                    let max = max_scroll_offset(
+                        &chromes_from_names(names),
+                        usable,
+                        mouse,
+                        &no_attention_state,
+                    );
+                    for offset in 0..=names.len() + 1 {
+                        let (view, resolved) = compute_tab_bar_view(
+                            chromes_from_names(names),
+                            0,
+                            TabStatusMode::Off,
+                            area,
+                            mouse,
+                            Some(offset),
+                        );
+                        // All rects inside the bar.
+                        for r in view.tab_hit_areas.iter().filter(|r| r.width > 0) {
+                            assert!(
+                                r.x >= area.x && r.x + r.width <= area.x + area.width,
+                                "rect outside area (names={names:?} mouse={mouse} w={area_w} off={offset})"
+                            );
+                        }
+                        // Non-overlapping visible rects.
+                        let mut vis: Vec<Rect> = view
+                            .tab_hit_areas
+                            .iter()
+                            .copied()
+                            .filter(|r| r.width > 0)
+                            .collect();
+                        vis.sort_by_key(|r| r.x);
+                        for pair in vis.windows(2) {
+                            assert!(
+                                pair[0].x + pair[0].width <= pair[1].x,
+                                "overlap (names={names:?} mouse={mouse} w={area_w} off={offset})"
+                            );
+                        }
+                        // Last tab fully visible iff clamped offset == max.
+                        if let Some(o) = resolved {
+                            let last = names.len() - 1;
+                            let last_visible =
+                                view.tab_hit_areas[last].width > 0 && view.overflow.right.is_none();
+                            assert_eq!(
+                                last_visible,
+                                o == max,
+                                "last-visible mismatch (names={names:?} mouse={mouse} w={area_w} off={o} max={max})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scrolled_mid_offset_badge_indicator_no_overlap() {
+        // The badge-aware reserve-convergence loop is now shared with the
+        // scrolled fill. Exercise a mid-range offset whose hidden-left range
+        // carries attention badges (widening the left indicator) and assert the
+        // indicators never overlap a visible tab — the scrolled analog of
+        // `indicator_hit_areas_never_overlap_visible_tabs`, at an offset short
+        // of max_scroll so both indicators are present.
+        let names: Vec<String> = (0..14).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for width in [30u16, 36, 42, 48] {
+            for offset in [2usize, 3, 4] {
+                let area = Rect::new(0, 0, width, 1);
+                // Attention on hidden-left tabs (indices < offset) widens the
+                // left indicator past its plain-count width.
+                let chromes = chromes_with_attention(&refs, &[0, 1, 2]);
+                let (view, resolved) =
+                    compute_tab_bar_view(chromes, 0, TabStatusMode::All, area, true, Some(offset));
+                // Only meaningful while an offset actually resolved (overflow).
+                if resolved.is_none() {
+                    continue;
+                }
+                for ind in [view.overflow.left_hit_area, view.overflow.right_hit_area] {
+                    if ind.width == 0 {
+                        continue;
+                    }
+                    let (ind_lo, ind_hi) = (ind.x, ind.x + ind.width);
+                    for rect in view.tab_hit_areas.iter().filter(|r| r.width > 0) {
+                        let (lo, hi) = (rect.x, rect.x + rect.width);
+                        assert!(
+                            ind_hi <= lo || hi <= ind_lo,
+                            "width={width} offset={offset}: scrolled indicator overlaps a visible tab"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn build_tab_bar_inputs_resolves_no_scroll_offset() {
+        // The behavior-neutral guarantee holds only because this seam returns no
+        // offset (the resting layout is the centered fill). Lock it so a future
+        // change that resolves a browse offset here can't silently activate
+        // scrolling in both render paths without updating this test.
+        let mut app = AppState::test_new();
+        app.workspaces = vec![make_ws_with_tabs(&["a", "b", "c"])];
+        app.active = Some(0);
+        let (_chromes, _active, _mode, offset) = crate::ui::build_tab_bar_inputs(
+            &app.workspaces[0],
+            &app.terminals,
+            TabStatusMode::Off,
+            0,
+            &app.palette,
+        );
+        assert_eq!(offset, None, "resting layout resolves to no scroll offset");
     }
 
     // -----------------------------------------------------------------------
@@ -2018,7 +2945,7 @@ mod tests {
                 let per = old_tab_width(&chromes[0]);
                 width.saturating_sub(NEW_TAB_WIDTH + 6) / per
             };
-            let view = compute_tab_bar_view(
+            let view = cbv(
                 chromes,
                 0,
                 TabStatusMode::All,
@@ -2127,7 +3054,7 @@ mod tests {
             for active in [5usize, 115] {
                 for width in [28u16, 34, 40, 46] {
                     let chromes = chromes_from_names(&refs);
-                    let view = compute_tab_bar_view(
+                    let view = cbv(
                         chromes,
                         active,
                         TabStatusMode::Off,
@@ -2164,7 +3091,7 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         for width in [30u16, 36, 42, 48, 54] {
             let chromes = chromes_from_names(&refs);
-            let view = compute_tab_bar_view(
+            let view = cbv(
                 chromes.clone(),
                 0,
                 TabStatusMode::Off,
@@ -2200,7 +3127,7 @@ mod tests {
     #[test]
     fn new_tab_button_abuts_last_tab_when_nothing_overflows() {
         // AC10 mirror: no overflow → the ` + ` button abuts the last tab.
-        let view = compute_tab_bar_view(
+        let view = cbv(
             chromes_from_names(&["ab", "cd"]),
             0,
             TabStatusMode::Off,
@@ -2392,7 +3319,7 @@ mod tests {
             for active in [0, 3, 7] {
                 for width in [24u16, 30, 40, 60] {
                     let chromes = chromes_from_names(names);
-                    let view = compute_tab_bar_view(
+                    let view = cbv(
                         chromes,
                         active,
                         TabStatusMode::Off,
@@ -2426,7 +3353,7 @@ mod tests {
             for active in 0..names.len() {
                 for width in 1u16..30 {
                     let chromes = chromes_from_names(names);
-                    let view = compute_tab_bar_view(
+                    let view = cbv(
                         chromes,
                         active,
                         TabStatusMode::Off,
@@ -2502,7 +3429,7 @@ mod tests {
         app.mouse_capture = mouse_chrome;
         app.view.tab_bar_rect = area;
         let chromes = chromes_from_ws(&app.workspaces[0]);
-        let view = compute_tab_bar_view(chromes, active, TabStatusMode::Off, area, mouse_chrome);
+        let view = cbv(chromes, active, TabStatusMode::Off, area, mouse_chrome);
         app.view.tab_hit_areas = view.tab_hit_areas;
         app.view.tab_chrome = view.tab_chrome;
         app.view.tab_status_mode = view.tab_status_mode;

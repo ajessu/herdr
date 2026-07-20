@@ -1503,15 +1503,23 @@ impl AppState {
             return;
         };
 
-        let (chromes, active_tab, mode) = crate::ui::build_tab_bar_inputs(
+        let (chromes, active_tab, mode, scroll_offset) = crate::ui::build_tab_bar_inputs(
             ws,
             &self.terminals,
             self.show_tab_status,
             self.spinner_tick,
             &self.palette,
         );
-        let layout =
-            crate::ui::compute_tab_bar_view(chromes, active_tab, mode, area, self.mouse_capture);
+        // No scroll offset in play here: the layout is the centered fill and the
+        // clamped offset return is unused.
+        let (layout, _clamped_offset) = crate::ui::compute_tab_bar_view(
+            chromes,
+            active_tab,
+            mode,
+            area,
+            self.mouse_capture,
+            scroll_offset,
+        );
         self.view.tab_hit_areas = layout.tab_hit_areas;
         self.view.tab_chrome = layout.tab_chrome;
         self.view.tab_status_mode = layout.tab_status_mode;

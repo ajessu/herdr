@@ -1,0 +1,169 @@
+== fit_all ==
+  tab[0]=0,0,8,1
+  tab[1]=8,0,8,1
+  tab[2]=16,0,8,1
+  left=none
+  right=none
+  left_hit=0,0,0,0
+  right_hit=0,0,0,0
+  new_tab=24,0,3,1
+== fit_all_nomouse ==
+  tab[0]=0,0,8,1
+  tab[1]=8,0,8,1
+  tab[2]=16,0,8,1
+  left=none
+  right=none
+  left_hit=0,0,0,0
+  right_hit=0,0,0,0
+  new_tab=0,0,0,0
+== both_overflow_mid ==
+  tab[0]=0,0,0,0
+  tab[1]=0,0,0,0
+  tab[2]=0,0,0,0
+  tab[3]=0,0,0,0
+  tab[4]=8,0,8,1
+  tab[5]=16,0,8,1
+  tab[6]=0,0,0,0
+  tab[7]=0,0,0,0
+  tab[8]=0,0,0,0
+  tab[9]=0,0,0,0
+  left=count=4 jump=3
+  right=count=4 jump=6
+  left_hit=0,0,8,1
+  right_hit=24,0,8,1
+  new_tab=32,0,3,1
+== both_overflow_nomouse ==
+  tab[0]=0,0,0,0
+  tab[1]=0,0,0,0
+  tab[2]=0,0,0,0
+  tab[3]=0,0,0,0
+  tab[4]=8,0,8,1
+  tab[5]=16,0,8,1
+  tab[6]=24,0,8,1
+  tab[7]=0,0,0,0
+  tab[8]=0,0,0,0
+  tab[9]=0,0,0,0
+  left=count=4 jump=3
+  right=count=3 jump=7
+  left_hit=0,0,8,1
+  right_hit=32,0,8,1
+  new_tab=0,0,0,0
+== first_active ==
+  tab[0]=0,0,8,1
+  tab[1]=8,0,8,1
+  tab[2]=16,0,8,1
+  tab[3]=0,0,0,0
+  tab[4]=0,0,0,0
+  tab[5]=0,0,0,0
+  tab[6]=0,0,0,0
+  tab[7]=0,0,0,0
+  tab[8]=0,0,0,0
+  tab[9]=0,0,0,0
+  left=none
+  right=count=7 jump=3
+  left_hit=0,0,0,0
+  right_hit=24,0,8,1
+  new_tab=32,0,3,1
+== last_active ==
+  tab[0]=0,0,0,0
+  tab[1]=0,0,0,0
+  tab[2]=0,0,0,0
+  tab[3]=0,0,0,0
+  tab[4]=0,0,0,0
+  tab[5]=0,0,0,0
+  tab[6]=0,0,0,0
+  tab[7]=8,0,8,1
+  tab[8]=16,0,8,1
+  tab[9]=24,0,8,1
+  left=count=7 jump=6
+  right=none
+  left_hit=0,0,8,1
+  right_hit=0,0,0,0
+  new_tab=32,0,3,1
+== narrow ==
+  tab[0]=0,0,0,0
+  tab[1]=0,0,0,0
+  tab[2]=0,0,0,0
+  tab[3]=0,0,0,0
+  tab[4]=0,0,0,0
+  tab[5]=0,0,0,0
+  tab[6]=8,0,8,1
+  tab[7]=0,0,0,0
+  tab[8]=0,0,0,0
+  tab[9]=0,0,0,0
+  tab[10]=0,0,0,0
+  tab[11]=0,0,0,0
+  left=count=6 jump=5
+  right=count=5 jump=7
+  left_hit=0,0,8,1
+  right_hit=16,0,8,1
+  new_tab=24,0,3,1
+== badge_left ==
+  tab[0]=0,0,0,0
+  tab[1]=0,0,0,0
+  tab[2]=0,0,0,0
+  tab[3]=0,0,0,0
+  tab[4]=11,0,8,1
+  tab[5]=19,0,8,1
+  tab[6]=0,0,0,0
+  tab[7]=0,0,0,0
+  tab[8]=0,0,0,0
+  tab[9]=0,0,0,0
+  left=count=4 jump=3
+  right=count=4 jump=6
+  left_hit=0,0,11,1
+  right_hit=27,0,8,1
+  new_tab=35,0,3,1
+== badge_both ==
+  tab[0]=0,0,0,0
+  tab[1]=0,0,0,0
+  tab[2]=0,0,0,0
+  tab[3]=0,0,0,0
+  tab[4]=0,0,0,0
+  tab[5]=0,0,0,0
+  tab[6]=11,0,8,1
+  tab[7]=0,0,0,0
+  tab[8]=0,0,0,0
+  tab[9]=0,0,0,0
+  tab[10]=0,0,0,0
+  tab[11]=0,0,0,0
+  left=count=6 jump=5
+  right=count=5 jump=7
+  left_hit=0,0,11,1
+  right_hit=19,0,11,1
+  new_tab=30,0,3,1
+== wide_unicode ==
+  tab[0]=0,0,0,0
+  tab[1]=0,0,0,0
+  tab[2]=0,0,0,0
+  tab[3]=8,0,9,1
+  tab[4]=0,0,0,0
+  tab[5]=0,0,0,0
+  tab[6]=0,0,0,0
+  tab[7]=0,0,0,0
+  left=count=3 jump=2
+  right=count=4 jump=4
+  left_hit=0,0,8,1
+  right_hit=17,0,8,1
+  new_tab=25,0,3,1
+== wide_unicode_last ==
+  tab[0]=0,0,0,0
+  tab[1]=0,0,0,0
+  tab[2]=0,0,0,0
+  tab[3]=0,0,0,0
+  tab[4]=0,0,0,0
+  tab[5]=8,0,5,1
+  tab[6]=13,0,5,1
+  tab[7]=18,0,5,1
+  left=count=5 jump=4
+  right=none
+  left_hit=0,0,8,1
+  right_hit=0,0,0,0
+  new_tab=23,0,3,1
+== single_tab ==
+  tab[0]=0,0,8,1
+  left=none
+  right=none
+  left_hit=0,0,0,0
+  right_hit=0,0,0,0
+  new_tab=8,0,3,1
