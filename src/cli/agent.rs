@@ -369,16 +369,96 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+const AGENT_LIST_USAGE: &str =
+    "usage: herdr agent list [--status <idle|working|blocked|done|unknown>[,...]]";
+
 fn agent_list(args: &[String]) -> std::io::Result<i32> {
-    if !args.is_empty() {
-        eprintln!("usage: herdr agent list");
-        return Ok(2);
+    let mut status_filter = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--status" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --status");
+                    eprintln!("{AGENT_LIST_USAGE}");
+                    return Ok(2);
+                };
+                match parse_status_filter(value) {
+                    Ok(statuses) => status_filter = Some(statuses),
+                    Err(err) => {
+                        eprintln!("{err}");
+                        eprintln!("{AGENT_LIST_USAGE}");
+                        return Ok(2);
+                    }
+                }
+                index += 2;
+            }
+            "help" | "--help" | "-h" => {
+                eprintln!("{AGENT_LIST_USAGE}");
+                return Ok(0);
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                eprintln!("{AGENT_LIST_USAGE}");
+                return Ok(2);
+            }
+        }
     }
 
-    super::print_response(&super::send_request(&Request {
+    let mut response = super::send_request(&Request {
         id: "cli:agent:list".into(),
         method: Method::AgentList(EmptyParams::default()),
-    })?)
+    })?;
+    if let Some(statuses) = status_filter {
+        filter_agents_response(&mut response, &statuses);
+    }
+    super::print_response(&response)
+}
+
+// Map a wire status string to its enum via the schema's own serde
+// representation rather than a hand-maintained table, so adding a variant to
+// AgentStatus needs no edit here.
+fn agent_status_from_wire(value: &str) -> Option<AgentStatus> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
+}
+
+fn parse_status_filter(value: &str) -> Result<Vec<AgentStatus>, String> {
+    let mut statuses = Vec::new();
+    for token in value.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(
+                "empty status value (expected idle, working, blocked, done, or unknown)"
+                    .to_string(),
+            );
+        }
+        let Some(status) = agent_status_from_wire(token) else {
+            return Err(format!(
+                "invalid agent status: {token} (expected idle, working, blocked, done, or unknown)"
+            ));
+        };
+        if !statuses.contains(&status) {
+            statuses.push(status);
+        }
+    }
+    Ok(statuses)
+}
+
+fn filter_agents_response(response: &mut serde_json::Value, statuses: &[AgentStatus]) {
+    let Some(agents) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("agents"))
+        .and_then(|agents| agents.as_array_mut())
+    else {
+        return;
+    };
+    agents.retain(|agent| {
+        agent["agent_status"]
+            .as_str()
+            .and_then(agent_status_from_wire)
+            .is_some_and(|current| statuses.contains(&current))
+    });
 }
 
 fn agent_get(args: &[String]) -> std::io::Result<i32> {
@@ -667,7 +747,7 @@ fn parse_agent_wait_status(value: &str) -> std::io::Result<AgentStatus> {
 
 fn print_agent_help() {
     eprintln!("herdr agent commands:");
-    eprintln!("  herdr agent list");
+    eprintln!("  herdr agent list [--status <idle|working|blocked|done|unknown>[,...]]");
     eprintln!("  herdr agent get <target>");
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send <target> <text>");
@@ -682,4 +762,198 @@ fn print_agent_help() {
     eprintln!(
         "  agent send writes literal text; use pane run when you want command text plus Enter"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+
+    #[test]
+    fn parse_status_filter_accepts_single_status() {
+        assert_eq!(
+            parse_status_filter("blocked"),
+            Ok(vec![AgentStatus::Blocked])
+        );
+    }
+
+    #[test]
+    fn parse_status_filter_accepts_every_status() {
+        assert_eq!(
+            parse_status_filter("idle,working,blocked,done,unknown"),
+            Ok(vec![
+                AgentStatus::Idle,
+                AgentStatus::Working,
+                AgentStatus::Blocked,
+                AgentStatus::Done,
+                AgentStatus::Unknown,
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_status_filter_trims_and_dedupes() {
+        assert_eq!(
+            parse_status_filter(" idle , working ,idle"),
+            Ok(vec![AgentStatus::Idle, AgentStatus::Working])
+        );
+    }
+
+    #[test]
+    fn parse_status_filter_rejects_invalid_value() {
+        assert!(parse_status_filter("bogus").is_err());
+    }
+
+    #[test]
+    fn parse_status_filter_rejects_uppercase() {
+        assert!(parse_status_filter("Idle").is_err());
+    }
+
+    #[test]
+    fn parse_status_filter_rejects_empty_value() {
+        assert!(parse_status_filter("").is_err());
+    }
+
+    #[test]
+    fn parse_status_filter_rejects_empty_tokens() {
+        assert!(parse_status_filter("idle,").is_err());
+        assert!(parse_status_filter(",idle").is_err());
+        assert!(parse_status_filter("idle,,working").is_err());
+    }
+
+    fn agent_list_response() -> serde_json::Value {
+        json!({
+            "id": "cli:agent:list",
+            "result": {
+                "type": "agent_list",
+                "agents": [
+                    {"pane_id": "w1:p1", "agent_status": "blocked"},
+                    {"pane_id": "w1:p2", "agent_status": "working"},
+                    {"pane_id": "w1:p3", "agent_status": "idle"},
+                ],
+            },
+        })
+    }
+
+    #[test]
+    fn filter_retains_only_requested_statuses() {
+        let mut response = agent_list_response();
+        filter_agents_response(&mut response, &[AgentStatus::Blocked]);
+        assert_eq!(
+            response,
+            json!({
+                "id": "cli:agent:list",
+                "result": {
+                    "type": "agent_list",
+                    "agents": [{"pane_id": "w1:p1", "agent_status": "blocked"}],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn filter_unions_multiple_statuses() {
+        let mut response = agent_list_response();
+        filter_agents_response(&mut response, &[AgentStatus::Idle, AgentStatus::Working]);
+        assert_eq!(
+            response["result"]["agents"],
+            json!([
+                {"pane_id": "w1:p2", "agent_status": "working"},
+                {"pane_id": "w1:p3", "agent_status": "idle"},
+            ])
+        );
+    }
+
+    #[test]
+    fn filter_with_no_match_leaves_empty_array() {
+        let mut response = agent_list_response();
+        filter_agents_response(&mut response, &[AgentStatus::Done]);
+        assert_eq!(response["result"]["agents"], json!([]));
+        assert_eq!(response["result"]["type"], json!("agent_list"));
+        assert_eq!(response["id"], json!("cli:agent:list"));
+    }
+
+    #[test]
+    fn filter_passes_error_envelope_through_unchanged() {
+        let original = json!({
+            "id": "cli:agent:list",
+            "error": {"code": -32000, "message": "server error"},
+        });
+        let mut response = original.clone();
+        filter_agents_response(&mut response, &[AgentStatus::Blocked]);
+        assert_eq!(response, original);
+    }
+
+    // Bind all three of the filter's hardcoded paths (`result` -> `agents` ->
+    // `agent_status`) to the schema's own serializer. If the SuccessResponse
+    // envelope, the AgentList payload, or the agent_status field is ever
+    // renamed, this fails loudly instead of the filter silently degrading to a
+    // no-op that prints the full list.
+    #[test]
+    fn filter_matches_real_serialized_agent_list_envelope() {
+        use crate::api::schema::{AgentInfo, AgentStatus, ResponseResult, SuccessResponse};
+
+        let agent = |pane_id: &str, status: AgentStatus| AgentInfo {
+            terminal_id: format!("term_{pane_id}"),
+            name: None,
+            agent: None,
+            title: None,
+            display_agent: None,
+            agent_status: status,
+            screen_detection_skipped: false,
+            custom_status: None,
+            state_labels: std::collections::HashMap::new(),
+            agent_session: None,
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            pane_id: pane_id.into(),
+            tab_label: None,
+            workspace_label: None,
+            focused: false,
+            cwd: None,
+            foreground_cwd: None,
+            revision: 0,
+        };
+        // Serialize a real SuccessResponse so every load-bearing key (`result`,
+        // `agents`, `agent_status`) comes from the schema, not hand-written JSON.
+        let envelope = SuccessResponse {
+            id: "cli:agent:list".into(),
+            result: ResponseResult::AgentList {
+                agents: vec![
+                    agent("w1:p1", AgentStatus::Blocked),
+                    agent("w1:p2", AgentStatus::Working),
+                ],
+            },
+        };
+        let mut response = serde_json::to_value(&envelope).expect("serialize SuccessResponse");
+        filter_agents_response(&mut response, &[AgentStatus::Blocked]);
+        let agents = response["result"]["agents"]
+            .as_array()
+            .expect("agents array present after filtering real envelope");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["agent_status"], json!("blocked"));
+        assert_eq!(agents[0]["pane_id"], json!("w1:p1"));
+    }
+
+    #[test]
+    fn filter_excludes_absent_or_unrecognized_agent_status() {
+        let mut response = json!({
+            "id": "cli:agent:list",
+            "result": {
+                "type": "agent_list",
+                "agents": [
+                    {"pane_id": "w1:p1"},
+                    {"pane_id": "w1:p2", "agent_status": "sleeping"},
+                    {"pane_id": "w1:p3", "agent_status": 7},
+                    {"pane_id": "w1:p4", "agent_status": "blocked"},
+                ],
+            },
+        });
+        filter_agents_response(&mut response, &[AgentStatus::Blocked]);
+        assert_eq!(
+            response["result"]["agents"],
+            json!([{"pane_id": "w1:p4", "agent_status": "blocked"}])
+        );
+    }
 }

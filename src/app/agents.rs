@@ -486,6 +486,28 @@ impl App {
     }
 }
 
+pub(super) enum AgentStartError {
+    InvalidName,
+    EmptyArgv,
+    TargetNotFound {
+        target: String,
+    },
+    PlacementConflict,
+    SpawnFailed(String),
+    DuplicateName {
+        name: String,
+        candidates: Vec<crate::api::schema::AgentInfo>,
+    },
+}
+
+pub(super) enum AgentRenameError {
+    Target(TerminalTargetError),
+    DuplicateName {
+        name: String,
+        candidates: Vec<crate::api::schema::AgentInfo>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::App;
@@ -603,26 +625,4 @@ mod tests {
             assert_eq!(info.workspace_label.as_deref(), Some(expected));
         }
     }
-}
-
-pub(super) enum AgentStartError {
-    InvalidName,
-    EmptyArgv,
-    TargetNotFound {
-        target: String,
-    },
-    PlacementConflict,
-    SpawnFailed(String),
-    DuplicateName {
-        name: String,
-        candidates: Vec<crate::api::schema::AgentInfo>,
-    },
-}
-
-pub(super) enum AgentRenameError {
-    Target(TerminalTargetError),
-    DuplicateName {
-        name: String,
-        candidates: Vec<crate::api::schema::AgentInfo>,
-    },
 }
