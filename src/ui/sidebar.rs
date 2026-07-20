@@ -237,12 +237,40 @@ fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -
     )
 }
 
-fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
-    if ws.branch().is_some() {
-        2
-    } else {
-        1
+/// FR2 degradation for the single-line space item, applied in priority order:
+/// ahead/behind counts drop first, then the branch truncates (char-safe, at
+/// least 4 visible chars), then the branch drops, then the name truncates.
+/// `counts_width` includes its leading separator space; pass 0 when there are
+/// no counts. Returns `(name, branch, show_counts)`.
+pub(crate) fn space_line_parts(
+    name: &str,
+    branch: Option<&str>,
+    counts_width: usize,
+    available: usize,
+) -> (String, Option<String>, bool) {
+    const MIN_BRANCH_CHARS: usize = 4;
+    let name_len = name.chars().count();
+    if let Some(branch) = branch {
+        let branch_len = branch.chars().count();
+        if counts_width > 0 && name_len + 1 + branch_len + counts_width <= available {
+            return (name.to_string(), Some(branch.to_string()), true);
+        }
+        if name_len + 1 + branch_len <= available {
+            return (name.to_string(), Some(branch.to_string()), false);
+        }
+        let branch_budget = available.saturating_sub(name_len + 1);
+        if branch_budget >= MIN_BRANCH_CHARS {
+            return (
+                name.to_string(),
+                Some(truncate_text(branch, branch_budget)),
+                false,
+            );
+        }
     }
+    if name_len <= available {
+        return (name.to_string(), None, false);
+    }
+    (truncate_text(name, available), None, false)
 }
 
 fn workspace_attention_priority(state: AgentState, seen: bool) -> u8 {
@@ -304,13 +332,6 @@ fn grouped_child_display_label(label: &str, branch: Option<&str>, has_custom_nam
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceListEntry {
     Workspace { ws_idx: usize, indented: bool },
-}
-
-fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
-    matches!(
-        entries.get(idx.saturating_add(1)),
-        Some(WorkspaceListEntry::Workspace { indented: true, .. })
-    )
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
@@ -451,33 +472,11 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
         return 0;
     }
 
-    let mut used_rows = 0u16;
-    let mut visible = 0usize;
     let entries = workspace_list_entries(app);
-    for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
-        let needed = match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
-                let Some(ws) = app.workspaces.get(*ws_idx) else {
-                    continue;
-                };
-                let row_height = if *indented {
-                    1
-                } else {
-                    workspace_row_height(ws)
-                };
-                let gap = u16::from(
-                    !(*indented && next_entry_is_indented_workspace(&entries, entry_idx)),
-                );
-                row_height.saturating_add(gap)
-            }
-        };
-        if used_rows.saturating_add(needed) > body.height {
-            break;
-        }
-        used_rows = used_rows.saturating_add(needed);
-        visible += 1;
-    }
-    visible
+    entries
+        .len()
+        .saturating_sub(scroll)
+        .min(body.height as usize)
 }
 
 pub(crate) fn workspace_list_scroll_metrics(
@@ -588,29 +587,18 @@ pub(crate) fn compute_workspace_list_areas(
     let headers = Vec::new();
 
     let entries = workspace_list_entries(app);
-    for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
+    for entry in entries.iter().skip(scroll) {
         match entry {
             WorkspaceListEntry::Workspace { ws_idx, indented } => {
-                let Some(ws) = app.workspaces.get(*ws_idx) else {
-                    continue;
-                };
-                let row_height = if *indented {
-                    1
-                } else {
-                    workspace_row_height(ws)
-                };
-                let gap = u16::from(
-                    !(*indented && next_entry_is_indented_workspace(&entries, entry_idx)),
-                );
-                if row_y.saturating_add(row_height).saturating_add(gap) > body_bottom {
+                if row_y.saturating_add(1) > body_bottom {
                     break;
                 }
                 cards.push(crate::app::state::WorkspaceCardArea {
                     ws_idx: *ws_idx,
-                    rect: Rect::new(body.x, row_y, body.width, row_height),
+                    rect: Rect::new(body.x, row_y, body.width, 1),
                     indented: *indented,
                 });
-                row_y = row_y.saturating_add(row_height + gap);
+                row_y = row_y.saturating_add(1);
             }
         }
     }
@@ -1112,6 +1100,12 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     render_sidebar_toggle(app, frame, area, true, p);
 }
 
+/// Row carrying the edge-based drop indicator for `insert_idx` (FR4). The
+/// insertion boundary sits at the returned row's bottom edge, so the render
+/// overlays an underline on that row instead of drawing into a gap row:
+/// insert-before-k underlines the row above card k (the previous card, or a
+/// section header row for the top slot) and insert-after-last underlines the
+/// last card's own row. Geometry never changes during drag.
 pub(crate) fn workspace_drop_indicator_row(
     cards: &[crate::app::state::WorkspaceCardArea],
     area: Rect,
@@ -1130,7 +1124,7 @@ pub(crate) fn workspace_drop_indicator_row(
     if let Some(row) = cards
         .last()
         .filter(|card| insert_idx == card.ws_idx.saturating_add(1))
-        .map(|card| card.rect.y.saturating_add(card.rect.height))
+        .map(|card| card.rect.y)
         .filter(|y| *y < list_bottom)
     {
         return Some(row);
@@ -1289,73 +1283,73 @@ fn render_workspace_list(
             );
             line1.push(Span::styled(display_label, name_style));
         } else {
-            line1.push(Span::styled(label, name_style));
+            let upstream_parts = ws.git_ahead_behind().and_then(|(ahead, behind)| {
+                let mut parts = Vec::new();
+                if ahead > 0 {
+                    parts.push((format!("↑{}", ahead), p.green));
+                }
+                if behind > 0 {
+                    parts.push((format!("↓{}", behind), p.red));
+                }
+                (!parts.is_empty()).then_some(parts)
+            });
+            let counts_width = upstream_parts
+                .as_ref()
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .map(|(label, _)| label.chars().count())
+                        .sum::<usize>()
+                        + parts.len()
+                })
+                .unwrap_or(0);
+            let prefix_width: usize = line1.iter().map(|span| span.content.chars().count()).sum();
+            let available = (card.rect.width as usize).saturating_sub(prefix_width);
+            let (name, branch_display, show_counts) =
+                space_line_parts(&label, ws.branch().as_deref(), counts_width, available);
+            line1.push(Span::styled(name, name_style));
+            if let Some(branch_display) = branch_display {
+                let branch_color = if selected || is_active {
+                    p.mauve
+                } else {
+                    p.overlay0
+                };
+                line1.push(Span::styled(" ", Style::default()));
+                line1.push(Span::styled(
+                    branch_display,
+                    Style::default().fg(branch_color),
+                ));
+            }
+            if show_counts {
+                if let Some(parts) = upstream_parts {
+                    for (label, color) in parts {
+                        line1.push(Span::styled(" ", Style::default()));
+                        line1.push(Span::styled(label, Style::default().fg(color)));
+                    }
+                }
+            }
         }
 
         frame.render_widget(
             Paragraph::new(Line::from(line1)),
             Rect::new(card.rect.x, row_y, card.rect.width, 1),
         );
-
-        if row_height > 1 && row_y + 1 < list_bottom {
-            if let Some(branch) = ws.branch() {
-                let upstream_label = ws.git_ahead_behind().and_then(|(ahead, behind)| {
-                    let mut parts = Vec::new();
-                    if ahead > 0 {
-                        parts.push((format!("↑{}", ahead), p.green));
-                    }
-                    if behind > 0 {
-                        parts.push((format!("↓{}", behind), p.red));
-                    }
-                    (!parts.is_empty()).then_some(parts)
-                });
-                let reserved = upstream_label
-                    .as_ref()
-                    .map(|parts| {
-                        parts.iter().map(|(label, _)| label.len()).sum::<usize>() + parts.len()
-                    })
-                    .unwrap_or(0);
-                let max_branch_len = (card.rect.width as usize).saturating_sub(5 + reserved);
-                let branch_display = if branch.len() > max_branch_len {
-                    format!("{}…", &branch[..max_branch_len.saturating_sub(1)])
-                } else {
-                    branch
-                };
-                let branch_color = if selected || is_active {
-                    p.mauve
-                } else {
-                    p.overlay0
-                };
-                let branch_indent = if card.indented { "     " } else { "   " };
-                let mut spans = vec![
-                    Span::styled(branch_indent, Style::default()),
-                    Span::styled(branch_display, Style::default().fg(branch_color)),
-                ];
-                if let Some(parts) = upstream_label {
-                    spans.push(Span::styled(" ", Style::default()));
-                    for (idx, (label, color)) in parts.into_iter().enumerate() {
-                        if idx > 0 {
-                            spans.push(Span::styled(" ", Style::default()));
-                        }
-                        spans.push(Span::styled(label, Style::default().fg(color)));
-                    }
-                }
-                frame.render_widget(
-                    Paragraph::new(Line::from(spans)),
-                    Rect::new(card.rect.x, row_y + 1, card.rect.width, 1),
-                );
-            }
-        }
     }
 
+    // Edge-based drop indicator (FR4): underline the row whose bottom edge is
+    // the insertion boundary instead of drawing a `─` line into a gap row, so
+    // list geometry never changes during drag.
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
         let indicator_right = scrollbar_rect
             .map(|rect| rect.x)
             .unwrap_or(area.x + area.width);
         let buf = frame.buffer_mut();
         for x in area.x..indicator_right {
-            buf[(x, y)].set_symbol("─");
-            buf[(x, y)].set_style(Style::default().fg(p.accent));
+            buf[(x, y)].set_style(
+                Style::default()
+                    .fg(p.accent)
+                    .add_modifier(Modifier::UNDERLINED),
+            );
         }
     }
 
@@ -1875,9 +1869,115 @@ mod tests {
         assert!(headers.is_empty());
         assert_eq!(cards[0].ws_idx, 0);
         assert!(!cards[0].indented);
+        assert_eq!(cards[0].rect.height, 1);
         assert_eq!(cards[1].ws_idx, 1);
         assert!(cards[1].indented);
-        assert_eq!(cards[1].rect.y, cards[0].rect.y + cards[0].rect.height + 1);
+        // No gap row: the child is vertically adjacent to the parent.
+        assert_eq!(cards[1].rect.y, cards[0].rect.y + cards[0].rect.height);
+    }
+
+    #[test]
+    fn space_line_parts_degrade_in_fr2_priority_order() {
+        // name "workspace-name" (14) + " " + branch "feature/long-branch" (19)
+        // + " ↑2 ↓13" (7 incl. leading space) = 40 chars full line.
+        let name = "workspace-name";
+        let branch = "feature/long-branch";
+        let counts_width = 7;
+        let full = 14 + 1 + 19 + counts_width;
+
+        // Descending width sweep asserting the degradation ORDER: counts
+        // dropped first, then branch truncated (min 4 visible chars), then
+        // branch dropped, then name truncated. Expected branch truncations go
+        // through the same char-safe helper the implementation must use.
+        let cases: Vec<(usize, (String, Option<String>, bool))> = vec![
+            // Everything fits: counts shown.
+            (full, (name.into(), Some(branch.into()), true)),
+            // One short: counts dropped first, branch intact.
+            (full - 1, (name.into(), Some(branch.into()), false)),
+            (34, (name.into(), Some(branch.into()), false)),
+            // Branch truncates char-safely (budget = width - name - 1 space).
+            (33, (name.into(), Some(truncate_text(branch, 18)), false)),
+            (20, (name.into(), Some(truncate_text(branch, 5)), false)),
+            // Minimum 4 visible chars before the branch drops entirely.
+            (19, (name.into(), Some(truncate_text(branch, 4)), false)),
+            (18, (name.into(), None, false)),
+            // Name survives untruncated as long as it fits.
+            (14, (name.into(), None, false)),
+            // Finally the name truncates.
+            (13, (truncate_text(name, 13), None, false)),
+            (1, ("…".into(), None, false)),
+        ];
+        for (width, expected) in cases {
+            let got = space_line_parts(name, Some(branch), counts_width, width);
+            assert_eq!(got, expected, "width {width}");
+        }
+    }
+
+    #[test]
+    fn space_line_parts_branchless_has_no_counts_or_branch() {
+        let got = space_line_parts("notes", None, 0, 30);
+        assert_eq!(got, ("notes".into(), None, false));
+    }
+
+    #[test]
+    fn space_line_parts_multibyte_branch_never_panics() {
+        // Regression: the old byte-slice truncation panicked on multibyte
+        // branch names; the char-safe path must survive every width.
+        let name = "ws";
+        let branch = "функция/дизайн-веток";
+        let full = name.chars().count() + 1 + branch.chars().count() + 7;
+        for width in 0..=full + 2 {
+            let (n, b, _) = space_line_parts(name, Some(branch), 7, width);
+            assert!(n.chars().count() <= width.max(1));
+            if let Some(b) = b {
+                assert!(!b.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_cards_are_adjacent_one_row_each() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("a"),
+            Workspace::test_new("b"),
+            Workspace::test_new("c"),
+        ];
+
+        let (cards, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 20));
+
+        assert_eq!(cards.len(), 3);
+        for pair in cards.windows(2) {
+            assert_eq!(pair[0].rect.height, 1);
+            assert_eq!(pair[1].rect.y, pair[0].rect.y + 1, "no gap row");
+        }
+    }
+
+    #[test]
+    fn spaces_body_fits_17_items_at_reference_geometry() {
+        // Design success check: 40-row sidebar at the default 0.5 split gives
+        // a 20-row spaces section (2 header + 17 body + 1 footer) => 17 items.
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = (0..20)
+            .map(|i| Workspace::test_new(&format!("ws{i}")))
+            .collect();
+
+        let sidebar = Rect::new(0, 0, 30, 40);
+        let ws_area = workspace_list_rect(sidebar, app.sidebar_section_split);
+        let metrics = workspace_list_scroll_metrics(&app, ws_area);
+
+        assert_eq!(metrics.viewport_rows, 17);
+    }
+
+    #[test]
+    fn spaces_body_height_one_still_shows_an_item() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("a")];
+
+        // 4 rows = 2 header + 1 body + 1 footer.
+        let metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 4));
+
+        assert_eq!(metrics.viewport_rows, 1);
     }
 
     #[test]
@@ -1935,7 +2035,10 @@ mod tests {
         app.active = None;
         app.mode = Mode::Terminal;
 
-        let ws_area = Rect::new(0, 0, 30, 6);
+        // 4 rows = 2 header + 1 body + 1 footer: a 1-row body clips the second
+        // display entry (collapsed group + "notes" = 2 entries from 3 raw
+        // workspaces).
+        let ws_area = Rect::new(0, 0, 30, 4);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
         assert_eq!(metrics.viewport_rows, 1);

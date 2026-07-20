@@ -507,6 +507,11 @@ impl AppState {
         }
     }
 
+    /// Integer-row drop-slot resolution (FR4): a pointer row over card *k*
+    /// resolves to insert-before-*k*, and any row strictly below the last card
+    /// resolves to insert-after-last, so every index 0..=len is reachable over
+    /// adjacent 1-row cards. Rows over a group-interior card (no slot inside a
+    /// compact worktree-space group) resolve to the slot below the group.
     pub(super) fn workspace_drop_index_at_row(&self, row: u16) -> Option<usize> {
         let area = self.workspace_list_rect();
         let footer = self.sidebar_footer_rect();
@@ -523,11 +528,10 @@ impl AppState {
             return Some(0);
         }
 
-        let mut insert_indices = Vec::with_capacity(cards.len() + 1);
-        for (idx, card) in cards.iter().enumerate() {
+        let inside_group_gap = |idx: usize| {
             let card_group = self
                 .workspaces
-                .get(card.ws_idx)
+                .get(cards[idx].ws_idx)
                 .and_then(|ws| ws.worktree_space())
                 .map(|space| space.key.as_str());
             let previous_group = idx.checked_sub(1).and_then(|prev_idx| {
@@ -536,29 +540,29 @@ impl AppState {
                     .and_then(|ws| ws.worktree_space())
                     .map(|space| space.key.as_str())
             });
-            let inside_group_gap = card_group.is_some() && card_group == previous_group;
-            if !inside_group_gap {
-                insert_indices.push(card.ws_idx);
-            }
-        }
-        insert_indices.push(cards.last().map(|card| card.ws_idx + 1).unwrap_or(0));
+            card_group.is_some() && card_group == previous_group
+        };
+        let after_last = cards.last().map(|card| card.ws_idx + 1).unwrap_or(0);
 
-        let mut best: Option<(usize, u16)> = None;
-        for insert_idx in insert_indices {
-            let Some(slot_row) = crate::ui::workspace_drop_indicator_row(&cards, area, insert_idx)
-            else {
-                continue;
-            };
-            let distance = row.abs_diff(slot_row);
-            match best {
-                Some((best_idx, best_distance))
-                    if distance > best_distance
-                        || (distance == best_distance && insert_idx < best_idx) => {}
-                _ => best = Some((insert_idx, distance)),
+        let Some(display_idx) = cards
+            .iter()
+            .position(|card| row >= card.rect.y && row < card.rect.y + card.rect.height)
+        else {
+            // Header rows above the first card resolve to the top slot; rows
+            // strictly below the last card resolve to insert-after-last.
+            let first = cards.first()?;
+            if row < first.rect.y {
+                return Some(first.ws_idx);
             }
-        }
+            return Some(after_last);
+        };
 
-        best.map(|(insert_idx, _)| insert_idx)
+        // A group-interior card has no slot at its top edge; resolve to the
+        // first slot below the group segment.
+        match (display_idx..cards.len()).find(|idx| !inside_group_gap(*idx)) {
+            Some(idx) => Some(cards[idx].ws_idx),
+            None => Some(after_last),
+        }
     }
 
     pub(super) fn on_agent_panel_sort_toggle(&self, col: u16, row: u16) -> bool {
@@ -1611,13 +1615,61 @@ mod tests {
             .cwd = second_repo.clone();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
+        // Integer-row slot resolution over adjacent 1-row cards: header rows
+        // above the first card resolve to the top slot, a row over card k
+        // resolves to insert-before-k, and rows below the last card resolve
+        // to insert-after-last.
         assert_eq!(app.state.workspace_drop_index_at_row(0), Some(0));
         assert_eq!(app.state.workspace_drop_index_at_row(1), Some(0));
         assert_eq!(app.state.workspace_drop_index_at_row(2), Some(0));
         assert_eq!(app.state.workspace_drop_index_at_row(3), Some(1));
+        assert_eq!(app.state.workspace_drop_index_at_row(4), Some(2));
 
         let _ = fs::remove_dir_all(first_repo);
         let _ = fs::remove_dir_all(second_repo);
+    }
+
+    #[test]
+    fn drop_slot_reachability_covers_every_insertion_index() {
+        // FR4 reachability: every insertion index 0..=len must be reachable
+        // via integer pointer rows over adjacent 1-row cards (top, middle,
+        // and end of list).
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("a"),
+            Workspace::test_new("b"),
+            Workspace::test_new("c"),
+            Workspace::test_new("d"),
+        ];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let cards = app.state.view.workspace_card_areas.clone();
+        assert_eq!(cards.len(), 4);
+
+        // Row over card k → insert-before-k.
+        let mut reachable = std::collections::BTreeSet::new();
+        for card in &cards {
+            let idx = app
+                .state
+                .workspace_drop_index_at_row(card.rect.y)
+                .expect("row over a card resolves to a slot");
+            assert_eq!(idx, card.ws_idx, "insert-before-k over card k");
+            reachable.insert(idx);
+        }
+        // Row strictly below the last card → insert-after-last.
+        let below = cards.last().unwrap().rect.y + 1;
+        let idx = app
+            .state
+            .workspace_drop_index_at_row(below)
+            .expect("row below the last card resolves to a slot");
+        assert_eq!(idx, cards.len(), "insert-after-last below the last card");
+        reachable.insert(idx);
+
+        assert_eq!(
+            reachable.into_iter().collect::<Vec<_>>(),
+            (0..=cards.len()).collect::<Vec<_>>(),
+            "every insertion index 0..=len is reachable"
+        );
     }
 
     #[test]
@@ -1638,8 +1690,10 @@ mod tests {
         )
         .unwrap();
 
+        // Edge-based indicator: the end-of-list slot underlines the last
+        // card's own row (its bottom edge is the insertion boundary).
         let last = cards.last().unwrap().rect;
-        assert_eq!(bottom_slot, last.y + last.height);
+        assert_eq!(bottom_slot, last.y);
         assert!(bottom_slot < app.state.sidebar_footer_rect().y.saturating_sub(1));
     }
 
@@ -1662,9 +1716,10 @@ mod tests {
         let normal = cards.iter().find(|card| card.ws_idx == 1).unwrap();
 
         assert_eq!(app.state.workspace_drop_index_at_row(issue.rect.y), Some(1));
+        // Insert-after-last underlines the last card's own row.
         assert_eq!(
             crate::ui::workspace_drop_indicator_row(cards, app.state.workspace_list_rect(), 2),
-            Some(normal.rect.y + normal.rect.height)
+            Some(normal.rect.y)
         );
     }
 
