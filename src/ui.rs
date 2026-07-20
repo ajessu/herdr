@@ -78,11 +78,15 @@ pub(crate) use self::{
         collapsed_detail_window, collapsed_sidebar_sections, collapsed_sidebar_toggle_rect,
         collapsed_ws_window, compute_workspace_card_areas, expanded_sidebar_sections,
         expanded_sidebar_toggle_rect, is_attention_state, normalized_workspace_scroll,
-        sidebar_section_divider_rect, workspace_drop_indicator_row, workspace_list_entries,
-        workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
-        workspace_parent_group_state, WorkspaceListEntry,
+        sidebar_section_divider_rect, workspace_list_entries, workspace_list_rect,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        WorkspaceListEntry,
     },
 };
+// The edge-based drop indicator's row mapping is exercised only by input-side
+// tests now that `workspace_drop_index_at_row` resolves slots directly.
+#[cfg(test)]
+pub(crate) use self::sidebar::workspace_drop_indicator_row;
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
     mobile::{
@@ -896,12 +900,11 @@ mod tests {
         let buffer = terminal.backend().buffer();
 
         let card = app.view.workspace_card_areas[0].rect;
+        assert_eq!(card.height, 1, "space item renders on a single row");
         let line1 = buffer_row_text(buffer, card, card.y);
-        let line2 = buffer_row_text(buffer, card, card.y + 1);
 
-        assert!(line1.starts_with(" · one"));
+        assert!(line1.starts_with(" · one main"), "line1: {line1:?}");
         assert!(!line1.contains("1 one"));
-        assert_eq!(line2, "   main");
 
         std::fs::remove_dir_all(repo).ok();
     }
