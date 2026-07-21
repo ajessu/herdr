@@ -23,6 +23,7 @@ pub(crate) struct AgentPanelEntry {
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
     pub agent_label: Option<String>,
+    pub model: Option<String>,
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
@@ -147,6 +148,7 @@ fn agent_panel_entries_with_runtimes(
                     primary_label: workspace_label.clone(),
                     primary_tab_label: multi_tab.then_some(detail.tab_label),
                     agent_label: Some(detail.agent_label),
+                    model: detail.model,
                     state: detail.state,
                     seen: detail.seen,
                     last_agent_state_change_seq: detail.last_agent_state_change_seq,
@@ -1426,8 +1428,9 @@ pub(crate) fn agent_panel_name_spans(
     ]
 }
 
-/// Agent item line 2 (FR6): `state_label · agent_label · custom_status` with
-/// the panel's dim styling and `state_labels` overrides. Pure span producer.
+/// Agent item line 2 (FR6): `state_label · identity · custom_status` with
+/// the panel's dim styling and `state_labels` overrides, where identity is
+/// the model name when known, else the agent label. Pure span producer.
 pub(crate) fn agent_panel_status_spans(
     detail: &AgentPanelEntry,
     is_active: bool,
@@ -1450,9 +1453,9 @@ pub(crate) fn agent_panel_status_spans(
         Span::styled("   ", Style::default()),
         Span::styled(label.to_string(), status_style),
     ];
-    if let Some(agent_label) = &detail.agent_label {
+    if let Some(identity) = detail.model.as_deref().or(detail.agent_label.as_deref()) {
         spans.push(Span::styled(AGENT_LABEL_SEPARATOR, agent_style));
-        spans.push(Span::styled(agent_label.clone(), agent_style));
+        spans.push(Span::styled(identity.to_string(), agent_style));
     }
     if let Some(custom_status) = &detail.custom_status {
         spans.push(Span::styled(AGENT_LABEL_SEPARATOR, agent_style));
@@ -1665,6 +1668,41 @@ mod tests {
     }
 
     #[test]
+    fn agent_panel_entries_carry_model_from_pane_detail() {
+        let mut app = crate::app::state::AppState::test_new();
+        let ws = Workspace::test_new("one");
+        let pane = ws.tabs[0].root_pane;
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.set_agent_metadata(crate::terminal::AgentMetadataReport {
+            source: "herdr:claude-statusline".into(),
+            agent_label: Some("claude".into()),
+            applies_to_source: None,
+            title: None,
+            display_agent: None,
+            custom_status: None,
+            model: Some("Opus".into()),
+            state_labels: std::collections::HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_custom_status: false,
+            clear_state_labels: false,
+            ttl: None,
+            seq: None,
+        });
+        app.active = Some(0);
+        app.selected = 0;
+
+        let entries = agent_panel_entries(&app);
+        assert_eq!(entries[0].model.as_deref(), Some("Opus"));
+    }
+
+    #[test]
     fn priority_agent_panel_sort_uses_attention_then_space_order() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![
@@ -1810,6 +1848,7 @@ mod tests {
             primary_label: primary_label.into(),
             primary_tab_label: primary_tab_label.map(str::to_string),
             agent_label: Some("claude".into()),
+            model: None,
             state: AgentState::Idle,
             seen: true,
             last_agent_state_change_seq: None,
@@ -1867,6 +1906,47 @@ mod tests {
         assert_eq!(
             spans_text(&agent_panel_status_spans(&entry, true, &p)),
             "   resting · claude"
+        );
+    }
+
+    #[test]
+    fn agent_status_spans_prefer_model_over_agent_label() {
+        let p = Palette::catppuccin();
+        let mut entry = panel_entry("herdr", None);
+        entry.model = Some("Opus".into());
+
+        let spans = agent_panel_status_spans(&entry, false, &p);
+
+        assert_eq!(spans_text(&spans), "   idle · Opus");
+        // The identity span keeps the panel's dim styling.
+        assert!(spans[1..]
+            .iter()
+            .all(|s| s.style.add_modifier.contains(Modifier::DIM)));
+    }
+
+    #[test]
+    fn agent_status_spans_model_composes_with_override_and_custom_status() {
+        let p = Palette::catppuccin();
+        let mut entry = panel_entry("herdr", None);
+        entry.model = Some("Fable".into());
+        entry.custom_status = Some("compiling".into());
+        entry.state_labels.insert("idle".into(), "resting".into());
+
+        assert_eq!(
+            spans_text(&agent_panel_status_spans(&entry, false, &p)),
+            "   resting · Fable · compiling"
+        );
+    }
+
+    #[test]
+    fn agent_status_spans_fall_back_to_agent_label_without_model() {
+        let p = Palette::catppuccin();
+        let mut entry = panel_entry("herdr", None);
+        entry.model = None;
+
+        assert_eq!(
+            spans_text(&agent_panel_status_spans(&entry, false, &p)),
+            "   idle · claude"
         );
     }
 

@@ -19,8 +19,6 @@ pub struct PaneDetail {
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
     pub custom_status: Option<String>,
-    // Read by the sidebar agent panel once model surfacing lands; plumbed first.
-    #[allow(dead_code)]
     pub model: Option<String>,
     pub state_labels: HashMap<String, String>,
 }
