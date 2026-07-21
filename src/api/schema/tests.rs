@@ -945,3 +945,41 @@ fn web_already_running_response_without_mode_defaults_to_standalone() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+#[test]
+fn pane_report_metadata_params_missing_model_deserializes_to_none() {
+    let json = r#"{"pane_id":"pane-1","source":"herdr:claude","display_agent":"Claude"}"#;
+    let params: PaneReportMetadataParams = serde_json::from_str(json).unwrap();
+    assert_eq!(params.model, None);
+    assert_eq!(params.display_agent.as_deref(), Some("Claude"));
+}
+
+#[test]
+fn pane_report_metadata_params_round_trip_with_and_without_model() {
+    let mut params = PaneReportMetadataParams {
+        pane_id: "pane-1".into(),
+        source: "herdr:claude-statusline".into(),
+        agent: Some("claude".into()),
+        applies_to_source: None,
+        title: None,
+        display_agent: None,
+        custom_status: None,
+        model: Some("Opus 4.8".into()),
+        state_labels: HashMap::new(),
+        clear_title: false,
+        clear_display_agent: false,
+        clear_custom_status: false,
+        clear_state_labels: false,
+        seq: Some(1),
+        ttl_ms: Some(900_000),
+    };
+    let json = serde_json::to_string(&params).unwrap();
+    let restored: PaneReportMetadataParams = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, params);
+
+    params.model = None;
+    let json = serde_json::to_string(&params).unwrap();
+    assert!(!json.contains("model"));
+    let restored: PaneReportMetadataParams = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, params);
+}

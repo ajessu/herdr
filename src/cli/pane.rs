@@ -1243,9 +1243,20 @@ fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_report_metadata_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::send_ok_request(Method::PaneReportMetadata(params))
+}
+
+fn parse_pane_report_metadata_args(args: &[String]) -> Result<PaneReportMetadataParams, String> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
-        return Ok(2);
+        return Err("usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--model TEXT] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]".into());
     };
 
     let pane_id = super::normalize_pane_id(raw_pane_id);
@@ -1255,6 +1266,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let mut title = None;
     let mut display_agent = None;
     let mut custom_status = None;
+    let mut model = None;
     let mut state_labels = std::collections::HashMap::new();
     let mut clear_title = false;
     let mut clear_display_agent = false;
@@ -1268,32 +1280,28 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--source" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --source");
-                    return Ok(2);
+                    return Err("missing value for --source".into());
                 };
                 source = Some(value.clone());
                 index += 2;
             }
             "--agent" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --agent");
-                    return Ok(2);
+                    return Err("missing value for --agent".into());
                 };
                 agent = Some(value.clone());
                 index += 2;
             }
             "--applies-to-source" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --applies-to-source");
-                    return Ok(2);
+                    return Err("missing value for --applies-to-source".into());
                 };
                 applies_to_source = Some(value.clone());
                 index += 2;
             }
             "--title" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --title");
-                    return Ok(2);
+                    return Err("missing value for --title".into());
                 };
                 title = Some(value.clone());
                 index += 2;
@@ -1304,8 +1312,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
             }
             "--display-agent" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --display-agent");
-                    return Ok(2);
+                    return Err("missing value for --display-agent".into());
                 };
                 display_agent = Some(value.clone());
                 index += 2;
@@ -1316,8 +1323,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
             }
             "--custom-status" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --custom-status");
-                    return Ok(2);
+                    return Err("missing value for --custom-status".into());
                 };
                 custom_status = Some(value.clone());
                 index += 2;
@@ -1326,22 +1332,26 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
                 clear_custom_status = true;
                 index += 1;
             }
+            "--model" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --model".into());
+                };
+                model = Some(value.clone());
+                index += 2;
+            }
             "--state-label" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --state-label");
-                    return Ok(2);
+                    return Err("missing value for --state-label".into());
                 };
                 let Some((status, label)) = value.split_once('=') else {
-                    eprintln!("expected --state-label STATUS=TEXT");
-                    return Ok(2);
+                    return Err("expected --state-label STATUS=TEXT".into());
                 };
                 let status = status.trim().to_ascii_lowercase();
                 if !matches!(
                     status.as_str(),
                     "idle" | "working" | "blocked" | "done" | "unknown"
                 ) {
-                    eprintln!("unknown state label: {status}");
-                    return Ok(2);
+                    return Err(format!("unknown state label: {status}"));
                 }
                 state_labels.insert(status, label.to_string());
                 index += 2;
@@ -1352,23 +1362,23 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
             }
             "--seq" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --seq");
-                    return Ok(2);
+                    return Err("missing value for --seq".into());
                 };
-                seq = Some(super::parse_u64_flag("--seq", value)?);
+                seq =
+                    Some(super::parse_u64_flag("--seq", value).map_err(|error| error.to_string())?);
                 index += 2;
             }
             "--ttl-ms" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --ttl-ms");
-                    return Ok(2);
+                    return Err("missing value for --ttl-ms".into());
                 };
-                ttl_ms = Some(super::parse_u64_flag("--ttl-ms", value)?);
+                ttl_ms = Some(
+                    super::parse_u64_flag("--ttl-ms", value).map_err(|error| error.to_string())?,
+                );
                 index += 2;
             }
             other => {
-                eprintln!("unknown option: {other}");
-                return Ok(2);
+                return Err(format!("unknown option: {other}"));
             }
         }
     }
@@ -1377,38 +1387,35 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
         let source = source.trim().to_string();
         (!source.is_empty()).then_some(source)
     }) else {
-        eprintln!("missing required --source");
-        return Ok(2);
+        return Err("missing required --source".into());
     };
     if applies_to_source
         .as_deref()
         .is_some_and(|source| source.trim().is_empty())
     {
-        eprintln!("missing value for --applies-to-source");
-        return Ok(2);
+        return Err("missing value for --applies-to-source".into());
     }
     if title.is_some() && clear_title
         || display_agent.is_some() && clear_display_agent
         || custom_status.is_some() && clear_custom_status
         || !state_labels.is_empty() && clear_state_labels
     {
-        eprintln!("cannot set and clear the same metadata field");
-        return Ok(2);
+        return Err("cannot set and clear the same metadata field".into());
     }
     if title.is_none()
         && display_agent.is_none()
         && custom_status.is_none()
+        && model.is_none()
         && state_labels.is_empty()
         && !clear_title
         && !clear_display_agent
         && !clear_custom_status
         && !clear_state_labels
     {
-        eprintln!("missing metadata field to set or clear");
-        return Ok(2);
+        return Err("missing metadata field to set or clear".into());
     }
 
-    super::send_ok_request(Method::PaneReportMetadata(PaneReportMetadataParams {
+    Ok(PaneReportMetadataParams {
         pane_id,
         source,
         agent,
@@ -1416,6 +1423,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
         title,
         display_agent,
         custom_status,
+        model,
         state_labels,
         clear_title,
         clear_display_agent,
@@ -1423,7 +1431,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
         clear_state_labels,
         seq,
         ttl_ms,
-    }))
+    })
 }
 
 fn print_pane_help() {
@@ -1456,7 +1464,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
-    eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
+    eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--model TEXT] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr pane run <pane_id> <command>");
 }
 
@@ -1686,5 +1694,52 @@ mod tests {
         assert_eq!(params.pane_id, Some("issue-2".into()));
         assert_eq!(params.direction, PaneDirection::Left);
         assert_eq!(params.amount, Some(0.125));
+    }
+
+    #[test]
+    fn parse_pane_report_metadata_args_accepts_model_only_request() {
+        let params = parse_pane_report_metadata_args(&args(&[
+            "issue-1",
+            "--source",
+            "herdr:claude-statusline",
+            "--agent",
+            "claude",
+            "--model",
+            "Opus 4.8",
+            "--ttl-ms",
+            "900000",
+        ]))
+        .unwrap();
+
+        assert_eq!(params.model.as_deref(), Some("Opus 4.8"));
+        assert_eq!(params.agent.as_deref(), Some("claude"));
+        assert_eq!(params.source, "herdr:claude-statusline");
+        assert_eq!(params.ttl_ms, Some(900_000));
+        assert_eq!(params.display_agent, None);
+    }
+
+    #[test]
+    fn parse_pane_report_metadata_args_rejects_request_with_no_fields() {
+        let error = parse_pane_report_metadata_args(&args(&[
+            "issue-1",
+            "--source",
+            "herdr:claude-statusline",
+        ]))
+        .unwrap_err();
+
+        assert_eq!(error, "missing metadata field to set or clear");
+    }
+
+    #[test]
+    fn parse_pane_report_metadata_args_has_no_clear_model_flag() {
+        let error = parse_pane_report_metadata_args(&args(&[
+            "issue-1",
+            "--source",
+            "herdr:claude-statusline",
+            "--clear-model",
+        ]))
+        .unwrap_err();
+
+        assert_eq!(error, "unknown option: --clear-model");
     }
 }

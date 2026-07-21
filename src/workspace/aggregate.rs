@@ -19,6 +19,9 @@ pub struct PaneDetail {
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
     pub custom_status: Option<String>,
+    // Read by the sidebar agent panel once model surfacing lands; plumbed first.
+    #[allow(dead_code)]
+    pub model: Option<String>,
     pub state_labels: HashMap<String, String>,
 }
 
@@ -62,6 +65,7 @@ impl Tab {
                     seen: pane.seen,
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,
                     custom_status: presentation.custom_status,
+                    model: presentation.model,
                     state_labels: presentation.state_labels,
                 })
             })

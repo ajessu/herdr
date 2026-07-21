@@ -66,6 +66,7 @@ pub enum AppEvent {
         title: Option<String>,
         display_agent: Option<String>,
         custom_status: Option<String>,
+        model: Option<String>,
         state_labels: std::collections::HashMap<String, String>,
         clear_title: bool,
         clear_display_agent: bool,

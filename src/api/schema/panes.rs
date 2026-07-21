@@ -296,6 +296,8 @@ pub struct PaneReportMetadataParams {
     pub display_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default)]

@@ -13,14 +13,26 @@ pub struct AgentMetadata {
     pub title: Option<String>,
     pub display_agent: Option<String>,
     pub custom_status: Option<String>,
+    pub model: Option<String>,
     pub state_labels: HashMap<String, String>,
     pub reported_at: Instant,
     title_reported_at: Option<Instant>,
     display_agent_reported_at: Option<Instant>,
     custom_status_reported_at: Option<Instant>,
+    model_reported_at: Option<Instant>,
     state_label_reported_at: HashMap<String, Instant>,
     pub ttl: Option<Duration>,
     expiry_event_pending: bool,
+}
+
+impl AgentMetadata {
+    fn has_presentation_fields(&self) -> bool {
+        self.title.is_some()
+            || self.display_agent.is_some()
+            || self.custom_status.is_some()
+            || self.model.is_some()
+            || !self.state_labels.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +43,7 @@ pub struct AgentMetadataReport {
     pub title: Option<String>,
     pub display_agent: Option<String>,
     pub custom_status: Option<String>,
+    pub model: Option<String>,
     pub state_labels: HashMap<String, String>,
     pub clear_title: bool,
     pub clear_display_agent: bool,
@@ -40,11 +53,22 @@ pub struct AgentMetadataReport {
     pub seq: Option<u64>,
 }
 
+impl AgentMetadataReport {
+    fn has_set_fields(&self) -> bool {
+        self.title.is_some()
+            || self.display_agent.is_some()
+            || self.custom_status.is_some()
+            || self.model.is_some()
+            || !self.state_labels.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectivePresentation {
     pub title: Option<String>,
     pub display_agent: Option<String>,
     pub custom_status: Option<String>,
+    pub model: Option<String>,
     pub state_labels: HashMap<String, String>,
 }
 
@@ -54,6 +78,7 @@ impl EffectivePresentation {
             title: None,
             display_agent: None,
             custom_status: None,
+            model: None,
             state_labels: HashMap::new(),
         }
     }
@@ -98,10 +123,7 @@ impl TerminalState {
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
-        let has_set_fields = report.title.is_some()
-            || report.display_agent.is_some()
-            || report.custom_status.is_some()
-            || !report.state_labels.is_empty();
+        let has_set_fields = report.has_set_fields();
 
         let report_source = report.source.clone();
         let report_has_ttl = report.ttl.is_some();
@@ -121,11 +143,13 @@ impl TerminalState {
                     title: None,
                     display_agent: None,
                     custom_status: None,
+                    model: None,
                     state_labels: HashMap::new(),
                     reported_at: now,
                     title_reported_at: None,
                     display_agent_reported_at: None,
                     custom_status_reported_at: None,
+                    model_reported_at: None,
                     state_label_reported_at: HashMap::new(),
                     ttl: report.ttl,
                     expiry_event_pending: false,
@@ -164,6 +188,10 @@ impl TerminalState {
                 metadata.custom_status = Some(custom_status);
                 metadata.custom_status_reported_at = Some(now);
             }
+            if let Some(model) = report.model {
+                metadata.model = Some(model);
+                metadata.model_reported_at = Some(now);
+            }
             for (state, label) in report.state_labels {
                 metadata.state_labels.insert(state.clone(), label);
                 metadata.state_label_reported_at.insert(state, now);
@@ -177,6 +205,7 @@ impl TerminalState {
             let title_reported_at = report.title.as_ref().map(|_| now);
             let display_agent_reported_at = report.display_agent.as_ref().map(|_| now);
             let custom_status_reported_at = report.custom_status.as_ref().map(|_| now);
+            let model_reported_at = report.model.as_ref().map(|_| now);
             let state_label_reported_at = report
                 .state_labels
                 .keys()
@@ -191,11 +220,13 @@ impl TerminalState {
                     title: report.title,
                     display_agent: report.display_agent,
                     custom_status: report.custom_status,
+                    model: report.model,
                     state_labels: report.state_labels,
                     reported_at: now,
                     title_reported_at,
                     display_agent_reported_at,
                     custom_status_reported_at,
+                    model_reported_at,
                     state_label_reported_at,
                     ttl: report.ttl,
                     expiry_event_pending: false,
@@ -344,6 +375,7 @@ impl TerminalState {
         let mut presentation = EffectivePresentation::empty();
         presentation.title = self.newest_metadata_title(now, enforce_ttl);
         presentation.display_agent = self.newest_metadata_display_agent(now, enforce_ttl);
+        presentation.model = self.newest_metadata_model(now, enforce_ttl);
         presentation.state_labels = self.effective_metadata_state_labels(now, enforce_ttl);
         presentation.custom_status =
             self.effective_custom_status_for_state_at_with_ttl(state, now, enforce_ttl);
@@ -393,6 +425,13 @@ impl TerminalState {
             .and_then(|metadata| metadata.display_agent.clone())
     }
 
+    fn newest_metadata_model(&self, now: Instant, enforce_ttl: bool) -> Option<String> {
+        self.valid_agent_metadata(now, enforce_ttl)
+            .filter(|metadata| metadata.model.is_some())
+            .max_by_key(|metadata| metadata.model_reported_at)
+            .and_then(|metadata| metadata.model.clone())
+    }
+
     fn newest_metadata_custom_status(&self, now: Instant, enforce_ttl: bool) -> Option<String> {
         self.valid_agent_metadata(now, enforce_ttl)
             .filter(|metadata| metadata.custom_status.is_some())
@@ -430,11 +469,7 @@ impl TerminalState {
         now: Instant,
         enforce_ttl: bool,
     ) -> bool {
-        if metadata.title.is_none()
-            && metadata.display_agent.is_none()
-            && metadata.custom_status.is_none()
-            && metadata.state_labels.is_empty()
-        {
+        if !metadata.has_presentation_fields() {
             return false;
         }
         if enforce_ttl && self.agent_metadata_is_expired(metadata, now) {
@@ -444,11 +479,7 @@ impl TerminalState {
     }
 
     fn agent_metadata_is_visible_ignoring_ttl(&self, metadata: &AgentMetadata) -> bool {
-        (metadata.title.is_some()
-            || metadata.display_agent.is_some()
-            || metadata.custom_status.is_some()
-            || !metadata.state_labels.is_empty())
-            && self.agent_metadata_matches_guards(metadata)
+        metadata.has_presentation_fields() && self.agent_metadata_matches_guards(metadata)
     }
 
     pub(super) fn clear_expiry_pending_for_hidden_metadata(&mut self) {
@@ -528,6 +559,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: custom_status.map(str::to_string),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -646,6 +678,7 @@ mod tests {
             title: Some("Refactor auth".into()),
             display_agent: Some("Claude: auth".into()),
             custom_status: Some("middleware".into()),
+            model: None,
             state_labels: HashMap::from([("working".into(), "deep in the mines".into())]),
             clear_title: false,
             clear_display_agent: false,
@@ -680,6 +713,7 @@ mod tests {
             title: Some("Prompt title".into()),
             display_agent: None,
             custom_status: None,
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -747,6 +781,7 @@ mod tests {
             title: Some("Prompt title".into()),
             display_agent: None,
             custom_status: None,
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -762,6 +797,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: Some("activity".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -793,6 +829,7 @@ mod tests {
             title: None,
             display_agent: Some("First display".into()),
             custom_status: Some("old".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -808,6 +845,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: Some("new".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -823,6 +861,7 @@ mod tests {
             title: Some("Fresh title".into()),
             display_agent: None,
             custom_status: None,
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: true,
@@ -856,6 +895,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: Some("activity".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: true,
             clear_display_agent: false,
@@ -888,6 +928,7 @@ mod tests {
             title: Some("Old title".into()),
             display_agent: None,
             custom_status: Some("old".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -905,6 +946,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: Some("fresh".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: true,
             clear_display_agent: false,
@@ -942,6 +984,7 @@ mod tests {
             title: Some("Prompt title".into()),
             display_agent: None,
             custom_status: Some("old".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -959,6 +1002,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: None,
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -999,6 +1043,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: Some("activity".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -1041,6 +1086,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: Some("stale".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -1091,6 +1137,7 @@ mod tests {
             title: Some("First".into()),
             display_agent: None,
             custom_status: None,
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -1107,6 +1154,7 @@ mod tests {
             title: None,
             display_agent: Some("Second".into()),
             custom_status: None,
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -1152,6 +1200,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: Some("instant".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -1194,6 +1243,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: Some("instant".into()),
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -1223,6 +1273,234 @@ mod tests {
         assert_eq!(terminal.effective_custom_status(), None);
     }
 
+    fn model_report(
+        source: &str,
+        model: Option<&str>,
+        ttl: Option<Duration>,
+        seq: Option<u64>,
+    ) -> AgentMetadataReport {
+        AgentMetadataReport {
+            source: source.into(),
+            agent_label: Some("claude".into()),
+            applies_to_source: None,
+            title: None,
+            display_agent: None,
+            custom_status: None,
+            model: model.map(str::to_string),
+            state_labels: HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_custom_status: false,
+            clear_state_labels: false,
+            ttl,
+            seq,
+        }
+    }
+
+    #[test]
+    fn model_only_report_surfaces_on_effective_presentation() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+
+        let mutation = terminal.set_agent_metadata(model_report(
+            "herdr:claude-statusline",
+            Some("Opus 4.8"),
+            None,
+            None,
+        ));
+
+        assert!(mutation.is_some());
+        assert_eq!(
+            terminal.effective_presentation().model.as_deref(),
+            Some("Opus 4.8")
+        );
+    }
+
+    #[test]
+    fn model_resolves_newest_value_across_sources() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+
+        terminal.set_agent_metadata(model_report("user:first", Some("Old model"), None, None));
+        terminal.set_agent_metadata(model_report("user:second", Some("New model"), None, None));
+
+        assert_eq!(
+            terminal.effective_presentation().model.as_deref(),
+            Some("New model")
+        );
+    }
+
+    #[test]
+    fn model_report_with_stale_seq_is_dropped() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+
+        terminal.set_agent_metadata(model_report(
+            "herdr:claude-statusline",
+            Some("Fresh"),
+            None,
+            Some(2),
+        ));
+        let stale = terminal.set_agent_metadata(model_report(
+            "herdr:claude-statusline",
+            Some("Stale"),
+            None,
+            Some(1),
+        ));
+
+        assert!(stale.is_none());
+        assert_eq!(
+            terminal.effective_presentation().model.as_deref(),
+            Some("Fresh")
+        );
+    }
+
+    #[test]
+    fn model_only_metadata_expires_after_ttl() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+
+        terminal.set_agent_metadata(model_report(
+            "herdr:claude-statusline",
+            Some("Opus 4.8"),
+            Some(Duration::from_millis(1)),
+            None,
+        ));
+
+        let deadline = terminal
+            .next_agent_metadata_expiry()
+            .expect("model-only metadata should schedule expiry");
+        let mutation = terminal
+            .expire_agent_metadata_at(deadline, deadline)
+            .unwrap();
+        assert!(mutation.effective_state_change.is_some());
+        assert_eq!(terminal.effective_presentation().model, None);
+    }
+
+    #[test]
+    fn model_only_report_refreshes_ttl() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+
+        terminal.set_agent_metadata(model_report(
+            "herdr:claude-statusline",
+            Some("Opus 4.8"),
+            Some(Duration::from_millis(1)),
+            None,
+        ));
+        let first_deadline = terminal.next_agent_metadata_expiry().unwrap();
+
+        terminal.set_agent_metadata(model_report(
+            "herdr:claude-statusline",
+            Some("Opus 4.8"),
+            Some(Duration::from_millis(60_000)),
+            None,
+        ));
+        let second_deadline = terminal.next_agent_metadata_expiry().unwrap();
+
+        assert!(second_deadline > first_deadline);
+    }
+
+    #[test]
+    fn guarded_model_report_does_not_surface_for_other_agent() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+
+        terminal.set_agent_metadata(model_report(
+            "herdr:claude-statusline",
+            Some("Opus 4.8"),
+            None,
+            None,
+        ));
+
+        assert_eq!(terminal.effective_presentation().model, None);
+    }
+
+    #[test]
+    fn statusline_model_report_leaves_hook_source_display_agent_untouched() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+        terminal.set_agent_metadata(AgentMetadataReport {
+            source: "herdr:claude".into(),
+            agent_label: Some("claude".into()),
+            applies_to_source: None,
+            title: None,
+            display_agent: Some("Claude: auth".into()),
+            custom_status: None,
+            model: None,
+            state_labels: HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_custom_status: false,
+            clear_state_labels: false,
+            ttl: Some(Duration::from_millis(1)),
+            seq: None,
+        });
+        let hook_deadline = terminal.next_agent_metadata_expiry().unwrap();
+
+        terminal.set_agent_metadata(model_report(
+            "herdr:claude-statusline",
+            Some("Opus 4.8"),
+            None,
+            None,
+        ));
+
+        let presentation = terminal.effective_presentation();
+        assert_eq!(presentation.model.as_deref(), Some("Opus 4.8"));
+        assert_eq!(presentation.display_agent.as_deref(), Some("Claude: auth"));
+        assert_eq!(terminal.next_agent_metadata_expiry(), Some(hook_deadline));
+
+        let mutation = terminal
+            .expire_agent_metadata_at(hook_deadline, hook_deadline)
+            .unwrap();
+        assert!(mutation.effective_state_change.is_some());
+        let presentation = terminal.effective_presentation();
+        assert_eq!(presentation.display_agent, None);
+        assert_eq!(presentation.model.as_deref(), Some("Opus 4.8"));
+    }
+
     #[test]
     fn partial_update_does_not_resurrect_expired_hidden_metadata_fields() {
         let mut terminal = test_terminal();
@@ -1240,6 +1518,7 @@ mod tests {
             title: Some("Expired title".into()),
             display_agent: None,
             custom_status: None,
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -1257,6 +1536,7 @@ mod tests {
             title: None,
             display_agent: Some("Fresh display".into()),
             custom_status: None,
+            model: None,
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
