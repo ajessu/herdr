@@ -17,6 +17,12 @@ A tab is a layout inside a workspace. Use tabs to separate views like `agents`, 
 
 Tabs are addressable from the CLI and socket API.
 
+### Browsing an overflowing tab bar
+
+When you have more tabs than fit across the top, the tab bar collapses the hidden ones into ` ← +N ` / ` +N → ` counters at each edge. Scroll the mouse wheel over the tab bar to pan the visible window — scroll down to reveal later tabs, scroll up to reveal earlier ones. Panning does not change which tab is active or touch the pane content; it only changes what the bar shows.
+
+Click any tab you scroll into view to activate it, and the bar snaps back to center on it. Activating a tab any other way (keyboard, clicking a `+N` counter, the CLI, or an agent switching focus) also returns the bar to the active tab. Left-click empty space in the tab bar to cancel browsing without switching. The wheel is a no-op when every tab already fits.
+
 ## Pane
 
 A pane is a real terminal. Herdr renders the terminal output, sends input back to the process, and preserves the pane across client detach.

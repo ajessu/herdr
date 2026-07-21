@@ -576,6 +576,43 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_carries_no_tab_browse_state_field() {
+        // T14 / design C5: browse state (`tab_scroll`) is ephemeral UI state
+        // and must never be serialized. Assert at the serialization-structure
+        // level (a struct-level scan of the JSON keys) rather than a round-trip
+        // that could only ever observe the constructor default. This test
+        // fails if a future change adds any browse-state field to the snapshot.
+        let state = state_with_workspaces(&["one", "two"]);
+        let snap = capture_from_state(&state);
+        let value: serde_json::Value = serde_json::to_value(&snap).unwrap();
+
+        fn assert_no_tab_scroll(value: &serde_json::Value, path: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        let lower = key.to_ascii_lowercase();
+                        assert!(
+                            !(lower.contains("tab_scroll")
+                                || lower.contains("browse")
+                                || lower.contains("first_visible")),
+                            "serialized snapshot must not carry browse-state key {path}.{key}"
+                        );
+                        assert_no_tab_scroll(child, &format!("{path}.{key}"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        assert_no_tab_scroll(item, &format!("{path}[{i}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert_no_tab_scroll(&value, "snapshot");
+    }
+
+    #[test]
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,

@@ -503,6 +503,7 @@ impl App {
             workspace_scroll: 0,
             agent_panel_scroll: 0,
             mobile_switcher_scroll: 0,
+            tab_scroll: None,
             view: state::ViewState {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),

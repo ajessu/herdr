@@ -345,12 +345,36 @@ pub(crate) fn build_tab_bar_inputs(
     show_tab_status: TabStatusMode,
     spinner_tick: u32,
     palette: &crate::app::state::Palette,
+    tab_scroll: Option<&crate::app::state::TabScroll>,
 ) -> (Vec<TabChrome>, usize, TabStatusMode, Option<usize>) {
     let chromes = build_tab_chromes(ws, terminals, show_tab_status, spinner_tick, palette);
-    // No scroll offset resolved here yet: the resting layout is the centered
-    // fill. This seam is where a wheel-driven browse offset would be resolved
-    // from workspace state and returned.
-    (chromes, ws.active_tab, show_tab_status, None)
+    // Anchor resolution: the browse offset applies only while the active tab
+    // is still the one browsing was entered on, identified by workspace id +
+    // per-workspace tab number (unique among live tabs, asserted by
+    // `Workspace::assert_invariants_for_test`; never reassigned during a live
+    // session). Any activation path — click, keyboard, indicator jump, tab
+    // API, agent focus, workspace switch, or a direct `active_tab` write —
+    // changes that identity, so browse mode exits here by construction on the
+    // next compute; the call sites write the resolved `None` back.
+    let offset = tab_scroll.and_then(|scroll| {
+        let anchored = scroll.anchor_workspace_id == ws.id
+            && ws.tabs.get(ws.active_tab).map(|tab| tab.number) == Some(scroll.anchor_tab_number);
+        if !anchored {
+            // Exit cause: the active tab's identity no longer matches the
+            // anchor (any activation path). Logged here, at the resolution
+            // site, because `reconcile_tab_scroll` only sees the `None` result
+            // and cannot tell this apart from the no-overflow / fallback exits.
+            // Edge-triggered: the next frame's `tab_scroll` is already cleared.
+            tracing::debug!(
+                reason = "anchor_mismatch",
+                anchor_tab_number = scroll.anchor_tab_number,
+                active_tab = ws.active_tab,
+                "tab-bar browse mode exiting"
+            );
+        }
+        anchored.then_some(scroll.first_visible)
+    });
+    (chromes, ws.active_tab, show_tab_status, offset)
 }
 
 // ---------------------------------------------------------------------------
@@ -916,6 +940,12 @@ pub(crate) fn compute_tab_bar_view(
     let (tab_hit_areas, overflow, resolved_offset) = if !probe_overflow {
         // Everything fits — no indicators, and any requested offset resolves to
         // no-offset (centered layout).
+        if scroll_offset.is_some() {
+            // Exit cause: the bar no longer overflows (resize/close), so a
+            // pending browse offset collapses. Logged at the resolution site
+            // for the same reason as the anchor-mismatch case above.
+            tracing::debug!(reason = "no_overflow", "tab-bar browse mode exiting");
+        }
         (probe, TabBarOverflow::default(), None)
     } else {
         match scroll_offset {
@@ -2641,10 +2671,8 @@ mod tests {
 
     #[test]
     fn build_tab_bar_inputs_resolves_no_scroll_offset() {
-        // The behavior-neutral guarantee holds only because this seam returns no
-        // offset (the resting layout is the centered fill). Lock it so a future
-        // change that resolves a browse offset here can't silently activate
-        // scrolling in both render paths without updating this test.
+        // With no browse state, the seam resolves to no offset (resting
+        // centered fill) — the behavior-neutral path.
         let mut app = AppState::test_new();
         app.workspaces = vec![make_ws_with_tabs(&["a", "b", "c"])];
         app.active = Some(0);
@@ -2654,8 +2682,75 @@ mod tests {
             TabStatusMode::Off,
             0,
             &app.palette,
+            None,
         );
         assert_eq!(offset, None, "resting layout resolves to no scroll offset");
+    }
+
+    #[test]
+    fn build_tab_bar_inputs_resolves_browse_offset_when_anchor_matches() {
+        // A browse state whose anchor matches the active tab resolves to its
+        // `first_visible` offset; a mismatched anchor (wrong workspace id or
+        // wrong tab number) resolves to `None`, which the compute path uses to
+        // exit browse mode.
+        let mut app = AppState::test_new();
+        let ws = make_ws_with_tabs(&["a", "b", "c"]);
+        let ws_id = ws.id.clone();
+        let active_number = ws.tabs[ws.active_tab].number;
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+
+        let matching = crate::app::state::TabScroll {
+            first_visible: 1,
+            anchor_workspace_id: ws_id.clone(),
+            anchor_tab_number: active_number,
+        };
+        let (.., offset) = crate::ui::build_tab_bar_inputs(
+            &app.workspaces[0],
+            &app.terminals,
+            TabStatusMode::Off,
+            0,
+            &app.palette,
+            Some(&matching),
+        );
+        assert_eq!(
+            offset,
+            Some(1),
+            "matching anchor resolves the browse offset"
+        );
+
+        let wrong_number = crate::app::state::TabScroll {
+            first_visible: 1,
+            anchor_workspace_id: ws_id,
+            anchor_tab_number: active_number + 999,
+        };
+        let (.., offset) = crate::ui::build_tab_bar_inputs(
+            &app.workspaces[0],
+            &app.terminals,
+            TabStatusMode::Off,
+            0,
+            &app.palette,
+            Some(&wrong_number),
+        );
+        assert_eq!(offset, None, "mismatched anchor exits browse mode");
+
+        let wrong_ws = crate::app::state::TabScroll {
+            first_visible: 1,
+            anchor_workspace_id: "some-other-workspace".to_string(),
+            anchor_tab_number: active_number,
+        };
+        let (.., offset) = crate::ui::build_tab_bar_inputs(
+            &app.workspaces[0],
+            &app.terminals,
+            TabStatusMode::Off,
+            0,
+            &app.palette,
+            Some(&wrong_ws),
+        );
+        assert_eq!(
+            offset, None,
+            "anchor for another workspace exits browse mode"
+        );
     }
 
     // -----------------------------------------------------------------------

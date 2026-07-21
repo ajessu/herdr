@@ -1310,6 +1310,32 @@ pub struct KeybindHelpState {
     pub scroll: u16,
 }
 
+/// Ephemeral tab-bar browse state: a wheel-scrolled visible window over an
+/// overflowing tab strip. `None` is the resting state (stateless
+/// centered-active fill). Never serialized — excluded from session snapshots
+/// and handoff.
+///
+/// The anchor is the identity of the tab that was active when browsing began.
+/// Every compute pass re-checks it (`build_tab_bar_inputs`): if the active
+/// tab's identity no longer matches, browse mode exits and the centered fill
+/// resumes — so any activation path, present or future, re-centers by
+/// construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabScroll {
+    /// Index of the first visible tab in the scrolled window. Clamped by the
+    /// compute path every frame; may be stale by at most one frame.
+    pub first_visible: usize,
+    /// Workspace identity (`Workspace.id`) of the browse's workspace. Paired
+    /// with `anchor_tab_number` because tab numbers are allocated
+    /// per-workspace and collide across workspaces; the pair also makes a
+    /// workspace switch an anchor mismatch (exit) by construction.
+    pub anchor_workspace_id: String,
+    /// `Tab.number` of the active tab when browsing began: allocated
+    /// per-workspace, never reassigned during a live session, and unique
+    /// among live tabs (asserted by `Workspace::assert_invariants_for_test`).
+    pub anchor_tab_number: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarWidthSource {
     ConfigDefault,
@@ -1378,6 +1404,9 @@ pub struct AppState {
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
     pub mobile_switcher_scroll: usize,
+    /// Wheel-scrolled tab-bar browse window; `None` when not browsing.
+    /// Ephemeral, never serialized (see [`TabScroll`]).
+    pub tab_scroll: Option<TabScroll>,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
@@ -1750,6 +1779,7 @@ impl AppState {
             workspace_scroll: 0,
             agent_panel_scroll: 0,
             mobile_switcher_scroll: 0,
+            tab_scroll: None,
             view: ViewState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
@@ -1955,6 +1985,10 @@ impl AppState {
             assert!(
                 self.context_menu.is_none(),
                 "empty app state must not keep context menu"
+            );
+            assert!(
+                self.tab_scroll.is_none(),
+                "empty app state must not keep tab-bar browse state"
             );
             return;
         }
@@ -2169,6 +2203,32 @@ impl AppState {
                     }
                 }
             }
+        }
+
+        // Browse-mode anchor invariant: if `tab_scroll` is set (after a
+        // compute), the active tab's identity must equal the captured anchor.
+        // The compute path clears the state on any mismatch, so a surviving
+        // `Some` means the anchored workspace is active and its active tab
+        // still carries the anchor's `number`. Tests that mutate state then
+        // call `compute_view` before asserting rely on this holding.
+        if let Some(scroll) = &self.tab_scroll {
+            let ws_idx = workspace_id_to_idx
+                .get(&scroll.anchor_workspace_id)
+                .copied();
+            assert_eq!(
+                ws_idx,
+                Some(active),
+                "tab_scroll anchor workspace {} must be the active workspace",
+                scroll.anchor_workspace_id
+            );
+            let ws = &self.workspaces[active];
+            let active_number = ws.tabs.get(ws.active_tab).map(|tab| tab.number);
+            assert_eq!(
+                active_number,
+                Some(scroll.anchor_tab_number),
+                "tab_scroll anchor number {} must match the active tab's number",
+                scroll.anchor_tab_number
+            );
         }
     }
 

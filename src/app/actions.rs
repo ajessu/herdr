@@ -1509,10 +1509,13 @@ impl AppState {
             self.show_tab_status,
             self.spinner_tick,
             &self.palette,
+            self.tab_scroll.as_ref(),
         );
-        // No scroll offset in play here: the layout is the centered fill and the
-        // clamped offset return is unused.
-        let (layout, _clamped_offset) = crate::ui::compute_tab_bar_view(
+        // The clamped offset is reconciled into `tab_scroll` below so a
+        // mutation-time refresh keeps the browse window consistent (or exits
+        // browse mode) the same way the per-frame compute does; the anchor
+        // check lives in `build_tab_bar_inputs`.
+        let (layout, clamped_offset) = crate::ui::compute_tab_bar_view(
             chromes,
             active_tab,
             mode,
@@ -1525,6 +1528,7 @@ impl AppState {
         self.view.tab_status_mode = layout.tab_status_mode;
         self.view.tab_overflow = layout.overflow;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;
+        self.reconcile_tab_scroll(clamped_offset);
 
         // When the bar produced hit areas, there must be exactly one per tab.
         // A mismatch means a mutation path left the cached layout stale.
@@ -1547,6 +1551,86 @@ impl AppState {
                 "tab_hit_areas out of sync with workspace tab count"
             );
         }
+    }
+
+    /// Reconcile `tab_scroll` with the offset the tab-bar compute resolved.
+    /// The compute path (via `build_tab_bar_inputs`'s anchor check plus the
+    /// clamp and defensive fallback in `compute_tab_bar_view`) is the single
+    /// authority on whether browse mode survives this frame: a resolved `None`
+    /// clears it, a resolved `Some` writes the clamped `first_visible` back so
+    /// the next frame's seed and step start from the position actually
+    /// rendered. The exit *cause* is logged at each resolution site (anchor
+    /// mismatch and no-overflow in `build_tab_bar_inputs`/`compute_tab_bar_view`
+    /// at `debug`; the defensive fallback at `warn`), where it is known and
+    /// naturally edge-triggered — this reconcile only applies the result.
+    /// Shared by both compute sites (`compute_view_internal`, this refresh).
+    pub(crate) fn reconcile_tab_scroll(&mut self, clamped_offset: Option<usize>) {
+        match (self.tab_scroll.as_mut(), clamped_offset) {
+            (Some(scroll), Some(offset)) => scroll.first_visible = offset,
+            (Some(_), None) => self.tab_scroll = None,
+            (None, _) => {}
+        }
+    }
+
+    /// Wheel over an overflowing tab bar: pan the visible window instead of
+    /// changing the selection. Mutate-and-return, following the sibling scroll
+    /// handlers (`scroll_workspace_list`, `scroll_agent_panel`) — the next
+    /// frame's compute resolves the anchor, clamps the offset, and renders.
+    /// `delta` is +1 for scroll-down (reveal later tabs), -1 for scroll-up.
+    pub(crate) fn scroll_tab_bar(&mut self, delta: isize) {
+        // No-op without overflow: nothing is hidden on either side, so there
+        // is nothing to pan (FR2). Reads the cached view, at most one frame
+        // stale, matching the sidebar scroll handlers' precedent.
+        let overflow = &self.view.tab_overflow;
+        if overflow.left.is_none() && overflow.right.is_none() {
+            return;
+        }
+
+        match self.tab_scroll.as_mut() {
+            Some(scroll) => {
+                // Already browsing: step the offset. The upper clamp happens
+                // in compute; scroll-up at 0 stays at 0 via saturating step.
+                scroll.first_visible = scroll.first_visible.saturating_add_signed(delta);
+            }
+            None => {
+                // Entering browse mode: seed from the current visible window
+                // (index of the first visible hit area), never tab 0, so the
+                // first tick pans relative to what the user sees. Capture the
+                // active tab's identity as the anchor.
+                let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) else {
+                    return;
+                };
+                let Some(anchor_tab_number) = ws.tabs.get(ws.active_tab).map(|tab| tab.number)
+                else {
+                    return;
+                };
+                let anchor_workspace_id = ws.id.clone();
+                let seed = self
+                    .view
+                    .tab_hit_areas
+                    .iter()
+                    .position(|r| r.width > 0)
+                    .unwrap_or_else(|| {
+                        tracing::debug!(
+                            "tab-bar browse seed found no visible hit area; starting at 0"
+                        );
+                        0
+                    });
+                let first_visible = seed.saturating_add_signed(delta);
+                tracing::debug!(
+                    anchor_tab_number,
+                    seed,
+                    first_visible,
+                    "tab-bar browse mode entered"
+                );
+                self.tab_scroll = Some(crate::app::state::TabScroll {
+                    first_visible,
+                    anchor_workspace_id,
+                    anchor_tab_number,
+                });
+            }
+        }
+        // Nothing persisted changes — no `mark_session_dirty`.
     }
 }
 
@@ -3173,6 +3257,51 @@ mod tests {
             state.mode = Mode::Terminal;
         }
         state
+    }
+
+    #[test]
+    fn reconcile_tab_scroll_covers_all_arms() {
+        use crate::app::state::TabScroll;
+
+        fn scroll() -> TabScroll {
+            TabScroll {
+                first_visible: 3,
+                anchor_workspace_id: "ws".into(),
+                anchor_tab_number: 7,
+            }
+        }
+
+        // (Some, Some) → keep browsing, write the clamped offset back.
+        let mut state = AppState::test_new();
+        state.tab_scroll = Some(scroll());
+        state.reconcile_tab_scroll(Some(5));
+        assert_eq!(
+            state.tab_scroll.as_ref().map(|s| s.first_visible),
+            Some(5),
+            "(Some, Some) writes the clamped offset back"
+        );
+
+        // (Some, None) → exit browse mode.
+        let mut state = AppState::test_new();
+        state.tab_scroll = Some(scroll());
+        state.reconcile_tab_scroll(None);
+        assert!(
+            state.tab_scroll.is_none(),
+            "(Some, None) clears browse mode"
+        );
+
+        // (None, Some) → must NOT spontaneously enter browse mode.
+        let mut state = AppState::test_new();
+        state.reconcile_tab_scroll(Some(2));
+        assert!(
+            state.tab_scroll.is_none(),
+            "(None, Some) never enters browse mode from a stray offset"
+        );
+
+        // (None, None) → no-op.
+        let mut state = AppState::test_new();
+        state.reconcile_tab_scroll(None);
+        assert!(state.tab_scroll.is_none(), "(None, None) is a no-op");
     }
 
     fn mark_linked_worktree(state: &mut AppState, ws_idx: usize) {

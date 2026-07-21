@@ -505,6 +505,14 @@ impl AppState {
                     }
                     return None;
                 }
+                // FR8: left-click on empty tab-bar space (past every tab,
+                // indicator, and the `+` button) while browsing cancels browse
+                // mode without changing the selection. The next compute
+                // re-centers on the still-active tab.
+                if self.tab_scroll.is_some() && self.on_tab_bar(mouse.column, mouse.row) {
+                    self.tab_scroll = None;
+                    return None;
+                }
 
                 if in_sidebar {
                     if self.sidebar_collapsed {
@@ -945,11 +953,15 @@ impl AppState {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if self.on_tab_bar(mouse.column, mouse.row) =>
             {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => self.previous_tab(),
-                    MouseEventKind::ScrollDown => self.next_tab(),
-                    _ => {}
-                }
+                // Wheel over the tab bar pans the visible window (reveals
+                // hidden tabs) instead of switching the active tab. Scroll
+                // down reveals later tabs, scroll up earlier ones.
+                let delta: isize = if mouse.kind == MouseEventKind::ScrollDown {
+                    1
+                } else {
+                    -1
+                };
+                self.scroll_tab_bar(delta);
             }
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
@@ -1994,6 +2006,7 @@ mod tests {
     use super::*;
     use crate::{
         app::state::{ContextMenuKind, ContextMenuState, MenuListState, Mode, ViewLayout},
+        app::App,
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
@@ -3137,7 +3150,10 @@ mod tests {
     }
 
     #[test]
-    fn wheel_over_tab_bar_switches_tabs() {
+    fn wheel_over_non_overflowing_tab_bar_is_noop() {
+        // T8: wheel over a tab bar with no overflow neither switches tabs nor
+        // enters browse mode. (Was `wheel_over_tab_bar_switches_tabs` under the
+        // old select-on-scroll semantics.)
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("one");
         ws.test_add_tab(Some("two"));
@@ -3148,23 +3164,32 @@ mod tests {
         app.state.mode = Mode::Terminal;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        assert!(
+            app.state.view.tab_overflow.left.is_none()
+                && app.state.view.tab_overflow.right.is_none(),
+            "3 short tabs at width 106 must not overflow"
+        );
         let tab_bar = app.state.view.tab_bar_rect;
 
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, tab_bar.x + 1, tab_bar.y));
-        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        assert_eq!(
+            app.state.workspaces[0].active_tab, 0,
+            "active tab unchanged"
+        );
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "no browse mode without overflow"
+        );
 
         app.handle_mouse(mouse(MouseEventKind::ScrollUp, tab_bar.x + 1, tab_bar.y));
-        assert_eq!(app.state.workspaces[0].active_tab, 0);
-
-        app.handle_mouse(mouse(MouseEventKind::ScrollUp, tab_bar.x + 1, tab_bar.y));
-        assert_eq!(app.state.workspaces[0].active_tab, 2);
-
-        app.handle_mouse(mouse(
-            MouseEventKind::ScrollDown,
-            tab_bar.x + tab_bar.width.saturating_sub(1),
-            tab_bar.y,
-        ));
-        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        assert_eq!(
+            app.state.workspaces[0].active_tab, 0,
+            "active tab unchanged"
+        );
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "no browse mode without overflow"
+        );
     }
 
     #[test]
@@ -3199,13 +3224,17 @@ mod tests {
     }
 
     #[test]
-    fn wheel_over_overflowing_tab_bar_switches_tabs() {
+    fn wheel_over_overflowing_tab_bar_pans_window() {
+        // T9: wheel over an overflowing tab bar pans the visible window
+        // (reveals later/earlier tabs) while the active tab and focused pane
+        // stay put. (Was `wheel_over_overflowing_tab_bar_switches_tabs`.)
         let mut app = app_for_mouse_test();
         app.state.sidebar_width_ratio = 0.0;
         let mut ws = Workspace::test_new("one");
-        ws.tabs[0].set_custom_name("very-long-one".into());
-        ws.test_add_tab(Some("very-long-two"));
-        ws.test_add_tab(Some("very-long-three"));
+        ws.tabs[0].set_custom_name("very-long-zero".into());
+        for i in 1..12 {
+            ws.test_add_tab(Some(&format!("very-long-{i}")));
+        }
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -3218,20 +3247,60 @@ mod tests {
             "tabs must overflow with an indicator"
         );
         let tab_bar = app.state.view.tab_bar_rect;
+        let active_before = app.state.workspaces[0].active_tab;
+        let first_visible_before = app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .position(|r| r.width > 0)
+            .expect("some tab visible");
 
         app.handle_mouse(mouse(
             MouseEventKind::ScrollDown,
             tab_bar.x + tab_bar.width.saturating_sub(2),
             tab_bar.y,
         ));
-        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+        assert_eq!(
+            app.state.workspaces[0].active_tab, active_before,
+            "panning must not change the active tab"
+        );
+        assert!(app.state.tab_scroll.is_some(), "browse mode entered");
+        let first_visible_after_down = app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .position(|r| r.width > 0)
+            .expect("some tab visible");
+        assert!(
+            first_visible_after_down > first_visible_before,
+            "scroll down reveals later tabs (first visible {first_visible_before} -> {first_visible_after_down})"
+        );
 
+        // Scroll up reveals earlier tabs again.
         app.handle_mouse(mouse(
-            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollUp,
             tab_bar.x + tab_bar.width.saturating_sub(2),
             tab_bar.y,
         ));
-        assert_eq!(app.state.workspaces[0].active_tab, 2);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+        let first_visible_after_up = app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .position(|r| r.width > 0)
+            .expect("some tab visible");
+        assert!(
+            first_visible_after_up < first_visible_after_down,
+            "scroll up reveals earlier tabs"
+        );
+        assert_eq!(
+            app.state.workspaces[0].active_tab, active_before,
+            "panning back must not change the active tab"
+        );
     }
 
     #[test]
@@ -3291,6 +3360,517 @@ mod tests {
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tab-bar browse mode (wheel-to-pan) — step-2 behavior matrix (T11-T20)
+    // -----------------------------------------------------------------------
+
+    const BROWSE_AREA: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 65,
+        height: 20,
+    };
+
+    /// An app whose active workspace has enough long-named tabs to overflow at
+    /// `BROWSE_AREA`, with the sidebar suppressed and the view computed once.
+    fn app_with_overflowing_tabs(tab_count: usize, active: usize) -> App {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_width_ratio = 0.0;
+        let mut ws = Workspace::test_new("one");
+        ws.tabs[0].set_custom_name("very-long-zero".into());
+        for i in 1..tab_count {
+            ws.test_add_tab(Some(&format!("very-long-{i}")));
+        }
+        ws.active_tab = active;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        // Register backing terminals so `assert_invariants_for_test` (which
+        // checks every pane is attached to a live terminal) can run in the
+        // browse-mode tests below.
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.view.tab_overflow.left.is_some()
+                || app.state.view.tab_overflow.right.is_some(),
+            "test fixture must overflow"
+        );
+        app
+    }
+
+    /// Enter browse mode by wheeling down over the tab bar, then recompute.
+    fn enter_browse(app: &mut App) {
+        let tab_bar = app.state.view.tab_bar_rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            tab_bar.x + tab_bar.width.saturating_sub(2),
+            tab_bar.y,
+        ));
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_some(),
+            "browse mode should be active"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t11_clicking_revealed_tab_activates_and_recenters() {
+        let mut app = app_with_overflowing_tabs(12, 0);
+        // Pan several ticks so later tabs come into view.
+        for _ in 0..5 {
+            enter_browse(&mut app);
+        }
+        // Find a visible tab that is not the active one.
+        let (idx, rect) = app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .enumerate()
+            .find(|(i, r)| r.width > 0 && *i != app.state.workspaces[0].active_tab)
+            .map(|(i, r)| (i, *r))
+            .expect("a non-active revealed tab");
+        let row = app.state.view.tab_bar_rect.y;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 1,
+            row,
+        ));
+        // Down starts a tab press; the Up completes the switch.
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            rect.x + 1,
+            row,
+        ));
+        assert_eq!(
+            app.state.workspaces[0].active_tab, idx,
+            "clicking a revealed tab activates it"
+        );
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "activation clears browse mode via the anchor check"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t12_switch_tab_clears_browse_mode() {
+        let mut app = app_with_overflowing_tabs(12, 0);
+        enter_browse(&mut app);
+        app.state.switch_tab(6);
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "switch_tab exits browse mode"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t12_switch_workspace_tab_clears_browse_mode() {
+        let mut app = app_with_overflowing_tabs(12, 0);
+        enter_browse(&mut app);
+        assert!(app.state.switch_workspace_tab(0, 8), "api focus succeeds");
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "api/agent focus exits browse mode"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t12_direct_active_tab_write_clears_browse_mode() {
+        // The D7 bypass shape: a direct `ws.active_tab` write with no refresh
+        // helper. The next compute still exits browse mode via the anchor.
+        let mut app = app_with_overflowing_tabs(12, 0);
+        enter_browse(&mut app);
+        app.state.workspaces[0].active_tab = 9;
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "a direct active-tab write exits browse mode on next compute"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t12_switch_workspace_clears_browse_mode() {
+        // AC #3 lists a workspace switch as an activation path. Enter browse in
+        // one workspace, switch to another: the anchor's workspace id no longer
+        // matches the active workspace, so browse mode exits on next compute.
+        let mut app = app_with_overflowing_tabs(12, 0);
+        // Add a second workspace to switch to.
+        let mut ws2 = Workspace::test_new("two");
+        ws2.tabs[0].set_custom_name("other".into());
+        app.state.workspaces.push(ws2);
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        enter_browse(&mut app);
+        app.state.switch_workspace(1);
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "a workspace switch exits browse mode"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t12b_background_create_of_non_active_tab_preserves_browse() {
+        let mut app = app_with_overflowing_tabs(12, 5);
+        enter_browse(&mut app);
+        let active_number_before = {
+            let ws = &app.state.workspaces[0];
+            ws.tabs[ws.active_tab].number
+        };
+        // Create a new (non-active) tab in the background.
+        app.state.workspaces[0].test_add_tab(Some("created-in-background"));
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_some(),
+            "background create of a non-active tab preserves browse mode"
+        );
+        let ws = &app.state.workspaces[0];
+        assert_eq!(
+            ws.tabs[ws.active_tab].number, active_number_before,
+            "active tab identity is unchanged by a background create"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t13_seed_falls_back_to_zero_with_empty_hit_areas() {
+        // AC #2 / T13: the seed's `unwrap_or(0)` branch must be exercised. Force
+        // the overflow-present guard to pass while the cached hit-area vec is
+        // empty, so the first-visible scan finds nothing and falls back to 0.
+        let mut app = app_with_overflowing_tabs(12, 0);
+        assert!(app.state.tab_scroll.is_none());
+        // Overflow indicators are present (guard passes) but wipe the hit areas
+        // the seed scan reads.
+        assert!(
+            app.state.view.tab_overflow.left.is_some()
+                || app.state.view.tab_overflow.right.is_some()
+        );
+        app.state.view.tab_hit_areas.clear();
+        app.state.scroll_tab_bar(1);
+        assert_eq!(
+            app.state.tab_scroll.as_ref().map(|s| s.first_visible),
+            Some(1),
+            "empty hit areas seed to 0, then step by delta"
+        );
+    }
+
+    #[test]
+    fn t12b_background_close_of_non_active_tab_preserves_browse() {
+        // Closing a tab to the LEFT of the active tab shifts the active index
+        // but not its identity — the anchor still matches, so browse mode
+        // survives (window clamped to the new tab set).
+        let mut app = app_with_overflowing_tabs(12, 5);
+        enter_browse(&mut app);
+        let active_number_before = {
+            let ws = &app.state.workspaces[0];
+            ws.tabs[ws.active_tab].number
+        };
+        // Close tab index 1 (not the active one, to its left).
+        app.state.workspaces[0].close_tab(1);
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_some(),
+            "background close of a non-active tab preserves browse mode"
+        );
+        let ws = &app.state.workspaces[0];
+        assert_eq!(
+            ws.tabs[ws.active_tab].number, active_number_before,
+            "active tab identity is unchanged despite the index shift"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t12b_background_rename_of_non_active_tab_preserves_browse() {
+        let mut app = app_with_overflowing_tabs(12, 5);
+        enter_browse(&mut app);
+        app.state.workspaces[0].tabs[2].set_custom_name("renamed-in-background".into());
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_some(),
+            "background rename of a non-active tab preserves browse mode"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn closing_active_tab_while_browsing_exits_browse_mode() {
+        let mut app = app_with_overflowing_tabs(12, 5);
+        enter_browse(&mut app);
+        // Close the active tab itself: the newly selected active tab has a
+        // different number, so the anchor no longer matches.
+        app.state.workspaces[0].close_active_tab();
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "closing the active tab exits browse mode"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn overflow_disappearing_exits_browse_mode() {
+        let mut app = app_with_overflowing_tabs(12, 0);
+        enter_browse(&mut app);
+        let active_before = app.state.workspaces[0].active_tab;
+        // Grow the terminal wide enough that nothing overflows.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 400, 20));
+        assert!(
+            app.state.view.tab_overflow.left.is_none()
+                && app.state.view.tab_overflow.right.is_none(),
+            "the bar no longer overflows at width 400"
+        );
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "no overflow exits browse mode"
+        );
+        assert_eq!(
+            app.state.workspaces[0].active_tab, active_before,
+            "the active tab is unchanged on the overflow-disappears exit"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t13_seed_starts_from_visible_window_and_clamps_at_zero() {
+        // Enter browse mode with the active tab in the middle so the centered
+        // window does not start at tab 0; the seed must be the first visible
+        // index, then scroll-up saturates at 0.
+        let mut app = app_with_overflowing_tabs(14, 7);
+        let first_visible_before = app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .position(|r| r.width > 0)
+            .expect("some tab visible");
+        assert!(
+            first_visible_before > 0,
+            "fixture's centered window must not start at tab 0"
+        );
+        let tab_bar = app.state.view.tab_bar_rect;
+        // Scroll up first: seeds from the current window, then steps left.
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, tab_bar.x + 1, tab_bar.y));
+        let scroll = app.state.tab_scroll.as_ref().expect("browse entered");
+        assert_eq!(
+            scroll.first_visible,
+            first_visible_before - 1,
+            "seed is the visible window, stepped up by one"
+        );
+        // Keep scrolling up past 0: saturates at 0.
+        for _ in 0..(first_visible_before + 3) {
+            app.handle_mouse(mouse(MouseEventKind::ScrollUp, tab_bar.x + 1, tab_bar.y));
+        }
+        assert_eq!(
+            app.state.tab_scroll.as_ref().unwrap().first_visible,
+            0,
+            "scroll-up saturates at the leftmost position"
+        );
+    }
+
+    #[test]
+    fn t20_empty_space_click_cancels_browse_without_switching() {
+        // Narrow tabs that overflow, panned to `max_scroll`. At the max offset
+        // the left-packed window `[offset, n-1]` is the smallest that still
+        // fits, so it typically ends well short of the bar's right edge —
+        // leaving guaranteed empty tab-bar space past the last tab and the `+`
+        // button. That empty column is where FR8's cancel fires.
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_width_ratio = 0.0;
+        let mut ws = Workspace::test_new("one");
+        ws.tabs[0].set_custom_name("t0".into());
+        for i in 1..16 {
+            ws.test_add_tab(Some(&format!("t{i}")));
+        }
+        ws.active_tab = 0;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        let tab_bar = app.state.view.tab_bar_rect;
+        // Pan well past max_scroll; the compute clamp pins it at max_scroll.
+        for _ in 0..40 {
+            app.handle_mouse(mouse(
+                MouseEventKind::ScrollDown,
+                tab_bar.x + tab_bar.width.saturating_sub(2),
+                tab_bar.y,
+            ));
+            crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        }
+        assert!(app.state.tab_scroll.is_some(), "browse mode active");
+        let active_before = app.state.workspaces[0].active_tab;
+
+        // Find a genuine empty tab-bar column: on the bar row, not on any tab,
+        // overflow indicator, or the `+` button. Fail loudly if the fixture
+        // does not actually expose one (AT5: a fully packed bar has none).
+        let row = tab_bar.y;
+        let empty_col = (tab_bar.x..tab_bar.x + tab_bar.width).find(|&col| {
+            app.state.tab_at(col, row).is_none()
+                && app.state.tab_overflow_indicator_at(col, row).is_none()
+                && !app.state.on_new_tab_button(col, row)
+        });
+        let empty_col =
+            empty_col.expect("scrolled narrow-tab bar must expose empty trailing space");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            empty_col,
+            row,
+        ));
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "empty-space click cancels browse mode"
+        );
+        assert_eq!(
+            app.state.workspaces[0].active_tab, active_before,
+            "empty-space cancel does not change the selection"
+        );
+    }
+
+    #[test]
+    fn t16_drag_reorder_while_browsing_resolves_against_scrolled_window() {
+        // Short tab names at a moderate width overflow while keeping several
+        // tabs visible per window, so a drag has a distinct source and target.
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_width_ratio = 0.0;
+        let mut ws = Workspace::test_new("one");
+        ws.tabs[0].set_custom_name("t0".into());
+        for i in 1..16 {
+            ws.test_add_tab(Some(&format!("t{i}")));
+        }
+        ws.active_tab = 0;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.view.tab_overflow.left.is_some()
+                || app.state.view.tab_overflow.right.is_some(),
+            "fixture must overflow"
+        );
+        // Enter browse and pan a couple of ticks so the window is scrolled and
+        // the active tab (0) is hidden to the left.
+        let tab_bar = app.state.view.tab_bar_rect;
+        for _ in 0..3 {
+            app.handle_mouse(mouse(
+                MouseEventKind::ScrollDown,
+                tab_bar.x + tab_bar.width.saturating_sub(2),
+                tab_bar.y,
+            ));
+            crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        }
+        assert!(app.state.tab_scroll.is_some(), "browse mode active");
+        let active_number_before = {
+            let ws = &app.state.workspaces[0];
+            ws.tabs[ws.active_tab].number
+        };
+        let visible: Vec<(usize, Rect)> = app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.width > 0)
+            .map(|(i, r)| (i, *r))
+            .collect();
+        assert!(
+            visible.len() >= 2,
+            "fixture must keep multiple tabs visible while scrolled (got {})",
+            visible.len()
+        );
+        // Drag the first visible tab rightward past its neighbor's midpoint.
+        // The drop index resolves against the scrolled hit areas the user sees
+        // (D6); because the reorder does not change which tab is active, the
+        // browse window is preserved.
+        let (src_idx, src_rect) = visible[0];
+        let (_next_idx, next_rect) = visible[1];
+        assert_ne!(src_idx, app.state.workspaces[0].active_tab);
+        let row = app.state.view.tab_bar_rect.y;
+        let drop_col = next_rect.x + next_rect.width.saturating_sub(1);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            src_rect.x + 1,
+            row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            drop_col,
+            row,
+        ));
+        // The drop index resolves against the scrolled window while the drag is
+        // in flight.
+        assert!(
+            matches!(
+                &app.state.drag,
+                Some(DragState {
+                    target: DragTarget::TabReorder {
+                        insert_idx: Some(_),
+                        ..
+                    }
+                })
+            ),
+            "an in-flight tab drag resolves a drop index from the scrolled window"
+        );
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), drop_col, row));
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        // The active tab identity did not change, so browse mode is preserved.
+        let ws = &app.state.workspaces[0];
+        assert_eq!(
+            ws.tabs[ws.active_tab].number, active_number_before,
+            "a reorder that keeps the active tab preserves its identity"
+        );
+        assert!(
+            app.state.tab_scroll.is_some(),
+            "a reorder that does not change the active tab preserves the browse window"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn t17_indicator_click_while_scrolled_jumps_and_recenters() {
+        let mut app = app_with_overflowing_tabs(14, 0);
+        // Pan so there is a hidden-left group with a clickable indicator.
+        for _ in 0..5 {
+            enter_browse(&mut app);
+        }
+        let left = app.state.view.tab_overflow.left_hit_area;
+        let row = app.state.view.tab_bar_rect.y;
+        assert!(
+            left.width > 0,
+            "panning right must produce a clickable left overflow indicator"
+        );
+        let jump_to = app
+            .state
+            .tab_overflow_indicator_at(left.x, row)
+            .expect("left indicator resolves a jump target");
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), left.x, row));
+        assert_eq!(
+            app.state.workspaces[0].active_tab, jump_to,
+            "indicator click jumps to the resolved hidden tab"
+        );
+        crate::ui::compute_view(&mut app.state, BROWSE_AREA);
+        assert!(
+            app.state.tab_scroll.is_none(),
+            "indicator jump re-centers (exits browse mode)"
+        );
+        app.state.assert_invariants_for_test();
     }
 
     #[test]

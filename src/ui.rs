@@ -251,9 +251,10 @@ fn compute_view_internal(
     // `compute_tab_bar_view` returns the clamped scroll offset alongside the
     // view. This closure holds an immutable borrow of `app`, so the offset is
     // carried out and handled after the closure rather than written back inside
-    // it. With no scroll offset in play the layout is the centered fill and the
-    // returned offset is unused.
-    let (tab_bar_view, _clamped_offset) = app
+    // it (design C2 borrow note). The clamped offset is then reconciled into
+    // `app.tab_scroll` below: `None` clears browse mode (anchor mismatch, no
+    // overflow, or defensive fallback), and a `Some` clamps `first_visible`.
+    let (tab_bar_view, clamped_offset) = app
         .active
         .and_then(|i| app.workspaces.get(i))
         .map(|ws| {
@@ -263,6 +264,7 @@ fn compute_view_internal(
                 app.show_tab_status,
                 app.spinner_tick,
                 &app.palette,
+                app.tab_scroll.as_ref(),
             );
             compute_tab_bar_view(
                 chromes,
@@ -274,6 +276,7 @@ fn compute_view_internal(
             )
         })
         .unwrap_or_default();
+    app.reconcile_tab_scroll(clamped_offset);
 
     let split_borders = app
         .active
