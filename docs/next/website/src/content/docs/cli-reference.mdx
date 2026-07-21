@@ -197,7 +197,7 @@ Metadata text is normalized before storage. Herdr trims surrounding whitespace, 
 ## Agents
 
 ```bash
-herdr agent list
+herdr agent list [--status <idle|working|blocked|done|unknown>[,...]]
 herdr agent get <target>
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
 herdr agent send <target> <text>
@@ -211,6 +211,10 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 ```
 
 Agent targets can be terminal IDs, unique agent names, detected or reported agent labels, or legacy pane IDs. Names and labels are agent identities. Terminal IDs and legacy pane IDs are low-level escape hatches.
+
+`agent list --status` filters the response by `agent_status`. It takes one flag with comma-separated values, unioned; tokens are trimmed and deduplicated, and matching is exact lowercase. An empty or unrecognized value prints usage on stderr and exits 2. A filter that matches nothing prints a success envelope with an empty `agents` array.
+
+`agent list` and `agent get` output includes `tab_label` and `workspace_label` alongside `tab_id` and `workspace_id`, matching what the tab bar and sidebar show. Both are display-only strings: `tab_label` falls back to the tab's positional number for un-renamed tabs, so it can disagree with the stable number encoded in `tab_id`, and `workspace_label` is not unique across same-named directories. Use ids, not labels, to target actions.
 
 `agent read` reads the resolved terminal stream. `agent send` writes literal text to that stream. `agent get`, `agent focus`, `agent wait`, and `agent attach` require the resolved terminal to have agent identity. `agent rename` can assign that identity.
 
