@@ -1277,6 +1277,7 @@ impl App {
         let title = normalize_presentation_text(params.title);
         let display_agent = normalize_presentation_text(params.display_agent);
         let custom_status = normalize_custom_status(params.custom_status);
+        let model = normalize_presentation_text(params.model);
         let applies_to_source = match params.applies_to_source {
             Some(applies_to_source) => match normalize_metadata_source(applies_to_source) {
                 Ok(applies_to_source) => Some(applies_to_source),
@@ -1305,11 +1306,13 @@ impl App {
                 "cannot set and clear the same metadata field",
             );
         }
-        if title.is_none()
-            && display_agent.is_none()
-            && custom_status.is_none()
-            && state_labels.is_empty()
-            && !params.clear_title
+        if !metadata_request_sets_field(
+            &title,
+            &display_agent,
+            &custom_status,
+            &model,
+            &state_labels,
+        ) && !params.clear_title
             && !params.clear_display_agent
             && !params.clear_custom_status
             && !params.clear_state_labels
@@ -1328,6 +1331,7 @@ impl App {
             title,
             display_agent,
             custom_status,
+            model,
             state_labels,
             clear_title: params.clear_title,
             clear_display_agent: params.clear_display_agent,
@@ -1553,6 +1557,20 @@ fn normalize_metadata_ttl(
         return Err("metadata ttl_ms must be 86400000 or less");
     }
     Ok(Some(std::time::Duration::from_millis(ttl_ms)))
+}
+
+fn metadata_request_sets_field(
+    title: &Option<String>,
+    display_agent: &Option<String>,
+    custom_status: &Option<String>,
+    model: &Option<String>,
+    state_labels: &std::collections::HashMap<String, String>,
+) -> bool {
+    title.is_some()
+        || display_agent.is_some()
+        || custom_status.is_some()
+        || model.is_some()
+        || !state_labels.is_empty()
 }
 
 fn normalize_presentation_text(value: Option<String>) -> Option<String> {
@@ -1818,6 +1836,7 @@ mod tests {
             title: None,
             display_agent: None,
             custom_status: Some("activity".into()),
+            model: None,
             state_labels: std::collections::HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
@@ -3286,5 +3305,80 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    #[test]
+    fn pane_report_metadata_accepts_model_only_request() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let mut params = metadata_params(pane_id);
+        params.custom_status = None;
+        params.model = Some("Opus 4.8".into());
+
+        let response = app.handle_pane_report_metadata("req".into(), params);
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+    }
+
+    #[test]
+    fn pane_report_metadata_still_rejects_request_with_no_fields() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let mut params = metadata_params(pane_id);
+        params.custom_status = None;
+
+        let response = app.handle_pane_report_metadata("req".into(), params);
+
+        assert_eq!(metadata_error_code(&response), "invalid_metadata_request");
+    }
+
+    #[test]
+    fn pane_report_metadata_model_surfaces_on_presentation_and_pane_detail() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::detect::AgentState::Working,
+                None,
+                None,
+            );
+        let mut params = metadata_params(public_pane_id);
+        params.custom_status = None;
+        params.agent = Some("claude".into());
+        params.source = "herdr:claude-statusline".into();
+        // Whitespace and length excess exercise normalize_presentation_text.
+        params.model = Some(format!("  Opus 4.8{}  ", "x".repeat(100)));
+
+        let response = app.handle_pane_report_metadata("req".into(), params);
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        let terminal = app.state.terminals.get(&terminal_id).unwrap();
+        let model = terminal.effective_presentation().model.unwrap();
+        assert!(model.starts_with("Opus 4.8x"));
+        assert_eq!(model.chars().count(), 80);
+        let details = app.state.workspaces[0].pane_details(&app.state.terminals);
+        assert_eq!(details[0].model.as_deref(), Some(model.as_str()));
+    }
+
+    #[test]
+    fn pane_report_metadata_whitespace_only_model_does_not_count_as_set() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let mut params = metadata_params(pane_id);
+        params.custom_status = None;
+        params.model = Some("   ".into());
+
+        let response = app.handle_pane_report_metadata("req".into(), params);
+
+        assert_eq!(metadata_error_code(&response), "invalid_metadata_request");
     }
 }

@@ -152,7 +152,7 @@ pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
 
 pub(crate) enum LoopEvent {
     Timer,
-    Internal(AppEvent),
+    Internal(Box<AppEvent>),
     Api(Box<crate::api::ApiRequestMessage>),
     RawInput(crate::raw_input::RawInputEvent),
     InputClosed,
@@ -970,7 +970,7 @@ impl App {
                         None => LoopEvent::Timer,
                     },
                     maybe_ev = self.event_rx.recv() => match maybe_ev {
-                        Some(ev) => LoopEvent::Internal(ev),
+                        Some(ev) => LoopEvent::Internal(Box::new(ev)),
                         None => LoopEvent::Timer,
                     },
                     maybe_input = recv_raw_input_or_pending(input_rx) => match maybe_input {
@@ -985,7 +985,7 @@ impl App {
             match event {
                 LoopEvent::Timer => {}
                 LoopEvent::Internal(ev) => {
-                    self.handle_internal_event_with_prefix_sync(ev);
+                    self.handle_internal_event_with_prefix_sync(*ev);
                     needs_render = true;
                 }
                 LoopEvent::Api(msg) => {
