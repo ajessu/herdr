@@ -193,16 +193,20 @@ fn truncate_text(text: &str, max_width: usize) -> String {
     format!("{prefix}…")
 }
 
+const AGENT_LABEL_SEPARATOR: &str = " · ";
+
 fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -> String {
     let Some(tab_label) = entry.primary_tab_label.as_deref() else {
         return truncate_text(&entry.primary_label, max_width);
     };
 
-    let separator = " · ";
-    let separator_width = separator.chars().count();
+    let separator_width = AGENT_LABEL_SEPARATOR.chars().count();
     if max_width <= separator_width + 2 {
         return truncate_text(
-            &format!("{}{}{}", entry.primary_label, separator, tab_label),
+            &format!(
+                "{}{}{}",
+                entry.primary_label, AGENT_LABEL_SEPARATOR, tab_label
+            ),
             max_width,
         );
     }
@@ -232,7 +236,7 @@ fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -
     format!(
         "{}{}{}",
         truncate_text(&entry.primary_label, workspace_budget),
-        separator,
+        AGENT_LABEL_SEPARATOR,
         truncate_text(tab_label, tab_budget)
     )
 }
@@ -521,22 +525,30 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
     Rect::new(area.x, body_y, body_width, body_height)
 }
 
+/// Rows consumed by one agent panel item (2 content lines, no spacer).
+pub(crate) const AGENT_PANEL_ITEM_ROWS: u16 = 2;
+
+/// Single source of truth for agent panel item geometry (FR7): yields
+/// `(entry_index, row_y)` for each item visible in `body` after `scroll`.
+/// An item is visible only when both of its rows fit inside the body; an odd
+/// body height leaves the trailing row unused.
+pub(crate) fn agent_panel_item_rows(
+    body: Rect,
+    scroll: usize,
+    entry_count: usize,
+) -> impl Iterator<Item = (usize, u16)> {
+    let capacity = if body.width == 0 {
+        0
+    } else {
+        (body.height / AGENT_PANEL_ITEM_ROWS) as usize
+    };
+    let visible = entry_count.saturating_sub(scroll).min(capacity);
+    (0..visible).map(move |i| (scroll + i, body.y + (i as u16) * AGENT_PANEL_ITEM_ROWS))
+}
+
 fn agent_panel_visible_count(area: Rect) -> usize {
     let body = agent_panel_body_rect(area, false);
-    if body.width == 0 || body.height < 2 {
-        return 0;
-    }
-
-    let mut used_rows = 0u16;
-    let mut visible = 0usize;
-    while used_rows.saturating_add(2) <= body.height {
-        used_rows = used_rows.saturating_add(2);
-        visible += 1;
-        if used_rows < body.height {
-            used_rows = used_rows.saturating_add(1);
-        }
-    }
-    visible
+    agent_panel_item_rows(body, 0, usize::MAX).count()
 }
 
 pub(crate) fn agent_panel_scroll_metrics(app: &AppState, area: Rect) -> crate::pane::ScrollMetrics {
@@ -1390,6 +1402,65 @@ fn render_workspace_list(
     }
 }
 
+/// Agent item line 1: leading space, state icon, then the primary label.
+/// Pure span producer — no Frame/AppState.
+pub(crate) fn agent_panel_name_spans(
+    detail: &AgentPanelEntry,
+    is_active: bool,
+    spinner_tick: u32,
+    max_label_width: usize,
+    p: &Palette,
+) -> Vec<Span<'static>> {
+    let (icon, icon_style) = agent_icon(detail.state, detail.seen, spinner_tick, p);
+    let name_style = if is_active {
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+    };
+    let primary_label = format_agent_panel_primary_label(detail, max_label_width);
+    vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(icon, icon_style),
+        Span::styled(" ", Style::default()),
+        Span::styled(primary_label, name_style),
+    ]
+}
+
+/// Agent item line 2 (FR6): `state_label · agent_label · custom_status` with
+/// the panel's dim styling and `state_labels` overrides. Pure span producer.
+pub(crate) fn agent_panel_status_spans(
+    detail: &AgentPanelEntry,
+    is_active: bool,
+    p: &Palette,
+) -> Vec<Span<'static>> {
+    let label_color = state_label_color(detail.state, detail.seen, p);
+    let label = detail
+        .state_labels
+        .get(agent_panel_status_key(detail.state, detail.seen))
+        .map(String::as_str)
+        .unwrap_or_else(|| state_label(detail.state, detail.seen));
+    let status_style = if is_active {
+        Style::default().fg(label_color)
+    } else {
+        Style::default().fg(label_color).add_modifier(Modifier::DIM)
+    };
+    let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+
+    let mut spans = vec![
+        Span::styled("   ", Style::default()),
+        Span::styled(label.to_string(), status_style),
+    ];
+    if let Some(agent_label) = &detail.agent_label {
+        spans.push(Span::styled(AGENT_LABEL_SEPARATOR, agent_style));
+        spans.push(Span::styled(agent_label.clone(), agent_style));
+    }
+    if let Some(custom_status) = &detail.custom_status {
+        spans.push(Span::styled(AGENT_LABEL_SEPARATOR, agent_style));
+        spans.push(Span::styled(custom_status.clone(), agent_style));
+    }
+    spans
+}
+
 fn render_agent_detail(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1435,77 +1506,34 @@ fn render_agent_detail(
         return;
     }
 
-    let mut row_y = body.y;
-    let body_bottom = body.y + body.height;
-    for detail in details.iter().skip(app.agent_panel_scroll) {
-        if row_y.saturating_add(1) >= body_bottom {
-            break;
-        }
+    for (entry_idx, row_y) in agent_panel_item_rows(body, app.agent_panel_scroll, details.len()) {
+        let detail = &details[entry_idx];
 
         // Check if this agent entry corresponds to the active session
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-
-        let (icon, icon_style) = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
-        let label_color = state_label_color(detail.state, detail.seen, p);
-        let label = detail
-            .state_labels
-            .get(agent_panel_status_key(detail.state, detail.seen))
-            .map(String::as_str)
-            .unwrap_or_else(|| state_label(detail.state, detail.seen));
-
         let row_style = if is_active {
             Style::default().bg(p.surface_dim)
         } else {
             Style::default()
         };
 
-        let name_style = if is_active {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
-        };
-        let status_style = if is_active {
-            Style::default().fg(label_color)
-        } else {
-            Style::default().fg(label_color).add_modifier(Modifier::DIM)
-        };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-
-        let primary_label =
-            format_agent_panel_primary_label(detail, body.width.saturating_sub(3) as usize);
-        let name_line = Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(icon, icon_style),
-            Span::styled(" ", Style::default()),
-            Span::styled(primary_label, name_style),
-        ]);
+        let name_line = Line::from(agent_panel_name_spans(
+            detail,
+            is_active,
+            app.spinner_tick,
+            body.width.saturating_sub(3) as usize,
+            p,
+        ));
         frame.render_widget(
             Paragraph::new(name_line).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
         );
-        row_y += 1;
 
-        let mut status_spans = vec![
-            Span::styled("   ", Style::default()),
-            Span::styled(label, status_style),
-        ];
-        if let Some(agent_label) = &detail.agent_label {
-            status_spans.push(Span::styled(" · ", agent_style));
-            status_spans.push(Span::styled(agent_label, agent_style));
-        }
-        if let Some(custom_status) = &detail.custom_status {
-            status_spans.push(Span::styled(" · ", agent_style));
-            status_spans.push(Span::styled(custom_status.clone(), agent_style));
-        }
+        let status_line = Line::from(agent_panel_status_spans(detail, is_active, p));
         frame.render_widget(
-            Paragraph::new(Line::from(status_spans)).style(row_style),
-            Rect::new(body.x, row_y, body.width, 1),
+            Paragraph::new(status_line).style(row_style),
+            Rect::new(body.x, row_y + 1, body.width, 1),
         );
-        row_y += 1;
-
-        if row_y < body_bottom {
-            row_y += 1;
-        }
     }
 
     if let Some(track) = scrollbar_rect {
@@ -1774,25 +1802,159 @@ mod tests {
         assert_eq!(entries[0].agent_label.as_deref(), Some("planner"));
     }
 
-    #[test]
-    fn all_workspaces_primary_label_truncates_workspace_and_tab() {
-        let entry = AgentPanelEntry {
+    fn panel_entry(primary_label: &str, primary_tab_label: Option<&str>) -> AgentPanelEntry {
+        AgentPanelEntry {
             ws_idx: 0,
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(1),
-            primary_label: "agent-browser".into(),
-            primary_tab_label: Some("test-escalation".into()),
+            primary_label: primary_label.into(),
+            primary_tab_label: primary_tab_label.map(str::to_string),
             agent_label: Some("claude".into()),
             state: AgentState::Idle,
             seen: true,
             last_agent_state_change_seq: None,
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn all_workspaces_primary_label_truncates_workspace_and_tab() {
+        let entry = panel_entry("agent-browser", Some("test-escalation"));
 
         let label = format_agent_panel_primary_label(&entry, 18);
 
         assert_eq!(label, "agent-bro… · test…");
+    }
+
+    fn spans_text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn agent_status_spans_render_state_agent_and_custom_status() {
+        let p = Palette::catppuccin();
+        let mut entry = panel_entry("herdr", None);
+        entry.custom_status = Some("compiling".into());
+
+        let spans = agent_panel_status_spans(&entry, false, &p);
+
+        assert_eq!(spans_text(&spans), "   idle · claude · compiling");
+        // Non-active rows keep the dim styling on every non-indent span.
+        assert!(spans[1..]
+            .iter()
+            .all(|s| s.style.add_modifier.contains(Modifier::DIM)));
+    }
+
+    #[test]
+    fn agent_status_spans_omit_missing_segments() {
+        let p = Palette::catppuccin();
+        let mut entry = panel_entry("herdr", None);
+        entry.agent_label = None;
+
+        assert_eq!(
+            spans_text(&agent_panel_status_spans(&entry, false, &p)),
+            "   idle"
+        );
+    }
+
+    #[test]
+    fn agent_status_spans_honor_state_labels_override() {
+        let p = Palette::catppuccin();
+        let mut entry = panel_entry("herdr", None);
+        entry.state_labels.insert("idle".into(), "resting".into());
+
+        assert_eq!(
+            spans_text(&agent_panel_status_spans(&entry, true, &p)),
+            "   resting · claude"
+        );
+    }
+
+    #[test]
+    fn agent_name_spans_lead_with_icon_then_primary_label() {
+        let p = Palette::catppuccin();
+        let entry = panel_entry("herdr", Some("logs"));
+
+        let spans = agent_panel_name_spans(&entry, false, 0, 40, &p);
+
+        assert_eq!(spans_text(&spans), " ✓ herdr · logs");
+    }
+
+    #[test]
+    fn agent_panel_item_rows_maps_entries_and_agrees_with_consumers() {
+        // Table: (body height, scroll, entry_count, expected (entry, row_y)
+        // pairs relative to body.y). Covers scrolled and partially-clipped
+        // viewports (odd heights leave the trailing row unused) per AC5.
+        type Case = (u16, usize, usize, Vec<(usize, u16)>);
+        let cases: Vec<Case> = vec![
+            // Everything fits.
+            (6, 0, 2, vec![(0, 0), (1, 2)]),
+            // Odd height: trailing row unused, third item clipped out.
+            (7, 0, 4, vec![(0, 0), (1, 2), (2, 4)]),
+            // Scrolled: indices offset, rows re-anchored at body top.
+            (6, 1, 4, vec![(1, 0), (2, 2), (3, 4)]),
+            // Scrolled past most entries: only the remainder shows.
+            (6, 3, 4, vec![(3, 0)]),
+            // Scroll beyond the list: nothing.
+            (6, 5, 4, vec![]),
+            // More entries than fit.
+            (4, 0, 10, vec![(0, 0), (1, 2)]),
+            // Tiny heights: no items.
+            (1, 0, 3, vec![]),
+            (0, 0, 3, vec![]),
+        ];
+
+        for (height, scroll, entry_count, expected) in cases {
+            let body = Rect::new(0, 13, 24, height);
+            let items: Vec<(usize, u16)> = agent_panel_item_rows(body, scroll, entry_count)
+                .map(|(idx, row_y)| (idx, row_y - body.y))
+                .collect();
+            assert_eq!(
+                items, expected,
+                "height={height} scroll={scroll} entries={entry_count}"
+            );
+
+            // Hit-test agreement: each item owns exactly its two rows.
+            for (idx, rel_row) in &items {
+                for offset in 0..AGENT_PANEL_ITEM_ROWS {
+                    let row = body.y + rel_row + offset;
+                    let hit = agent_panel_item_rows(body, scroll, entry_count)
+                        .find(|(_, row_y)| row == *row_y || row == row_y + 1)
+                        .map(|(i, _)| i);
+                    assert_eq!(hit, Some(*idx), "row {row} must hit entry {idx}");
+                }
+            }
+        }
+
+        // Zero width: no items regardless of height.
+        assert_eq!(
+            agent_panel_item_rows(Rect::new(0, 0, 0, 10), 0, 5).count(),
+            0
+        );
+    }
+
+    #[test]
+    fn agent_panel_visible_count_matches_item_rows_capacity() {
+        // The metric and the shared helper must agree on how many items fit.
+        for height in 0u16..12 {
+            let area = Rect::new(0, 0, 24, height + AGENT_PANEL_HEADER_ROWS);
+            let body = agent_panel_body_rect(area, false);
+            assert_eq!(
+                agent_panel_visible_count(area),
+                agent_panel_item_rows(body, 0, usize::MAX).count(),
+                "height={height}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_panel_fits_eight_items_at_reference_geometry() {
+        // Design success check: 40-row sidebar at the default 0.5 split gives
+        // a 20-row detail section; 17 body rows fit 8 agents.
+        let area = Rect::new(0, 0, 26, 40);
+        let (_, detail_area) = expanded_sidebar_sections(area, 0.5);
+        assert_eq!(detail_area.height, 20);
+        assert_eq!(agent_panel_visible_count(detail_area), 8);
     }
 
     #[test]
@@ -1889,7 +2051,8 @@ mod tests {
         // dropped first, then branch truncated (min 4 visible chars), then
         // branch dropped, then name truncated. Expected branch truncations go
         // through the same char-safe helper the implementation must use.
-        let cases: Vec<(usize, (String, Option<String>, bool))> = vec![
+        type Case = (usize, (String, Option<String>, bool));
+        let cases: Vec<Case> = vec![
             // Everything fits: counts shown.
             (full, (name.into(), Some(branch.into()), true)),
             // One short: counts dropped first, branch intact.

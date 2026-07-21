@@ -600,23 +600,13 @@ impl AppState {
             return None;
         }
 
-        let mut row_y = body.y;
-        for detail in crate::ui::agent_panel_entries(self)
-            .into_iter()
-            .skip(self.agent_panel_scroll)
-        {
-            if row_y.saturating_add(1) >= body.y + body.height {
-                break;
-            }
-            if row == row_y || row == row_y + 1 {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
-            }
-            row_y = row_y.saturating_add(2);
-            if row_y < body.y + body.height {
-                row_y = row_y.saturating_add(1);
-            }
-        }
-        None
+        let entries = crate::ui::agent_panel_entries(self);
+        crate::ui::agent_panel_item_rows(body, self.agent_panel_scroll, entries.len())
+            .find(|(_, row_y)| row == *row_y || row == row_y + 1)
+            .map(|(entry_idx, _)| {
+                let detail = &entries[entry_idx];
+                (detail.ws_idx, detail.tab_idx, detail.pane_id)
+            })
     }
 }
 
@@ -827,7 +817,12 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 16));
+        // Second entry, second row of its 2-row item.
+        let body = crate::ui::agent_panel_body_rect(app.state.agent_panel_rect(), false);
+        let (_, row_y) = crate::ui::agent_panel_item_rows(body, 0, 2)
+            .nth(1)
+            .expect("second agent entry visible");
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, row_y + 1));
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
@@ -898,14 +893,15 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            app.state.view.sidebar_rect,
-            app.state.sidebar_section_split,
-        );
+        // Second workspace's entry, first row of its 2-row item.
+        let body = crate::ui::agent_panel_body_rect(app.state.agent_panel_rect(), false);
+        let (_, row_y) = crate::ui::agent_panel_item_rows(body, 0, 2)
+            .nth(1)
+            .expect("second agent entry visible");
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            detail_area.x + 2,
-            detail_area.y + 6,
+            body.x + 2,
+            row_y,
         ));
 
         assert_eq!(app.state.active, Some(1));
