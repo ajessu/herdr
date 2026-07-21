@@ -957,6 +957,7 @@ mod tests {
             primary_label: "herdr".into(),
             primary_tab_label: primary_tab_label.map(str::to_string),
             agent_label: agent_label.map(str::to_string),
+            model: None,
             state: AgentState::Idle,
             seen: true,
             last_agent_state_change_seq: None,
