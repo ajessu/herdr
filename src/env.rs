@@ -79,12 +79,16 @@ mod tests {
         // Vars that are intentionally NOT scrubbed because they are:
         // - part of the remote client protocol (RENDER_ENCODING, REATTACH, KEYBINDINGS)
         // - set on utility subprocesses unrelated to herdr server identity (CHANNEL, NOTIFY_ARGS)
+        // - statusLine wrapper display/config consumed by the wrapper's own
+        //   chained subprocess, not herdr server identity (STATUSLINE_CHAIN, STATUSLINE_DEBUG)
         let exemptions: &[&str] = &[
             "HERDR_RENDER_ENCODING",
             "HERDR_REATTACH_COMMAND",
             "HERDR_REMOTE_KEYBINDINGS",
             "HERDR_CHANNEL",
             "HERDR_NOTIFY_ARGS",
+            "HERDR_STATUSLINE_CHAIN",
+            "HERDR_STATUSLINE_DEBUG",
         ];
 
         let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

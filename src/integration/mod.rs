@@ -6337,3 +6337,661 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 }
+
+// Shell-level harness for the Claude statusLine wrapper (`herdr-statusline.sh`).
+// This is the first integration test that actually executes a `.sh` asset
+// rather than asserting its bytes: it writes the embedded asset to a temp dir,
+// puts a stub `herdr` and stub chain command on PATH, seeds state files with
+// crafted `<model>\t<epoch>` contents, and drives the script through
+// `std::process::Command`. All environment is passed per-process to `Command`,
+// so nothing mutates the process env and the tests need no serializing lock.
+#[cfg(all(test, unix))]
+mod statusline_tests {
+    use std::fs;
+    use std::io::Write;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const STATUSLINE_ASSET: &str = include_str!("assets/claude/herdr-statusline.sh");
+    // Kept in lockstep with TTL_MS/HEARTBEAT_SECS in the wrapper script.
+    const TTL_MS: u64 = 900_000;
+    const HEARTBEAT_SECS: u64 = TTL_MS / 1000 / 3;
+    const PANE_ID: &str = "p7";
+    const JSON: &str = r#"{"model":{"display_name":"Opus 4.8"}}"#;
+    const MODEL: &str = "Opus 4.8";
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_secs()
+    }
+
+    fn unique_base() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "herdr-statusline-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos()
+        ))
+    }
+
+    /// Resolve an executable by scanning the ambient PATH, like `command -v`.
+    fn resolve_on_path(util: &str) -> PathBuf {
+        let path = std::env::var("PATH").unwrap_or_default();
+        for dir in path.split(':').filter(|d| !d.is_empty()) {
+            let candidate = Path::new(dir).join(util);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+        panic!("required utility `{util}` not found on PATH");
+    }
+
+    struct Fixture {
+        base: PathBuf,
+        script: PathBuf,
+        bin_dir: PathBuf,
+        runtime_dir: PathBuf,
+        state_dir: PathBuf,
+        socket_path: PathBuf,
+        stub_log: PathBuf,
+        chain_capture: PathBuf,
+        chain_cmd: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let base = unique_base();
+            let bin_dir = base.join("bin");
+            let runtime_dir = base.join("run");
+            let state_dir = runtime_dir.join("herdr-statusline");
+            fs::create_dir_all(&bin_dir).expect("create bin dir");
+            fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+
+            let script = base.join("herdr-statusline.sh");
+            fs::write(&script, STATUSLINE_ASSET).expect("write wrapper asset");
+
+            let stub_log = base.join("stub-herdr.log");
+            let chain_capture = base.join("chain-input.txt");
+
+            // Stub `herdr`: record each argv element on its own line (so a
+            // split model would show as two lines), mark each invocation with a
+            // leading `CALL` line, and exit with STUB_HERDR_EXIT (default 0).
+            // The stub-control vars deliberately avoid the HERDR_ prefix so they
+            // are not mistaken for herdr's own subprocess contract.
+            let herdr_stub = bin_dir.join("herdr");
+            write_executable(
+                &herdr_stub,
+                "#!/bin/sh\n\
+                 {\n\
+                 printf 'CALL\\n'\n\
+                 for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n\
+                 } >> \"$STUB_HERDR_LOG\"\n\
+                 exit \"${STUB_HERDR_EXIT:-0}\"\n",
+            );
+
+            // Stub chain command: capture stdin verbatim, print a known marker.
+            let chain_cmd = bin_dir.join("chain");
+            write_executable(
+                &chain_cmd,
+                &format!(
+                    "#!/bin/sh\ncat > '{}'\nprintf 'CHAINED_OUTPUT\\n'\n",
+                    chain_capture.display()
+                ),
+            );
+
+            let socket_path = runtime_dir.join("api.sock");
+            fs::write(&socket_path, b"").expect("create socket placeholder");
+
+            Fixture {
+                base,
+                script,
+                bin_dir,
+                runtime_dir,
+                state_dir,
+                socket_path,
+                stub_log,
+                chain_capture,
+                chain_cmd,
+            }
+        }
+
+        /// The state-file path the wrapper computes: `<server-gen>-<pane_id>`,
+        /// where server-gen is the socket file's mtime in whole seconds (no
+        /// HERDR_SERVER_ID env override, matching production, which has none).
+        fn state_file(&self) -> PathBuf {
+            let mtime = fs::metadata(&self.socket_path)
+                .expect("socket metadata")
+                .modified()
+                .expect("socket mtime")
+                .duration_since(UNIX_EPOCH)
+                .expect("socket mtime before epoch")
+                .as_secs();
+            self.state_dir.join(format!("{mtime}-{PANE_ID}"))
+        }
+
+        fn ensure_state_dir(&self) {
+            fs::create_dir_all(&self.state_dir).expect("create state dir");
+            let mut perms = fs::metadata(&self.state_dir)
+                .expect("state dir metadata")
+                .permissions();
+            perms.set_mode(0o700);
+            fs::set_permissions(&self.state_dir, perms).expect("chmod state dir");
+        }
+
+        fn seed_state(&self, model: &str, epoch_line: &str) {
+            self.ensure_state_dir();
+            fs::write(self.state_file(), format!("{model}\t{epoch_line}\n"))
+                .expect("seed state file");
+        }
+
+        /// Seed an arbitrary sibling file in the state dir (used to place a
+        /// prior-server-generation entry, or an aged file for the cleanup sweep).
+        fn write_sibling(&self, name: &str, contents: &str) -> PathBuf {
+            self.ensure_state_dir();
+            let path = self.state_dir.join(name);
+            fs::write(&path, contents).expect("write sibling state file");
+            path
+        }
+
+        /// Backdate a file's mtime by whole days; used to drive the 24h cleanup
+        /// sweep. Uses std `File::set_times` (portable, no `touch -d` relative
+        /// form, which is GNU-only and rejected by BSD/macOS `touch`).
+        fn backdate_days(path: &Path, days: u32) {
+            let when = SystemTime::now() - std::time::Duration::from_secs(u64::from(days) * 86_400);
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("open state file for backdating");
+            file.set_times(fs::FileTimes::new().set_modified(when))
+                .expect("set mtime");
+        }
+
+        /// PATH front-loaded with the stub bin dir, then the ambient PATH.
+        fn full_path(&self) -> String {
+            let ambient = std::env::var("PATH").unwrap_or_default();
+            format!("{}:{}", self.bin_dir.display(), ambient)
+        }
+
+        /// A restricted PATH containing only the utilities the script needs,
+        /// plus the stubs, deliberately omitting python3.
+        fn restricted_path_without_python3(&self) -> String {
+            let restricted = self.base.join("nopy");
+            fs::create_dir_all(&restricted).expect("create restricted path dir");
+            for util in [
+                "sh", "cat", "mktemp", "stat", "rm", "find", "id", "date", "head", "mv",
+            ] {
+                let target = resolve_on_path(util);
+                let _ = symlink(&target, restricted.join(util));
+            }
+            // `timeout` is optional: it is absent on stock macOS, and the
+            // wrapper's `command -v timeout` gate tolerates that. Link it when
+            // present so the report path (if reached) still bounds itself.
+            let path = std::env::var("PATH").unwrap_or_default();
+            let timeout_dir = path
+                .split(':')
+                .find(|d| !d.is_empty() && Path::new(d).join("timeout").is_file());
+            if let Some(dir) = timeout_dir {
+                let _ = symlink(Path::new(dir).join("timeout"), restricted.join("timeout"));
+            }
+            // Stubs are reachable in the restricted PATH too.
+            let _ = symlink(self.bin_dir.join("herdr"), restricted.join("herdr"));
+            let _ = symlink(&self.chain_cmd, restricted.join("chain"));
+            restricted.display().to_string()
+        }
+
+        fn base_command(&self, path: &str) -> Command {
+            let mut cmd = Command::new("sh");
+            cmd.arg(&self.script)
+                .env_clear()
+                .env("PATH", path)
+                .env("HERDR_ENV", "1")
+                .env("HERDR_SOCKET_PATH", &self.socket_path)
+                .env("HERDR_PANE_ID", PANE_ID)
+                .env("XDG_RUNTIME_DIR", &self.runtime_dir)
+                .env("STUB_HERDR_LOG", &self.stub_log)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            cmd
+        }
+
+        fn run(&self, cmd: Command, stdin_bytes: &[u8]) -> RunResult {
+            let mut child = {
+                let mut cmd = cmd;
+                cmd.spawn().expect("spawn wrapper")
+            };
+            child
+                .stdin
+                .take()
+                .expect("child stdin")
+                .write_all(stdin_bytes)
+                .expect("write stdin");
+            let output = child.wait_with_output().expect("wait for wrapper");
+            let log = fs::read_to_string(&self.stub_log).unwrap_or_default();
+            RunResult {
+                status_code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                herdr_log: log,
+            }
+        }
+
+        fn chain_input(&self) -> String {
+            fs::read_to_string(&self.chain_capture).unwrap_or_default()
+        }
+
+        fn state_contents(&self) -> Option<String> {
+            fs::read_to_string(self.state_file()).ok()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("write stub script");
+        let mut perms = fs::metadata(path).expect("stub metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod stub");
+    }
+
+    struct RunResult {
+        status_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        herdr_log: String,
+    }
+
+    impl RunResult {
+        /// Number of stub-herdr invocations (one `CALL` marker per invocation).
+        fn herdr_call_count(&self) -> usize {
+            self.herdr_log.lines().filter(|l| *l == "CALL").count()
+        }
+
+        /// Every argv element from the (single) recorded invocation, in order.
+        fn herdr_argv(&self) -> Vec<String> {
+            self.herdr_log
+                .lines()
+                .skip_while(|l| *l != "CALL")
+                .skip(1)
+                .take_while(|l| *l != "CALL")
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    #[test]
+    fn reports_model_and_chains_untouched() {
+        let fx = Fixture::new();
+        let mut cmd = fx.base_command(&fx.full_path());
+        cmd.env("HERDR_STATUSLINE_CHAIN", fx.chain_cmd.display().to_string());
+        let result = fx.run(cmd, JSON.as_bytes());
+
+        assert_eq!(result.status_code, Some(0), "stderr: {}", result.stderr);
+        assert_eq!(result.herdr_call_count(), 1, "log: {}", result.herdr_log);
+
+        // The exact FR9c argv, with the model as a single element (its own line
+        // in the per-arg log proves it was not word-split).
+        assert_eq!(
+            result.herdr_argv(),
+            vec![
+                "pane".to_string(),
+                "report-metadata".to_string(),
+                PANE_ID.to_string(),
+                "--source".to_string(),
+                "herdr:claude-statusline".to_string(),
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                MODEL.to_string(),
+                "--ttl-ms".to_string(),
+                TTL_MS.to_string(),
+            ]
+        );
+
+        // Chain received byte-identical buffered JSON; wrapper stdout is the
+        // chain's stdout.
+        assert_eq!(fx.chain_input(), JSON);
+        assert_eq!(result.stdout, "CHAINED_OUTPUT\n");
+    }
+
+    #[test]
+    fn steady_state_short_circuits_without_any_herdr_call() {
+        let fx = Fixture::new();
+        fx.seed_state(MODEL, &now_secs().to_string());
+        let before = fx.state_contents();
+
+        let mut cmd = fx.base_command(&fx.full_path());
+        cmd.env("HERDR_STATUSLINE_CHAIN", fx.chain_cmd.display().to_string());
+        let result = fx.run(cmd, JSON.as_bytes());
+
+        assert_eq!(result.status_code, Some(0), "stderr: {}", result.stderr);
+        assert_eq!(
+            result.herdr_call_count(),
+            0,
+            "fresh matching state must short-circuit before any herdr call: {}",
+            result.herdr_log
+        );
+        assert_eq!(fx.state_contents(), before, "epoch must not advance");
+        // Chaining still produces the wrapper's output.
+        assert_eq!(result.stdout, "CHAINED_OUTPUT\n");
+    }
+
+    #[test]
+    fn heartbeat_fires_on_stale_model_change_corrupt_and_future_state() {
+        let now = now_secs();
+        // (label, seeded model, seeded epoch line)
+        let cases = [
+            ("stale", MODEL, (now - HEARTBEAT_SECS - 5).to_string()),
+            ("model-change", "Sonnet 5", now.to_string()),
+            // Tab-separated line whose epoch is not an integer: exercises the
+            // `is_uint "$recorded_epoch"` guard (the line parses into a
+            // model+epoch pair but the epoch is garbage -> treated as absent).
+            ("corrupt-nonint-epoch", MODEL, "not-a-number".to_string()),
+            ("corrupt-no-tab", "garbage-line", String::new()),
+            ("future", MODEL, (now + 10_000).to_string()),
+        ];
+        for (label, model, epoch_line) in cases {
+            let fx = Fixture::new();
+            if label == "corrupt-no-tab" {
+                // A line with no tab separator: seed raw contents directly.
+                fs::create_dir_all(&fx.state_dir).expect("state dir");
+                fs::write(fx.state_file(), "garbage-no-tab\n").expect("seed corrupt");
+            } else {
+                fx.seed_state(model, &epoch_line);
+            }
+            let result = fx.run(fx.base_command(&fx.full_path()), JSON.as_bytes());
+            assert_eq!(
+                result.status_code,
+                Some(0),
+                "[{label}] stderr: {}",
+                result.stderr
+            );
+            assert_eq!(
+                result.herdr_call_count(),
+                1,
+                "[{label}] expected exactly one report; log: {}",
+                result.herdr_log
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_confirms_heartbeat_derived_from_ttl() {
+        // Just inside the window (short-circuit) vs just outside (report),
+        // pinning HEARTBEAT_SECS == TTL_MS/1000/3 against the script's own math.
+        let now = now_secs();
+
+        // Bracket the actual 300s boundary tightly enough to uniquely pin the
+        // /3 divisor: ±30s gives 270..330, which excludes the neighbouring
+        // candidate windows (TTL/2 = 450, TTL/4 = 225) so a wrong divisor is
+        // caught. 30s is still far larger than the sub-second `date +%s` reread
+        // skew, so it does not flake under load.
+        const MARGIN: u64 = 30;
+        let inside = Fixture::new();
+        inside.seed_state(MODEL, &(now - (HEARTBEAT_SECS - MARGIN)).to_string());
+        let r_inside = inside.run(inside.base_command(&inside.full_path()), JSON.as_bytes());
+        assert_eq!(
+            r_inside.herdr_call_count(),
+            0,
+            "just inside the heartbeat window must short-circuit"
+        );
+
+        let outside = Fixture::new();
+        outside.seed_state(MODEL, &(now - (HEARTBEAT_SECS + MARGIN)).to_string());
+        let r_outside = outside.run(outside.base_command(&outside.full_path()), JSON.as_bytes());
+        assert_eq!(
+            r_outside.herdr_call_count(),
+            1,
+            "just outside the heartbeat window must report"
+        );
+    }
+
+    #[test]
+    fn timestamp_advances_only_on_confirmed_report() {
+        let now = now_secs();
+        let stale_epoch = (now - HEARTBEAT_SECS - 5).to_string();
+
+        // Stub herdr exits nonzero: report attempted, epoch must NOT advance.
+        let fail = Fixture::new();
+        fail.seed_state(MODEL, &stale_epoch);
+        let before = fail.state_contents();
+        let mut cmd = fail.base_command(&fail.full_path());
+        cmd.env("STUB_HERDR_EXIT", "1").env(
+            "HERDR_STATUSLINE_CHAIN",
+            fail.chain_cmd.display().to_string(),
+        );
+        let r_fail = fail.run(cmd, JSON.as_bytes());
+        assert_eq!(
+            r_fail.status_code,
+            Some(0),
+            "wrapper must swallow report failure"
+        );
+        assert_eq!(r_fail.herdr_call_count(), 1, "report should be attempted");
+        assert_eq!(
+            r_fail.stdout, "CHAINED_OUTPUT\n",
+            "chaining unaffected by failure"
+        );
+        assert_eq!(
+            fail.state_contents(),
+            before,
+            "epoch must not advance on a failed report"
+        );
+
+        // Stub herdr exits zero: epoch advances to ~now, model recorded.
+        let ok = Fixture::new();
+        ok.seed_state(MODEL, &stale_epoch);
+        let r_ok = ok.run(ok.base_command(&ok.full_path()), JSON.as_bytes());
+        assert_eq!(r_ok.herdr_call_count(), 1);
+        let contents = ok.state_contents().expect("state file after success");
+        let (recorded_model, recorded_epoch) = contents
+            .trim_end()
+            .split_once('\t')
+            .expect("tab-separated state");
+        assert_eq!(recorded_model, MODEL);
+        let recorded_epoch: u64 = recorded_epoch.parse().expect("integer epoch");
+        assert!(
+            recorded_epoch >= now && recorded_epoch <= now_secs() + 2,
+            "epoch {recorded_epoch} should advance to ~now ({now})"
+        );
+    }
+
+    #[test]
+    fn python3_absent_skips_report_and_still_chains() {
+        let fx = Fixture::new();
+        let restricted = fx.restricted_path_without_python3();
+        let mut cmd = fx.base_command(&restricted);
+        // Invoke the chain by a name resolvable on the restricted PATH (the
+        // `chain` symlink), since the wrapper runs it via `sh -c`.
+        cmd.env("HERDR_STATUSLINE_CHAIN", "chain");
+        let result = fx.run(cmd, JSON.as_bytes());
+
+        assert_eq!(result.status_code, Some(0), "stderr: {}", result.stderr);
+        assert_eq!(
+            result.herdr_call_count(),
+            0,
+            "no model without python3, so no report; log: {}",
+            result.herdr_log
+        );
+        assert_eq!(
+            fx.chain_input(),
+            JSON,
+            "chain must receive byte-identical JSON"
+        );
+        assert_eq!(result.stdout, "CHAINED_OUTPUT\n");
+    }
+
+    #[test]
+    fn no_chain_prints_model_when_known_and_nothing_when_unknown() {
+        let known = Fixture::new();
+        let result = known.run(known.base_command(&known.full_path()), JSON.as_bytes());
+        assert_eq!(result.status_code, Some(0));
+        assert_eq!(result.stdout, format!("{MODEL}\n"));
+
+        let unknown = Fixture::new();
+        let result = unknown.run(unknown.base_command(&unknown.full_path()), b"{}");
+        assert_eq!(result.status_code, Some(0));
+        assert_eq!(
+            result.stdout, "",
+            "unknown model with no chain prints nothing"
+        );
+    }
+
+    /// Current uid, matching the wrapper's `id -u`. The /tmp fallback dir is
+    /// uid-qualified (`herdr-statusline-<uid>`), so tests targeting that path
+    /// must build the same name.
+    fn current_uid() -> String {
+        let out = Command::new("id").arg("-u").output().expect("run id -u");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn tmp_fallback_symlinked_state_dir_skips_report_but_still_chains() {
+        let fx = Fixture::new();
+        // Force the /tmp fallback by unsetting XDG_RUNTIME_DIR and pointing
+        // TMPDIR at a dir whose uid-qualified state entry is a symlink.
+        let tmpdir = fx.base.join("tmpfb");
+        let real = tmpdir.join("real");
+        fs::create_dir_all(&real).expect("create real dir");
+        let dir_name = format!("herdr-statusline-{}", current_uid());
+        symlink(&real, tmpdir.join(&dir_name)).expect("create symlink dir");
+
+        let mut cmd = fx.base_command(&fx.full_path());
+        cmd.env_remove("XDG_RUNTIME_DIR")
+            .env("TMPDIR", &tmpdir)
+            .env("HERDR_STATUSLINE_CHAIN", fx.chain_cmd.display().to_string());
+        let result = fx.run(cmd, JSON.as_bytes());
+
+        assert_eq!(result.status_code, Some(0), "stderr: {}", result.stderr);
+        assert_eq!(
+            result.herdr_call_count(),
+            0,
+            "a symlinked /tmp state dir must skip reporting; log: {}",
+            result.herdr_log
+        );
+        assert_eq!(result.stdout, "CHAINED_OUTPUT\n", "chaining still runs");
+    }
+
+    #[test]
+    fn tmp_fallback_clean_uid_dir_reports() {
+        // A clean, uid-owned /tmp fallback dir (no XDG_RUNTIME_DIR) must report
+        // and create the uid-qualified state dir.
+        let fx = Fixture::new();
+        let tmpdir = fx.base.join("tmpfb");
+        fs::create_dir_all(&tmpdir).expect("create tmpdir");
+
+        let mut cmd = fx.base_command(&fx.full_path());
+        cmd.env_remove("XDG_RUNTIME_DIR").env("TMPDIR", &tmpdir);
+        let result = fx.run(cmd, JSON.as_bytes());
+
+        assert_eq!(result.status_code, Some(0), "stderr: {}", result.stderr);
+        assert_eq!(
+            result.herdr_call_count(),
+            1,
+            "a clean uid-owned /tmp fallback must report; log: {}",
+            result.herdr_log
+        );
+        let dir = tmpdir.join(format!("herdr-statusline-{}", current_uid()));
+        assert!(dir.is_dir(), "uid-qualified state dir must be created");
+    }
+
+    #[test]
+    fn prior_generation_state_is_ignored_and_reported_fresh() {
+        // FR9a's core safety property: pane ids are reused across server
+        // restarts, so a fresh-looking entry under a DIFFERENT server generation
+        // must never satisfy the current generation. Seed a matching model with
+        // a fresh epoch under a bogus generation key; the current-generation
+        // file is absent, so the wrapper must still report.
+        let fx = Fixture::new();
+        fx.write_sibling(
+            &format!("999999-{PANE_ID}"),
+            &format!("{MODEL}\t{}\n", now_secs()),
+        );
+        let result = fx.run(fx.base_command(&fx.full_path()), JSON.as_bytes());
+        assert_eq!(result.status_code, Some(0), "stderr: {}", result.stderr);
+        assert_eq!(
+            result.herdr_call_count(),
+            1,
+            "a fresh entry under a prior generation must not short-circuit; log: {}",
+            result.herdr_log
+        );
+    }
+
+    #[test]
+    fn cleanup_sweep_drops_aged_files_only_on_report_runs() {
+        // On a report-sending run, a >24h sibling is swept while a fresh one
+        // survives.
+        let reporting = Fixture::new();
+        let aged = reporting.write_sibling("77-oldpane", "Old\t123\n");
+        let fresh = reporting.write_sibling("77-newpane", "New\t123\n");
+        Fixture::backdate_days(&aged, 2);
+        // No current-generation state -> this invocation reports (report run).
+        let r = reporting.run(
+            reporting.base_command(&reporting.full_path()),
+            JSON.as_bytes(),
+        );
+        assert_eq!(r.herdr_call_count(), 1, "expected a report run");
+        assert!(
+            !aged.exists(),
+            "a >24h state file must be swept on a report run"
+        );
+        assert!(fresh.exists(), "a fresh state file must survive the sweep");
+
+        // On a short-circuit run (fresh matching state), the sweep must NOT run:
+        // an aged sibling survives because the hot path never reaches cleanup.
+        let quiet = Fixture::new();
+        quiet.seed_state(MODEL, &now_secs().to_string());
+        let aged2 = quiet.write_sibling("77-oldpane", "Old\t123\n");
+        Fixture::backdate_days(&aged2, 2);
+        let rq = quiet.run(quiet.base_command(&quiet.full_path()), JSON.as_bytes());
+        assert_eq!(rq.herdr_call_count(), 0, "expected a short-circuit run");
+        assert!(
+            aged2.exists(),
+            "the cleanup sweep must not run on the short-circuit hot path"
+        );
+    }
+
+    #[test]
+    fn debug_output_goes_to_stderr_only() {
+        let fx = Fixture::new();
+        fx.seed_state(MODEL, &now_secs().to_string()); // fresh -> short-circuit path logs
+        let mut cmd = fx.base_command(&fx.full_path());
+        cmd.env("HERDR_STATUSLINE_DEBUG", "1")
+            .env("HERDR_STATUSLINE_CHAIN", fx.chain_cmd.display().to_string());
+        let result = fx.run(cmd, JSON.as_bytes());
+
+        assert_eq!(
+            result.stdout, "CHAINED_OUTPUT\n",
+            "debug must never touch stdout"
+        );
+        assert!(
+            result.stderr.contains("herdr-statusline:"),
+            "debug should log to stderr when enabled; stderr: {}",
+            result.stderr
+        );
+
+        // Default (no debug flag): stderr carries no wrapper debug lines.
+        let quiet = Fixture::new();
+        quiet.seed_state(MODEL, &now_secs().to_string());
+        let mut qcmd = quiet.base_command(&quiet.full_path());
+        qcmd.env(
+            "HERDR_STATUSLINE_CHAIN",
+            quiet.chain_cmd.display().to_string(),
+        );
+        let qresult = quiet.run(qcmd, JSON.as_bytes());
+        assert!(
+            !qresult.stderr.contains("herdr-statusline:"),
+            "debug must be silent by default; stderr: {}",
+            qresult.stderr
+        );
+    }
+}
