@@ -169,7 +169,6 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # move_tab_right = "alt+o"
 # new_tab = "alt+t"
 # rename_tab = "alt+r"
-# toggle_floating = "alt+w"
 
 # Per-mode bare keys. Each mode has an independent keyspace, so the same bare
 # key may appear in more than one mode. See the docs for the full action lists

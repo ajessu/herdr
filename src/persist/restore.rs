@@ -703,7 +703,6 @@ fn restore_tab(
                 number,
                 root_pane,
                 layout,
-                floating: crate::workspace::FloatingLayer::new(),
                 panes,
                 #[cfg(test)]
                 runtimes: HashMap::new(),

@@ -1013,9 +1013,6 @@ pub(crate) fn pane_mode_action(state: &AppState, key: TerminalKey) -> ModeAction
     if mode_binding_matches(&b.zoom, key) {
         return ModeAction::Navigate(NavigateAction::Zoom);
     }
-    if mode_binding_matches(&b.toggle_float, key) {
-        return ModeAction::Navigate(NavigateAction::ToggleFloating);
-    }
     if mode_binding_matches(&b.rename, key) {
         return ModeAction::Navigate(NavigateAction::RenamePane);
     }
@@ -2309,7 +2306,6 @@ mod tests {
                                 | NavigateAction::StackPane
                                 | NavigateAction::ClosePane
                                 | NavigateAction::Zoom
-                                | NavigateAction::ToggleFloating
                                 | NavigateAction::RenamePane
                                 | NavigateAction::CyclePaneNext
                         ),

@@ -6,7 +6,6 @@ use ratatui::style::Color;
 use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
-use crate::workspace::floating::{BorderEdge, FloatingGeom};
 
 pub(crate) type InstalledPluginRegistry =
     std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
@@ -745,7 +744,6 @@ pub struct ViewState {
     pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
-    pub floating_pane_infos: Vec<FloatingPaneInfo>,
     /// Attention-aware overflow badge rects for the sidebar surfaces (FR8).
     /// Computed compute-side; hit-tested by the mouse layer.
     pub sidebar_overflow: SidebarOverflowRects,
@@ -765,16 +763,6 @@ pub struct SidebarOverflowRects {
     pub expanded_ws_below: crate::ui::OverflowBadgeRect,
     pub expanded_agents_above: crate::ui::OverflowBadgeRect,
     pub expanded_agents_below: crate::ui::OverflowBadgeRect,
-}
-
-#[derive(Debug, Clone)]
-pub struct FloatingPaneInfo {
-    pub pane_id: PaneId,
-    pub rect: Rect,
-    pub inner_rect: Rect,
-    pub is_focused: bool,
-    #[allow(dead_code)] // populated for floating-pane rendering; not yet read
-    pub z_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1085,17 +1073,6 @@ pub(crate) enum DragTarget {
     },
     SidebarDivider,
     SidebarSectionDivider,
-    FloatingPaneMove {
-        pane_id: crate::layout::PaneId,
-        offset_x: u16,
-        offset_y: u16,
-        original_geom: FloatingGeom,
-    },
-    FloatingPaneResize {
-        pane_id: crate::layout::PaneId,
-        edge: BorderEdge,
-        original_geom: FloatingGeom,
-    },
 }
 
 /// Active mouse drag, identified by what is being dragged (see [`DragTarget`]).
@@ -1797,7 +1774,6 @@ impl AppState {
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
-                floating_pane_infos: Vec::new(),
                 sidebar_overflow: SidebarOverflowRects::default(),
             },
             drag: None,

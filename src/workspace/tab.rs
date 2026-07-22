@@ -11,8 +11,6 @@ use crate::layout::{Node, PaneId, TileLayout};
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
-use super::floating::{FloatingLayer, FocusTarget, PaneLayer};
-
 pub(crate) type DetachedPane = (PaneId, TerminalId);
 
 pub(crate) struct MovedPane {
@@ -43,7 +41,6 @@ pub struct Tab {
     /// Identity source for this tab's pane tree.
     pub root_pane: PaneId,
     pub layout: TileLayout,
-    pub floating: FloatingLayer,
     /// Pane viewport state — always present, testable without PTYs.
     pub panes: HashMap<PaneId, PaneState>,
     #[cfg(test)]
@@ -175,7 +172,6 @@ impl Tab {
                 number,
                 root_pane: root_id,
                 layout,
-                floating: FloatingLayer::new(),
                 panes,
                 #[cfg(test)]
                 runtimes: HashMap::new(),
@@ -420,59 +416,16 @@ impl Tab {
         })
     }
 
-    pub fn focused_target(&self) -> FocusTarget {
-        if self.floating.is_focused() {
-            if let Some(id) = self.floating.focused_pane_id() {
-                return FocusTarget::Floating(id);
-            }
-        }
-        FocusTarget::Tiled(self.layout.focused())
-    }
-
     pub fn focused_pane_id(&self) -> PaneId {
-        self.focused_target().pane_id()
+        self.layout.focused()
     }
 
     pub fn all_pane_ids(&self) -> Vec<PaneId> {
-        let mut ids = self.layout.pane_ids();
-        ids.extend(self.floating.pane_ids());
-        ids
+        self.layout.pane_ids()
     }
 
     pub fn total_pane_count(&self) -> usize {
-        self.layout.pane_count() + self.floating.count()
-    }
-
-    pub fn pane_layer(&self, pane_id: PaneId) -> Option<PaneLayer> {
-        if self.floating.contains(pane_id) {
-            Some(PaneLayer::Floating)
-        } else if self.panes.contains_key(&pane_id) {
-            Some(PaneLayer::Tiled)
-        } else {
-            None
-        }
-    }
-
-    /// Detach a floating pane from both the floating layer and the pane map,
-    /// hiding the layer once the last floating pane is gone. Shared by the
-    /// teardown (`remove_floating_pane`) and move (`take_floating_pane_for_move`)
-    /// paths; returns the pane's owned state.
-    fn detach_floating_pane(&mut self, pane_id: PaneId) -> Option<PaneState> {
-        let fp = self.floating.remove_pane(pane_id)?;
-        let pane = self.panes.remove(&fp.pane_id)?;
-        if self.floating.is_empty() {
-            self.floating.hide();
-        }
-        Some(pane)
-    }
-
-    pub fn remove_floating_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
-        let pane = self.detach_floating_pane(pane_id)?;
-        Some((pane_id, pane.attached_terminal_id))
-    }
-
-    pub(crate) fn take_floating_pane_for_move(&mut self, pane_id: PaneId) -> Option<PaneState> {
-        self.detach_floating_pane(pane_id)
+        self.layout.pane_count()
     }
 
     pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
@@ -495,7 +448,6 @@ impl Tab {
             number,
             root_pane: pane_id,
             layout: TileLayout::from_saved(Node::Pane(pane_id), pane_id),
-            floating: FloatingLayer::new(),
             panes,
             #[cfg(test)]
             runtimes: HashMap::new(),
@@ -541,13 +493,6 @@ impl Tab {
         direction: Direction,
         ratio: f32,
     ) -> Result<PaneId, MovedPane> {
-        // A moved pane lands in the tiled layout; it must not already live in the
-        // floating layer, or the same PaneId would exist in both (XOR violation).
-        debug_assert!(
-            !self.floating.contains(moved.pane_id),
-            "inserting pane {:?} into the tiled layout while it is still floating",
-            moved.pane_id
-        );
         if !self
             .layout
             .insert_pane_near(target_pane_id, moved.pane_id, direction, ratio)

@@ -521,7 +521,6 @@ impl App {
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
-                floating_pane_infos: Vec::new(),
                 sidebar_overflow: state::SidebarOverflowRects::default(),
             },
             drag: None,

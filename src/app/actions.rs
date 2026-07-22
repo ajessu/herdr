@@ -315,20 +315,10 @@ impl AppState {
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
         {
-            match tab.pane_layer(pane_id) {
-                Some(crate::workspace::PaneLayer::Floating) => {
-                    tab.floating.show();
-                    tab.floating.focus_pane(pane_id);
-                    tab.floating.bring_to_front(pane_id);
-                }
-                Some(crate::workspace::PaneLayer::Tiled) => {
-                    tab.layout.focus_pane(pane_id);
-                    tab.floating.unfocus();
-                }
-                None => {
-                    return false;
-                }
+            if !tab.panes.contains_key(&pane_id) {
+                return false;
             }
+            tab.layout.focus_pane(pane_id);
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
             return true;
@@ -1668,9 +1658,6 @@ impl AppState {
         let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
             return;
         };
-        if tab.focused_target().is_floating() {
-            return;
-        }
         let panes = if tab.zoomed {
             tab.layout.panes(self.view.terminal_area)
         } else {
@@ -1691,9 +1678,6 @@ impl AppState {
         let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
             return;
         };
-        if tab.focused_target().is_floating() {
-            return;
-        }
         let panes = if tab.zoomed {
             tab.layout.panes(self.view.terminal_area)
         } else {
@@ -1727,9 +1711,6 @@ impl AppState {
         let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
             return false;
         };
-        if tab.focused_target().is_floating() {
-            return false;
-        }
         let panes = if tab.zoomed {
             tab.layout.panes(self.view.terminal_area)
         } else {
@@ -1759,15 +1740,6 @@ impl AppState {
     }
 
     pub fn resize_pane(&mut self, direction: NavDirection) -> bool {
-        if let Some(tab) = self
-            .active
-            .and_then(|i| self.workspaces.get(i))
-            .and_then(|ws| ws.active_tab())
-        {
-            if tab.focused_target().is_floating() {
-                return false;
-            }
-        }
         let Some(first) = self.view.pane_infos.first() else {
             return false;
         };
@@ -1892,28 +1864,12 @@ impl AppState {
         let Some(ws_idx) = self.active else {
             return;
         };
-        let (is_floating, ids, focused) = {
+        let (ids, focused) = {
             let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
                 return;
             };
-            (
-                tab.focused_target().is_floating(),
-                tab.layout.pane_ids(),
-                tab.layout.focused(),
-            )
+            (tab.layout.pane_ids(), tab.layout.focused())
         };
-        if is_floating {
-            let Some(tab) = self
-                .workspaces
-                .get_mut(ws_idx)
-                .and_then(|ws| ws.active_tab_mut())
-            else {
-                return;
-            };
-            tab.floating.cycle_focus(reverse);
-            self.mark_session_dirty();
-            return;
-        }
         if let Some(pos) = ids.iter().position(|id| *id == focused) {
             let target = if reverse {
                 ids[(pos + ids.len() - 1) % ids.len()]
@@ -2000,11 +1956,6 @@ impl AppState {
         let Some(ws_idx) = self.active else {
             return;
         };
-        if let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) {
-            if tab.focused_target().is_floating() {
-                return;
-            }
-        }
         let Some(pane_id) = self
             .workspaces
             .get(ws_idx)
@@ -4126,25 +4077,6 @@ mod tests {
         state.last_pane();
 
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(right));
-    }
-
-    #[test]
-    fn close_pane_would_close_workspace_accounts_for_floating_panes() {
-        // Exercises the real AppState::close_pane_would_close_workspace (the line
-        // this commit switched from layout.pane_count() to total_pane_count()).
-        // A lone tiled root plus a floating pane must NOT be treated as a
-        // single-pane workspace; once the floating pane is gone, closing the root
-        // would close the workspace.
-        let mut state = app_with_workspaces(&["test"]);
-        let root = state.workspaces[0].tabs[0].root_pane;
-        let float_id = state.workspaces[0].test_add_floating_pane();
-        state.ensure_test_terminals();
-
-        assert!(!state.close_pane_would_close_workspace(0, root));
-        assert!(!state.close_pane_would_close_workspace(0, float_id));
-
-        assert!(!state.workspaces[0].remove_pane(float_id));
-        assert!(state.close_pane_would_close_workspace(0, root));
     }
 
     #[test]

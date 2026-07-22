@@ -298,7 +298,6 @@ pub struct PaneModeBindings {
     pub stack: ModeBinding,
     pub close: ModeBinding,
     pub zoom: ModeBinding,
-    pub toggle_float: ModeBinding,
     pub rename: ModeBinding,
     pub cycle: ModeBinding,
 }
@@ -316,7 +315,6 @@ impl PaneModeBindings {
             stack: resolve_binding_config(&c.stack),
             close: resolve_binding_config(&c.close),
             zoom: resolve_binding_config(&c.zoom),
-            toggle_float: resolve_binding_config(&c.toggle_float),
             rename: resolve_binding_config(&c.rename),
             cycle: resolve_binding_config(&c.cycle),
         }
@@ -541,17 +539,6 @@ pub struct Keybinds {
     pub resize_shrink: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
-    pub toggle_floating: ActionKeybinds,
-    pub new_floating_pane: ActionKeybinds,
-    pub close_floating_pane: ActionKeybinds,
-    pub move_floating_left: ActionKeybinds,
-    pub move_floating_down: ActionKeybinds,
-    pub move_floating_up: ActionKeybinds,
-    pub move_floating_right: ActionKeybinds,
-    pub resize_floating_grow: ActionKeybinds,
-    pub resize_floating_shrink: ActionKeybinds,
-    pub cycle_floating_next: ActionKeybinds,
-    pub cycle_floating_previous: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
     /// Base interaction mode from `keys.default_mode`.
     pub default_mode: DefaultMode,
@@ -696,17 +683,6 @@ struct ReleasedKeys {
     resize_shrink: BindingConfig,
     resize_mode: BindingConfig,
     toggle_sidebar: BindingConfig,
-    toggle_floating: BindingConfig,
-    new_floating_pane: BindingConfig,
-    close_floating_pane: BindingConfig,
-    move_floating_left: BindingConfig,
-    move_floating_down: BindingConfig,
-    move_floating_up: BindingConfig,
-    move_floating_right: BindingConfig,
-    resize_floating_grow: BindingConfig,
-    resize_floating_shrink: BindingConfig,
-    cycle_floating_next: BindingConfig,
-    cycle_floating_previous: BindingConfig,
 }
 
 impl Default for ReleasedKeys {
@@ -771,17 +747,6 @@ impl Default for ReleasedKeys {
             resize_shrink: BindingConfig::one("alt+-"),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
-            toggle_floating: BindingConfig::Many(vec!["prefix+f".into(), "alt+w".into()]),
-            new_floating_pane: BindingConfig::one("prefix+shift+f"),
-            close_floating_pane: BindingConfig::empty(),
-            move_floating_left: BindingConfig::empty(),
-            move_floating_down: BindingConfig::empty(),
-            move_floating_up: BindingConfig::empty(),
-            move_floating_right: BindingConfig::empty(),
-            resize_floating_grow: BindingConfig::empty(),
-            resize_floating_shrink: BindingConfig::empty(),
-            cycle_floating_next: BindingConfig::empty(),
-            cycle_floating_previous: BindingConfig::empty(),
         }
     }
 }
@@ -914,26 +879,6 @@ impl Config {
             resize_shrink: action!("keys.resize_shrink", &released.resize_shrink),
             resize_mode: action!("keys.resize_mode", &released.resize_mode),
             toggle_sidebar: action!("keys.toggle_sidebar", &released.toggle_sidebar),
-            toggle_floating: action!("keys.toggle_floating", &released.toggle_floating),
-            new_floating_pane: action!("keys.new_floating_pane", &released.new_floating_pane),
-            close_floating_pane: action!("keys.close_floating_pane", &released.close_floating_pane),
-            move_floating_left: action!("keys.move_floating_left", &released.move_floating_left),
-            move_floating_down: action!("keys.move_floating_down", &released.move_floating_down),
-            move_floating_up: action!("keys.move_floating_up", &released.move_floating_up),
-            move_floating_right: action!("keys.move_floating_right", &released.move_floating_right),
-            resize_floating_grow: action!(
-                "keys.resize_floating_grow",
-                &released.resize_floating_grow
-            ),
-            resize_floating_shrink: action!(
-                "keys.resize_floating_shrink",
-                &released.resize_floating_shrink
-            ),
-            cycle_floating_next: action!("keys.cycle_floating_next", &released.cycle_floating_next),
-            cycle_floating_previous: action!(
-                "keys.cycle_floating_previous",
-                &released.cycle_floating_previous
-            ),
             custom_commands: Vec::new(),
             default_mode: DefaultMode::default(),
             mode_entry: ModeEntryKeys::default(),
@@ -1347,7 +1292,6 @@ fn shared_fields(c: &super::model::SharedKeysConfig) -> Vec<(&'static str, &Bind
         ("keys.shared.move_tab_right", &c.move_tab_right),
         ("keys.shared.new_tab", &c.new_tab),
         ("keys.shared.rename_tab", &c.rename_tab),
-        ("keys.shared.toggle_floating", &c.toggle_floating),
     ]
 }
 
@@ -1363,7 +1307,6 @@ fn pane_mode_fields(c: &super::model::PaneModeKeysConfig) -> Vec<(&'static str, 
         ("keys.pane.stack", &c.stack),
         ("keys.pane.close", &c.close),
         ("keys.pane.zoom", &c.zoom),
-        ("keys.pane.toggle_float", &c.toggle_float),
         ("keys.pane.rename", &c.rename),
         ("keys.pane.cycle", &c.cycle),
     ]
@@ -1475,8 +1418,6 @@ fn tmux_mode_fields(c: &super::model::TmuxModeKeysConfig) -> Vec<(&'static str, 
         ("keys.tmux.zoom", &c.zoom),
         ("keys.tmux.resize_mode", &c.resize_mode),
         ("keys.tmux.toggle_sidebar", &c.toggle_sidebar),
-        ("keys.tmux.toggle_floating", &c.toggle_floating),
-        ("keys.tmux.new_floating_pane", &c.new_floating_pane),
     ]
 }
 

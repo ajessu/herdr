@@ -218,17 +218,6 @@ const LEGACY_KEYS_FIELDS: &[&str] = &[
     "resize_shrink",
     "resize_mode",
     "toggle_sidebar",
-    "toggle_floating",
-    "new_floating_pane",
-    "close_floating_pane",
-    "move_floating_left",
-    "move_floating_down",
-    "move_floating_up",
-    "move_floating_right",
-    "resize_floating_grow",
-    "resize_floating_shrink",
-    "cycle_floating_next",
-    "cycle_floating_previous",
 ];
 
 fn legacy_keys_diagnostics_from_str(content: &str) -> Vec<String> {

@@ -369,7 +369,6 @@ pub struct SharedKeysConfig {
     pub move_tab_right: BindingConfig,
     pub new_tab: BindingConfig,
     pub rename_tab: BindingConfig,
-    pub toggle_floating: BindingConfig,
 }
 
 /// Pane mode (`[keys.pane]`) bare-key bindings.
@@ -386,7 +385,6 @@ pub struct PaneModeKeysConfig {
     pub stack: BindingConfig,
     pub close: BindingConfig,
     pub zoom: BindingConfig,
-    pub toggle_float: BindingConfig,
     pub rename: BindingConfig,
     pub cycle: BindingConfig,
 }
@@ -500,8 +498,6 @@ pub struct TmuxModeKeysConfig {
     pub zoom: BindingConfig,
     pub resize_mode: BindingConfig,
     pub toggle_sidebar: BindingConfig,
-    pub toggle_floating: BindingConfig,
-    pub new_floating_pane: BindingConfig,
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -728,7 +724,6 @@ impl Default for SharedKeysConfig {
             move_tab_right: BindingConfig::one("alt+o"),
             new_tab: BindingConfig::one("alt+t"),
             rename_tab: BindingConfig::one("alt+r"),
-            toggle_floating: BindingConfig::one("alt+w"),
         }
     }
 }
@@ -746,7 +741,6 @@ impl Default for PaneModeKeysConfig {
             stack: BindingConfig::one("s"),
             close: BindingConfig::one("x"),
             zoom: BindingConfig::Many(vec!["f".into(), "z".into()]),
-            toggle_float: BindingConfig::one("w"),
             rename: BindingConfig::one("c"),
             cycle: BindingConfig::one("p"),
         }
@@ -863,8 +857,6 @@ impl Default for TmuxModeKeysConfig {
             zoom: BindingConfig::one("z"),
             resize_mode: BindingConfig::one("r"),
             toggle_sidebar: BindingConfig::one("b"),
-            toggle_floating: BindingConfig::one("f"),
-            new_floating_pane: BindingConfig::one("shift+f"),
         }
     }
 }
