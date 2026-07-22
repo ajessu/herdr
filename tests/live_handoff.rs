@@ -361,7 +361,11 @@ fn server_ptmx_fd_count(pid: u32) -> usize {
     entries
         .filter_map(Result::ok)
         .filter_map(|entry| fs::read_link(entry.path()).ok())
-        .filter(|target| target == Path::new("/dev/ptmx"))
+        // In containers /dev/ptmx is a symlink into devpts, so the fd link
+        // resolves to /dev/pts/ptmx instead of /dev/ptmx.
+        .filter(|target| {
+            target == Path::new("/dev/ptmx") || target == Path::new("/dev/pts/ptmx")
+        })
         .count()
 }
 

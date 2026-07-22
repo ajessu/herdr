@@ -1577,17 +1577,13 @@ mod tests {
 
     #[test]
     fn keybind_help_compacts_multiple_indexed_ranges() {
-        let config: crate::config::Config = toml::from_str(
-            r#"
-[keys]
-switch_tab = ["prefix+1..9", "alt+1..9"]
-switch_workspace = "ctrl+1..9"
-"#,
-        )
-        .expect("config parses");
-
+        // The modal `[keys]` schema has no flat switch_tab/switch_workspace
+        // fields; build the indexed ranges directly.
         let mut app = crate::app::state::AppState::test_new();
-        app.keybinds = config.keybinds();
+        let mut switch_tab = crate::config::IndexedKeybind::test_bindings("prefix+1..9");
+        switch_tab.extend(crate::config::IndexedKeybind::test_bindings("alt+1..9"));
+        app.keybinds.switch_tab = switch_tab;
+        app.keybinds.switch_workspace = crate::config::IndexedKeybind::test_bindings("ctrl+1..9");
 
         let workspace_tab = keybind_help_groups(&app)
             .into_iter()

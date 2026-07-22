@@ -543,7 +543,7 @@ impl App {
             {
                 if let (Some(ws_idx), Some(info)) = (
                     self.state.active,
-                    self.state.pane_at(mouse.column, mouse.row).cloned(),
+                    self.state.pane_at(mouse.column, mouse.row),
                 ) {
                     self.focus_pane_internal_via_api(ws_idx, info.id);
                 }

@@ -1831,8 +1831,71 @@
                 "second"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "expanded": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "panes": {
+                  "items": {
+                    "$ref": "#/schemas/request/$defs/LayoutPane"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "stack",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "panes",
+                "expanded"
+              ],
+              "type": "object"
             }
           ]
+        },
+        "LayoutPane": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
         },
         "LayoutSetSplitRatioParams": {
           "properties": {
@@ -6320,8 +6383,71 @@
                 "second"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "expanded": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "panes": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LayoutPane"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "stack",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "panes",
+                "expanded"
+              ],
+              "type": "object"
             }
           ]
+        },
+        "LayoutPane": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
         },
         "NotificationShowReason": {
           "enum": [

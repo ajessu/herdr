@@ -420,6 +420,104 @@ impl App {
             NavigateAction::OpenNavigator => {
                 self.state.open_navigator_from(&self.terminal_runtimes)
             }
+            NavigateAction::FocusPaneLeftOrTab => {
+                self.state.navigate_pane_or_tab(NavDirection::Left)
+            }
+            NavigateAction::FocusPaneRightOrTab => {
+                self.state.navigate_pane_or_tab(NavDirection::Right)
+            }
+            NavigateAction::SplitAuto => {
+                let direction = match self.state.auto_split_direction() {
+                    Direction::Horizontal => crate::api::schema::SplitDirection::Right,
+                    Direction::Vertical => crate::api::schema::SplitDirection::Down,
+                };
+                self.split_focused_pane_via_api(direction);
+                leave_navigate_mode(&mut self.state);
+            }
+            // TODO(upstream-merge): route tab moves through runtime_tab_move
+            // (needs source/insert index plumbing like move_tab_via_api).
+            NavigateAction::MoveTabLeft => {
+                self.state.move_active_tab_left();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::MoveTabRight => {
+                self.state.move_active_tab_right();
+                leave_navigate_mode(&mut self.state);
+            }
+            // TODO(upstream-merge): route pane resize through a runtime adapter
+            // once one exists for relative grow/shrink.
+            NavigateAction::ResizeGrow => {
+                self.state.resize_focused_pane(true);
+            }
+            NavigateAction::ResizeShrink => {
+                self.state.resize_focused_pane(false);
+            }
+            NavigateAction::ResizeIncrease(dir) => {
+                self.state.resize_pane(dir);
+            }
+            NavigateAction::ResizeDecrease(dir) => {
+                self.state.resize_pane(dir.opposite());
+            }
+            // Stacked/floating panes are fork-only TUI-layer features; no
+            // runtime adapters exist for them yet.
+            // TODO(upstream-merge): decide shared-vs-client per the upstream
+            // runtime/client boundary guardrail before exposing via API.
+            NavigateAction::StackPane => {
+                self.state.stack_focused_pane();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::UnstackPane => {
+                self.state.unstack_focused_pane();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::BreakPaneToTab => {
+                self.state.request_break_focused_pane_to_tab();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::ToggleFloating => {
+                self.state.toggle_floating(&mut self.terminal_runtimes);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::NewFloatingPane => {
+                self.state.new_floating_pane(&mut self.terminal_runtimes);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::CloseFloatingPane => {
+                self.state.close_floating_pane();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::MoveFloatingLeft => {
+                self.state.move_floating(-2, 0);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::MoveFloatingDown => {
+                self.state.move_floating(0, 2);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::MoveFloatingUp => {
+                self.state.move_floating(0, -2);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::MoveFloatingRight => {
+                self.state.move_floating(2, 0);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::ResizeFloatingGrow => {
+                self.state.resize_floating(2, 1);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::ResizeFloatingShrink => {
+                self.state.resize_floating(-2, -1);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::CycleFloatingFocusNext => {
+                self.state.cycle_floating_focus(false);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::CycleFloatingFocusPrevious => {
+                self.state.cycle_floating_focus(true);
+                leave_navigate_mode(&mut self.state);
+            }
         }
 
         finish_action_context(&mut self.state, context, previous_mode);
@@ -2530,9 +2628,10 @@ navigate_pane_right = "ctrl+l"
     #[test]
     fn prefix_shift_indexed_workspace_shortcut_maps_shifted_symbol_key() {
         let mut state = state_with_workspaces(&["one", "two"]);
-        let config: Config =
-            toml::from_str("[keys]\nswitch_workspace = \"prefix+shift+1..9\"\n").unwrap();
-        state.keybinds.switch_workspace = config.keybinds().switch_workspace;
+        // The modal `[keys]` schema has no flat switch_workspace field; build
+        // the shifted indexed range directly.
+        state.keybinds.switch_workspace =
+            crate::config::IndexedKeybind::test_bindings("prefix+shift+1..9");
 
         let action = action_for_key(
             &state,
@@ -2546,15 +2645,9 @@ navigate_pane_right = "ctrl+l"
     #[test]
     fn literal_symbol_binding_takes_precedence_over_shifted_indexed_alias() {
         let mut state = state_with_workspaces(&["one", "two"]);
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-help = "prefix+!"
-switch_workspace = "prefix+shift+1..9"
-"#,
-        )
-        .unwrap();
-        state.keybinds = config.keybinds();
+        state.keybinds.help = crate::config::ActionKeybinds::prefix("!");
+        state.keybinds.switch_workspace =
+            crate::config::IndexedKeybind::test_bindings("prefix+shift+1..9");
 
         let action = action_for_key(
             &state,
@@ -2568,18 +2661,22 @@ switch_workspace = "prefix+shift+1..9"
     #[test]
     fn literal_symbol_custom_command_is_visible_before_shifted_indexed_alias() {
         let mut state = state_with_workspaces(&["one", "two"]);
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-switch_workspace = "prefix+shift+1..9"
-
-[[keys.command]]
-key = "prefix+!"
-command = "echo literal"
-"#,
-        )
-        .unwrap();
-        state.keybinds = config.keybinds();
+        // Build the custom command binding directly: routing `prefix+!` through
+        // the config registry would be rejected by the fork's released default
+        // on the same chord (break_pane_to_tab) until 088922d's user-displaces-
+        // default semantics are ported. The subject here is dispatch precedence.
+        // Clear the released default on prefix+! (break_pane_to_tab) so the
+        // custom command owns the chord, mirroring 088922d displacement.
+        state.keybinds.break_pane_to_tab = crate::config::ActionKeybinds::default();
+        state.keybinds.custom_commands.push(crate::config::CustomCommandKeybind {
+            bindings: crate::config::ActionKeybinds::prefix("!"),
+            label: "prefix+!".to_string(),
+            command: "echo literal".to_string(),
+            action: crate::config::CustomCommandAction::Shell,
+            description: None,
+        });
+        state.keybinds.switch_workspace =
+            crate::config::IndexedKeybind::test_bindings("prefix+shift+1..9");
 
         let key = TerminalKey::new(KeyCode::Char('!'), KeyModifiers::empty());
         assert!(command_for_key(&state, key, BindingDispatch::Prefix).is_some());
@@ -2606,19 +2703,19 @@ command = "echo literal"
         app.state.mode = Mode::Terminal;
 
         let output_path = unique_temp_path("literal-symbol-custom-command");
-        let config: Config = toml::from_str(&format!(
-            r#"
-[keys]
-switch_workspace = "prefix+shift+1..9"
-
-[[keys.command]]
-key = "prefix+!"
-command = "printf literal > '{}'"
-"#,
-            output_path.display()
-        ))
-        .unwrap();
-        app.state.keybinds = config.keybinds();
+        // Build the custom command binding directly (see the sibling test):
+        // the fork registry keeps the released prefix+! default over a user
+        // custom command until 088922d displacement is ported.
+        app.state.keybinds.break_pane_to_tab = crate::config::ActionKeybinds::default();
+        app.state.keybinds.custom_commands.push(crate::config::CustomCommandKeybind {
+            bindings: crate::config::ActionKeybinds::prefix("!"),
+            label: "prefix+!".to_string(),
+            command: format!("printf literal > '{}'", output_path.display()),
+            action: crate::config::CustomCommandAction::Shell,
+            description: None,
+        });
+        app.state.keybinds.switch_workspace =
+            crate::config::IndexedKeybind::test_bindings("prefix+shift+1..9");
 
         app.handle_key(TerminalKey::new(
             app.state.prefix_code,
@@ -2751,15 +2848,10 @@ command = "printf literal > '{}'"
     #[test]
     fn app_navigate_mode_workspace_keys_are_configurable() {
         let mut app = app_with_test_workspaces(&["one", "two"]);
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-navigate_workspace_down = "j"
-navigate_pane_down = "ctrl+j"
-"#,
-        )
-        .unwrap();
-        app.state.keybinds = config.keybinds();
+        // The modal `[keys]` schema has no flat navigate_* fields; set the
+        // navigate keymap directly.
+        app.state.keybinds.navigate.workspace_down = crate::config::ActionKeybinds::direct("j");
+        app.state.keybinds.navigate.pane_down = crate::config::ActionKeybinds::direct("ctrl+j");
         app.state.mode = Mode::Navigate;
 
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()));

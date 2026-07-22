@@ -210,7 +210,9 @@ impl App {
         if moved {
             self.schedule_session_save();
             if self.state.active == Some(ws_idx) {
-                self.state.tab_scroll_follow_active = true;
+                // Fork's stateless centered-active tab bar always follows the
+                // active tab; upstream's `tab_scroll_follow_active` flag was
+                // removed with the scrolling tab bar.
                 self.state.refresh_tab_bar_view();
             }
             self.emit_event(EventEnvelope {

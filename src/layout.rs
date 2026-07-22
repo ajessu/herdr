@@ -713,6 +713,7 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
                     rect,
                     inner_rect: rect,
                     scrollbar_rect: None,
+                    borders: Borders::NONE,
                     is_focused: *id == focus,
                     stack: Some(StackMember {
                         collapsed: i != *expanded,

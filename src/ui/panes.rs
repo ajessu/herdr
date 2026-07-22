@@ -117,6 +117,19 @@ pub(crate) fn apply_pane_chrome(
         .iter()
         .cloned()
         .map(|mut info| {
+            // Stack members opt out of shared-edge border removal and gap
+            // shrinking: a collapsed member is a single self-drawn title row
+            // (no chrome), and the expanded member keeps a full border so the
+            // stack frame stays closed against its collapsed neighbors.
+            if let Some(member) = &info.stack {
+                info.borders = if member.collapsed || !multi_pane || !pane_borders {
+                    Borders::NONE
+                } else {
+                    Borders::ALL
+                };
+                return info;
+            }
+
             let right_neighbor = multi_pane.then(|| pane_to_right(&info, &panes)).flatten();
             let below_neighbor = multi_pane.then(|| pane_below(&info, &panes)).flatten();
 
@@ -698,7 +711,7 @@ fn render_collapsed_stack_member(
     // Reserve room for: lead glyph + space + dot + space + " [n/m]".
     let reserved = 4 + position_hint.len() + 3;
     let label_width = (info.rect.width as usize).saturating_sub(reserved);
-    let label = truncate_label(label.trim(), label_width);
+    let label = truncate_end(label.trim(), label_width);
 
     let line = Line::from(vec![
         Span::styled(lead_glyph, Style::default().fg(border_color)),
@@ -1053,7 +1066,7 @@ pub(super) fn render_floating_panes(
             .pane_state(info.pane_id)
             .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
             .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
-            .and_then(|label| pane_border_title(&label, info.rect.width))
+            .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
         {
             block = block.title(Line::from(Span::styled(title, border_style)));
         }
@@ -1166,6 +1179,7 @@ mod tests {
             scrollbar_rect: None,
             borders: Borders::ALL,
             is_focused: false,
+            stack: None,
         }];
 
         let terminal_id = ws.tabs[0].panes[&pane_id].attached_terminal_id.clone();
@@ -1296,6 +1310,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::TOP | Borders::LEFT,
                 is_focused: true,
+                stack: None,
             },
             PaneInfo {
                 id: PaneId::from_raw(2),
@@ -1304,6 +1319,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::TOP | Borders::LEFT | Borders::RIGHT,
                 is_focused: false,
+                stack: None,
             },
             PaneInfo {
                 id: PaneId::from_raw(3),
@@ -1312,6 +1328,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::TOP | Borders::LEFT | Borders::BOTTOM,
                 is_focused: false,
+                stack: None,
             },
             PaneInfo {
                 id: PaneId::from_raw(4),
@@ -1320,6 +1337,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::ALL,
                 is_focused: false,
+                stack: None,
             },
         ];
         app.view.split_borders = vec![
@@ -1367,6 +1385,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::ALL,
                 is_focused: true,
+                stack: None,
             },
             PaneInfo {
                 id: PaneId::from_raw(2),
@@ -1375,6 +1394,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::ALL,
                 is_focused: false,
+                stack: None,
             },
         ];
         let ws = Workspace::test_new("test");

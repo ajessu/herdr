@@ -2044,6 +2044,7 @@ fn floating_pane_info_to_pane_info(fp: &crate::app::state::FloatingPaneInfo) -> 
         rect: fp.rect,
         inner_rect: fp.inner_rect,
         scrollbar_rect: None,
+        borders: ratatui::widgets::Borders::NONE,
         is_focused: fp.is_focused,
         stack: None,
     }
@@ -3506,10 +3507,22 @@ mod tests {
             .state
             .context_menu_rect()
             .expect("tab context menu rect");
+        // Click the "Close" row. The fork's tab menu also carries "Move
+        // left"/"Move right", so resolve the index instead of hardcoding
+        // upstream's 3-item layout.
+        let close_idx = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("tab context menu")
+            .items()
+            .iter()
+            .position(|item| *item == "Close")
+            .expect("Close item") as u16;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 3,
+            menu.y + 1 + close_idx,
         ));
 
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);

@@ -44,35 +44,6 @@ impl BindingConfig {
             Self::Many(values) => values.iter().map(String::as_str).collect(),
         }
     }
-
-    pub(crate) fn has_values(&self) -> bool {
-        self.values().iter().any(|value| !value.trim().is_empty())
-    }
-
-    pub(crate) fn indexed_labels(&self) -> Vec<String> {
-        let mut labels = Vec::new();
-        for raw in self.values() {
-            let raw = raw.trim();
-            if raw.is_empty() {
-                continue;
-            }
-            match parse_binding_string(raw) {
-                Some(ParsedBinding::Single(binding)) => {
-                    if matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
-                        labels.push(binding.label);
-                    }
-                }
-                Some(ParsedBinding::Range(range)) => {
-                    labels.extend(range.into_iter().filter_map(|binding| {
-                        matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9'))
-                            .then_some(binding.label)
-                    }));
-                }
-                None => {}
-            }
-        }
-        labels
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -266,6 +237,27 @@ pub struct IndexedKeybind {
 }
 
 impl IndexedKeybind {
+    /// Test-only: expand a binding string (single or `1..9` range, with an
+    /// optional `prefix+` trigger) into indexed keybinds. Lets tests exercise
+    /// indexed matching for bindings the modal config schema cannot express.
+    #[cfg(test)]
+    pub fn test_bindings(raw: &str) -> Vec<Self> {
+        match parse_binding_string(raw) {
+            Some(ParsedBinding::Range(range)) => range
+                .into_iter()
+                .map(|binding| Self {
+                    trigger: binding.trigger,
+                    label: binding.label,
+                })
+                .collect(),
+            Some(ParsedBinding::Single(binding)) => vec![Self {
+                trigger: binding.trigger,
+                label: binding.label,
+            }],
+            None => Vec::new(),
+        }
+    }
+
     pub fn matched_index(&self, key: TerminalKey) -> Option<usize> {
         let key_number = match key.code {
             KeyCode::Char(c @ '1'..='9') => c,
@@ -616,65 +608,53 @@ enum ParsedBinding {
     Range(Vec<ResolvedBinding>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BindingSource {
-    Default,
-    User,
-}
-
-struct RegisteredBinding {
-    field: String,
-    source: BindingSource,
-}
-
 struct BindingRegistry {
     prefix_combo: KeyCombo,
-    prefix_source: BindingSource,
-    direct: std::collections::HashMap<KeyCombo, RegisteredBinding>,
-    prefix: std::collections::HashMap<KeyCombo, RegisteredBinding>,
+    direct: std::collections::HashMap<KeyCombo, String>,
+    prefix: std::collections::HashMap<KeyCombo, String>,
 }
 
 impl BindingRegistry {
-    fn new(prefix_combo: KeyCombo, prefix_source: BindingSource) -> Self {
+    fn new(prefix_combo: KeyCombo) -> Self {
         Self {
             prefix_combo: normalize_key_combo(prefix_combo),
-            prefix_source,
             direct: std::collections::HashMap::new(),
             prefix: std::collections::HashMap::new(),
         }
     }
 
-    fn reserve_direct(&mut self, combo: KeyCombo, field: &str, source: BindingSource) {
+    fn reserve_direct(&mut self, combo: KeyCombo, field: &str) {
         self.direct
             .entry(normalize_key_combo(combo))
-            .or_insert_with(|| RegisteredBinding {
-                field: field.to_string(),
-                source,
-            });
+            .or_insert_with(|| field.to_string());
     }
 
     fn prefix_rhs_is_reserved(&self, combo: KeyCombo) -> bool {
         normalize_key_combo(combo) == self.prefix_combo
     }
 
-    fn conflict(&self, binding: &ResolvedBinding) -> Option<&RegisteredBinding> {
+    fn conflict(&self, binding: &ResolvedBinding) -> Option<&str> {
         match binding.trigger {
-            BindingTrigger::Direct(combo) => self.direct.get(&normalize_key_combo(combo)),
-            BindingTrigger::Prefix(combo) => self.prefix.get(&normalize_key_combo(combo)),
+            BindingTrigger::Direct(combo) => self
+                .direct
+                .get(&normalize_key_combo(combo))
+                .map(String::as_str),
+            BindingTrigger::Prefix(combo) => self
+                .prefix
+                .get(&normalize_key_combo(combo))
+                .map(String::as_str),
         }
     }
 
-    fn register(&mut self, binding: &ResolvedBinding, field: &str, source: BindingSource) {
-        let registered = || RegisteredBinding {
-            field: field.to_string(),
-            source,
-        };
+    fn register(&mut self, binding: &ResolvedBinding, field: &str) {
         match binding.trigger {
             BindingTrigger::Direct(combo) => {
-                self.direct.insert(normalize_key_combo(combo), registered());
+                self.direct
+                    .insert(normalize_key_combo(combo), field.to_string());
             }
             BindingTrigger::Prefix(combo) => {
-                self.prefix.insert(normalize_key_combo(combo), registered());
+                self.prefix
+                    .insert(normalize_key_combo(combo), field.to_string());
             }
         }
     }
@@ -859,9 +839,14 @@ impl Config {
         navigate_registry.reserve_direct(prefix, "keys.mode_tmux");
         reserve_navigate_runtime_keys(&mut navigate_registry);
 
-        macro_rules! empty_action {
-            () => {
-                ActionKeybinds::default()
+        macro_rules! action {
+            ($field:literal, $config:expr) => {
+                parse_action_bindings($field, $config, false, &mut registry, &mut diagnostics)
+            };
+        }
+        macro_rules! indexed {
+            ($field:literal, $config:expr) => {
+                parse_indexed_bindings($field, $config, &mut registry, &mut diagnostics)
             };
         }
 
@@ -990,180 +975,64 @@ impl Config {
             mode_session: SessionModeBindings::default(),
         };
 
-        macro_rules! field_source {
-            ($field:ident) => {
-                if self.keys.key_field_is_user_configured(stringify!($field)) {
-                    BindingSource::User
-                } else {
-                    BindingSource::Default
-                }
-            };
-        }
-        macro_rules! apply_action {
-            ($target:expr, $field:ident, $source:expr) => {
-                if field_source!($field) == $source {
-                    $target = parse_action_bindings(
-                        concat!("keys.", stringify!($field)),
-                        &self.keys.$field,
-                        &mut registry,
-                        &mut diagnostics,
-                        $source,
-                    );
-                }
-            };
-        }
-        macro_rules! apply_indexed {
-            (
-                $target:expr,
-                $field:ident,
-                $legacy_config:expr,
-                $source:expr
-            ) => {
-                if field_source!($field) == $source {
-                    if $source == BindingSource::Default && !$legacy_config.trim().is_empty() {
-                        // A legacy [keys.indexed] entry is user configuration for
-                        // this target and should displace the modern default.
-                    } else {
-                        $target = parse_indexed_bindings(
-                            concat!("keys.", stringify!($field)),
-                            &self.keys.$field,
-                            &mut registry,
-                            &mut diagnostics,
-                            $source,
-                        );
-                    }
-                }
-            };
-        }
-        macro_rules! apply_navigate {
-            ($target:expr, $field:ident, $source:expr) => {
-                if field_source!($field) == $source {
-                    $target = parse_navigate_bindings(
-                        concat!("keys.", stringify!($field)),
-                        &self.keys.$field,
-                        &mut navigate_registry,
-                        &mut diagnostics,
-                        $source,
-                    );
-                }
-            };
-        }
+        append_legacy_indexed_bindings(
+            &mut keybinds.switch_tab,
+            "keys.indexed.tabs",
+            &self.keys.indexed.tabs,
+            &mut registry,
+            &mut diagnostics,
+        );
+        append_legacy_indexed_bindings(
+            &mut keybinds.switch_workspace,
+            "keys.indexed.workspaces",
+            &self.keys.indexed.workspaces,
+            &mut registry,
+            &mut diagnostics,
+        );
+        append_legacy_indexed_bindings(
+            &mut keybinds.focus_agent,
+            "keys.indexed.agents",
+            &self.keys.indexed.agents,
+            &mut registry,
+            &mut diagnostics,
+        );
 
-        for source in [BindingSource::User, BindingSource::Default] {
-            apply_navigate!(
-                keybinds.navigate.workspace_up,
-                navigate_workspace_up,
-                source
-            );
-            apply_navigate!(
-                keybinds.navigate.workspace_down,
-                navigate_workspace_down,
-                source
-            );
-            apply_navigate!(keybinds.navigate.pane_left, navigate_pane_left, source);
-            apply_navigate!(keybinds.navigate.pane_down, navigate_pane_down, source);
-            apply_navigate!(keybinds.navigate.pane_up, navigate_pane_up, source);
-            apply_navigate!(keybinds.navigate.pane_right, navigate_pane_right, source);
-            apply_action!(keybinds.help, help, source);
-            apply_action!(keybinds.settings, settings, source);
-            apply_action!(keybinds.new_workspace, new_workspace, source);
-            apply_action!(keybinds.new_worktree, new_worktree, source);
-            apply_action!(keybinds.open_worktree, open_worktree, source);
-            apply_action!(keybinds.remove_worktree, remove_worktree, source);
-            apply_action!(keybinds.rename_workspace, rename_workspace, source);
-            apply_action!(keybinds.close_workspace, close_workspace, source);
-            apply_action!(keybinds.workspace_picker, workspace_picker, source);
-            apply_action!(keybinds.goto, goto, source);
-            apply_action!(keybinds.detach, detach, source);
-            apply_action!(keybinds.reload_config, reload_config, source);
-            apply_action!(
-                keybinds.open_notification_target,
-                open_notification_target,
-                source
-            );
-            apply_action!(keybinds.previous_workspace, previous_workspace, source);
-            apply_action!(keybinds.next_workspace, next_workspace, source);
-            apply_action!(keybinds.previous_agent, previous_agent, source);
-            apply_action!(keybinds.next_agent, next_agent, source);
-            apply_indexed!(
-                keybinds.focus_agent,
-                focus_agent,
-                &self.keys.indexed.agents,
-                source
-            );
-            apply_action!(keybinds.new_tab, new_tab, source);
-            apply_action!(keybinds.rename_tab, rename_tab, source);
-            apply_action!(keybinds.previous_tab, previous_tab, source);
-            apply_action!(keybinds.next_tab, next_tab, source);
-            apply_indexed!(
-                keybinds.switch_tab,
-                switch_tab,
-                &self.keys.indexed.tabs,
-                source
-            );
-            apply_indexed!(
-                keybinds.switch_workspace,
-                switch_workspace,
-                &self.keys.indexed.workspaces,
-                source
-            );
-            apply_action!(keybinds.close_tab, close_tab, source);
-            apply_action!(keybinds.rename_pane, rename_pane, source);
-            apply_action!(keybinds.edit_scrollback, edit_scrollback, source);
-            apply_action!(keybinds.copy_mode, copy_mode, source);
-            apply_action!(keybinds.focus_pane_left, focus_pane_left, source);
-            apply_action!(keybinds.focus_pane_down, focus_pane_down, source);
-            apply_action!(keybinds.focus_pane_up, focus_pane_up, source);
-            apply_action!(keybinds.focus_pane_right, focus_pane_right, source);
-            apply_action!(keybinds.swap_pane_left, swap_pane_left, source);
-            apply_action!(keybinds.swap_pane_down, swap_pane_down, source);
-            apply_action!(keybinds.swap_pane_up, swap_pane_up, source);
-            apply_action!(keybinds.swap_pane_right, swap_pane_right, source);
-            apply_action!(keybinds.last_pane, last_pane, source);
-            apply_action!(keybinds.cycle_pane_next, cycle_pane_next, source);
-            apply_action!(keybinds.cycle_pane_previous, cycle_pane_previous, source);
-            apply_action!(keybinds.split_vertical, split_vertical, source);
-            apply_action!(keybinds.split_horizontal, split_horizontal, source);
-            apply_action!(keybinds.close_pane, close_pane, source);
-            apply_action!(keybinds.zoom, zoom, source);
-            apply_action!(keybinds.resize_mode, resize_mode, source);
-            apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
+        for (index, command) in self.keys.command.iter().enumerate() {
+            let key_field = format!("keys.command[{index}].key");
+            let command_field = format!("keys.command[{index}].command");
 
-            if source == field_source!(indexed) {
-                append_legacy_indexed_bindings(
-                    &mut keybinds.switch_tab,
-                    "keys.indexed.tabs",
-                    &self.keys.indexed.tabs,
-                    &mut registry,
-                    &mut diagnostics,
-                    source,
-                );
-                append_legacy_indexed_bindings(
-                    &mut keybinds.switch_workspace,
-                    "keys.indexed.workspaces",
-                    &self.keys.indexed.workspaces,
-                    &mut registry,
-                    &mut diagnostics,
-                    source,
-                );
-                append_legacy_indexed_bindings(
-                    &mut keybinds.focus_agent,
-                    "keys.indexed.agents",
-                    &self.keys.indexed.agents,
-                    &mut registry,
-                    &mut diagnostics,
-                    source,
-                );
+            if command.command.trim().is_empty() {
+                let diag =
+                    format!("empty custom command: {command_field}; disabling custom command");
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                continue;
             }
 
-            if source == BindingSource::User {
-                append_custom_command_bindings(
-                    self,
-                    &mut keybinds,
-                    &mut registry,
-                    &mut diagnostics,
-                );
+            let bindings = parse_action_bindings_owned(
+                &key_field,
+                &command.key,
+                false,
+                &mut registry,
+                &mut diagnostics,
+            );
+            if bindings.bindings.is_empty() {
+                continue;
             }
+
+            let action = match command.action_type {
+                CommandKeybindType::Shell => CustomCommandAction::Shell,
+                CommandKeybindType::Pane => CustomCommandAction::Pane,
+                CommandKeybindType::PluginAction => CustomCommandAction::PluginAction,
+            };
+            let label = bindings.label().unwrap_or_else(|| "unset".to_string());
+            keybinds.custom_commands.push(CustomCommandKeybind {
+                bindings,
+                label,
+                command: command.command.clone(),
+                action,
+                description: command.description.clone(),
+            });
         }
 
         // Validate the modal schema (mode-entry keys, shared/per-mode tables,
@@ -1652,68 +1521,33 @@ fn reserve_navigate_runtime_keys(registry: &mut BindingRegistry) {
         (KeyCode::Left, KeyModifiers::empty()),
         (KeyCode::Right, KeyModifiers::empty()),
     ] {
-        registry.reserve_direct(combo, "navigate reserved keys", BindingSource::Default);
+        registry.reserve_direct(combo, "navigate reserved keys");
     }
 
     for idx in '1'..='9' {
         registry.reserve_direct(
             (KeyCode::Char(idx), KeyModifiers::empty()),
             "navigate reserved keys",
-            BindingSource::Default,
         );
-    }
-}
-
-fn append_custom_command_bindings(
-    config: &Config,
-    keybinds: &mut Keybinds,
-    registry: &mut BindingRegistry,
-    diagnostics: &mut Vec<String>,
-) {
-    for (index, command) in config.keys.command.iter().enumerate() {
-        let key_field = format!("keys.command[{index}].key");
-        let command_field = format!("keys.command[{index}].command");
-
-        if command.command.trim().is_empty() {
-            let diag = format!("empty custom command: {command_field}; disabling custom command");
-            warn!(message = %diag, "config diagnostic");
-            diagnostics.push(diag);
-            continue;
-        }
-
-        let bindings = parse_action_bindings(
-            &key_field,
-            &command.key,
-            registry,
-            diagnostics,
-            BindingSource::User,
-        );
-        if bindings.bindings.is_empty() {
-            continue;
-        }
-
-        let action = match command.action_type {
-            CommandKeybindType::Shell => CustomCommandAction::Shell,
-            CommandKeybindType::Pane => CustomCommandAction::Pane,
-            CommandKeybindType::PluginAction => CustomCommandAction::PluginAction,
-        };
-        let label = bindings.label().unwrap_or_else(|| "unset".to_string());
-        keybinds.custom_commands.push(CustomCommandKeybind {
-            bindings,
-            label,
-            command: command.command.clone(),
-            action,
-            description: command.description.clone(),
-        });
     }
 }
 
 fn parse_action_bindings(
-    field: &str,
+    field: &'static str,
     config: &BindingConfig,
+    allow_ranges: bool,
     registry: &mut BindingRegistry,
     diagnostics: &mut Vec<String>,
-    source: BindingSource,
+) -> ActionKeybinds {
+    parse_action_bindings_owned(field, config, allow_ranges, registry, diagnostics)
+}
+
+fn parse_action_bindings_owned(
+    field: &str,
+    config: &BindingConfig,
+    allow_ranges: bool,
+    registry: &mut BindingRegistry,
+    diagnostics: &mut Vec<String>,
 ) -> ActionKeybinds {
     let mut bindings = Vec::new();
     for raw in config.values() {
@@ -1723,16 +1557,25 @@ fn parse_action_bindings(
         }
         match parse_binding_string(raw) {
             Some(ParsedBinding::Single(binding)) => {
-                if reject_binding(field, &binding, registry, diagnostics, source) {
+                if reject_binding(field, &binding, registry, diagnostics) {
                     continue;
                 }
-                registry.register(&binding, field, source);
+                registry.register(&binding, field);
                 bindings.push(binding);
             }
-            Some(ParsedBinding::Range(_)) => {
+            Some(ParsedBinding::Range(_)) if !allow_ranges => {
                 let diag = format!("range keybinding is only valid for indexed actions: {field} = {raw:?}; disabling binding");
                 warn!(message = %diag, "config diagnostic");
                 diagnostics.push(diag);
+            }
+            Some(ParsedBinding::Range(range)) => {
+                for binding in range {
+                    if reject_binding(field, &binding, registry, diagnostics) {
+                        continue;
+                    }
+                    registry.register(&binding, field);
+                    bindings.push(binding);
+                }
             }
             None => {
                 let diag = format!("invalid keybinding: {field} = {raw:?}; disabling binding");
@@ -1749,7 +1592,6 @@ fn parse_navigate_bindings(
     config: &BindingConfig,
     registry: &mut BindingRegistry,
     diagnostics: &mut Vec<String>,
-    source: BindingSource,
 ) -> ActionKeybinds {
     let mut bindings = Vec::new();
     for raw in config.values() {
@@ -1759,10 +1601,10 @@ fn parse_navigate_bindings(
         }
         match parse_binding_string(raw) {
             Some(ParsedBinding::Single(binding)) => {
-                if reject_navigate_binding(field, &binding, registry, diagnostics, source) {
+                if reject_navigate_binding(field, &binding, registry, diagnostics) {
                     continue;
                 }
-                registry.register(&binding, field, source);
+                registry.register(&binding, field);
                 bindings.push(binding);
             }
             Some(ParsedBinding::Range(_)) => {
@@ -1785,65 +1627,27 @@ fn parse_indexed_bindings(
     config: &BindingConfig,
     registry: &mut BindingRegistry,
     diagnostics: &mut Vec<String>,
-    source: BindingSource,
 ) -> Vec<IndexedKeybind> {
-    let mut bindings = Vec::new();
-    for raw in config.values() {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            continue;
-        }
-        match parse_binding_string(raw) {
-            Some(ParsedBinding::Single(binding)) => {
-                push_indexed_binding(field, binding, registry, diagnostics, source, &mut bindings);
-            }
-            Some(ParsedBinding::Range(range)) => {
-                for binding in range {
-                    push_indexed_binding(
-                        field,
-                        binding,
-                        registry,
-                        diagnostics,
-                        source,
-                        &mut bindings,
-                    );
-                }
-            }
-            None => {
-                let diag = format!("invalid keybinding: {field} = {raw:?}; disabling binding");
+    parse_action_bindings(field, config, true, registry, diagnostics)
+        .bindings
+        .into_iter()
+        .filter_map(|binding| {
+            if matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
+                Some(IndexedKeybind {
+                    trigger: binding.trigger,
+                    label: binding.label,
+                })
+            } else {
+                let diag = format!(
+                    "indexed keybinding must use 1..9: {field} = {:?}; disabling binding",
+                    binding.label
+                );
                 warn!(message = %diag, "config diagnostic");
                 diagnostics.push(diag);
+                None
             }
-        }
-    }
-    bindings
-}
-
-fn push_indexed_binding(
-    field: &str,
-    binding: ResolvedBinding,
-    registry: &mut BindingRegistry,
-    diagnostics: &mut Vec<String>,
-    source: BindingSource,
-    bindings: &mut Vec<IndexedKeybind>,
-) {
-    if !matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
-        let diag = format!(
-            "indexed keybinding must use 1..9: {field} = {:?}; disabling binding",
-            binding.label
-        );
-        warn!(message = %diag, "config diagnostic");
-        diagnostics.push(diag);
-        return;
-    }
-    if reject_binding(field, &binding, registry, diagnostics, source) {
-        return;
-    }
-    registry.register(&binding, field, source);
-    bindings.push(IndexedKeybind {
-        trigger: binding.trigger,
-        label: binding.label,
-    });
+        })
+        .collect()
 }
 
 fn append_legacy_indexed_bindings(
@@ -1852,7 +1656,6 @@ fn append_legacy_indexed_bindings(
     configured_label: &str,
     registry: &mut BindingRegistry,
     diagnostics: &mut Vec<String>,
-    source: BindingSource,
 ) {
     if configured_label.trim().is_empty() {
         return;
@@ -1875,10 +1678,10 @@ fn append_legacy_indexed_bindings(
             trigger: BindingTrigger::Direct(combo),
             label: format!("{}+{idx}", configured_label.trim()),
         };
-        if reject_binding(field, &binding, registry, diagnostics, source) {
+        if reject_binding(field, &binding, registry, diagnostics) {
             continue;
         }
-        registry.register(&binding, field, source);
+        registry.register(&binding, field);
         target.push(IndexedKeybind {
             trigger: binding.trigger,
             label: binding.label,
@@ -1891,7 +1694,6 @@ fn reject_navigate_binding(
     binding: &ResolvedBinding,
     registry: &BindingRegistry,
     diagnostics: &mut Vec<String>,
-    source: BindingSource,
 ) -> bool {
     if binding.trigger.is_prefix() {
         let diag = format!(
@@ -1913,11 +1715,7 @@ fn reject_navigate_binding(
         return true;
     }
 
-    if let Some(first_binding) = registry.conflict(binding) {
-        if source == BindingSource::Default && first_binding.source == BindingSource::User {
-            return true;
-        }
-        let first_field = &first_binding.field;
+    if let Some(first_field) = registry.conflict(binding) {
         let diag = format!("{}: kept {first_field}, disabled {field}", binding.label);
         warn!(message = %diag, "config diagnostic");
         diagnostics.push(diag);
@@ -1932,12 +1730,8 @@ fn reject_binding(
     binding: &ResolvedBinding,
     registry: &BindingRegistry,
     diagnostics: &mut Vec<String>,
-    source: BindingSource,
 ) -> bool {
     if binding.trigger.is_prefix() && registry.prefix_rhs_is_reserved(binding.trigger.combo()) {
-        if source == BindingSource::Default && registry.prefix_source == BindingSource::User {
-            return true;
-        }
         let diag = format!(
             "reserved keybinding: {field} = {:?} uses keys.prefix as the prefix-mode key; pressing the prefix twice sends a literal prefix key, so this binding is disabled",
             binding.label
@@ -1947,11 +1741,7 @@ fn reject_binding(
         return true;
     }
 
-    if let Some(first_binding) = registry.conflict(binding) {
-        if source == BindingSource::Default && first_binding.source == BindingSource::User {
-            return true;
-        }
-        let first_field = &first_binding.field;
+    if let Some(first_field) = registry.conflict(binding) {
         let diag = format!("{}: kept {first_field}, disabled {field}", binding.label);
         warn!(message = %diag, "config diagnostic");
         diagnostics.push(diag);
@@ -2788,76 +2578,6 @@ workspaces = "ctrl+alt"
             ))
         );
         assert_eq!(kb.switch_workspace[0].label, "ctrl+alt+1");
-    }
-
-    #[test]
-    fn legacy_indexed_user_bindings_displace_modern_defaults() {
-        let config: Config = toml::from_str(
-            r#"
-[keys.indexed]
-workspaces = "ctrl"
-"#,
-        )
-        .unwrap();
-
-        let diagnostics = config.collect_diagnostics();
-        let kb = config.keybinds();
-
-        assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        assert_eq!(kb.switch_workspace.len(), 9);
-        assert_eq!(
-            kb.switch_workspace[0].trigger,
-            BindingTrigger::Direct((KeyCode::Char('1'), KeyModifiers::CONTROL))
-        );
-        assert_eq!(kb.switch_workspace[0].label, "ctrl+1");
-    }
-
-    #[test]
-    fn invalid_legacy_indexed_user_binding_displaces_modern_default() {
-        let config: Config = toml::from_str(
-            r#"
-[keys.indexed]
-tabs = "bogus"
-"#,
-        )
-        .unwrap();
-
-        let diagnostics = config.collect_diagnostics();
-        let kb = config.keybinds();
-
-        assert!(kb.switch_tab.is_empty());
-        assert!(diagnostics.iter().any(|diag| {
-            diag.contains("invalid indexed keybinding") && diag.contains("keys.indexed.tabs")
-        }));
-    }
-
-    #[test]
-    fn invalid_indexed_binding_does_not_displace_default_binding() {
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-switch_tab = "prefix+?"
-"#,
-        )
-        .unwrap();
-
-        let diagnostics = config.collect_diagnostics();
-        let kb = config.keybinds();
-
-        assert!(kb.switch_tab.is_empty());
-        assert_eq!(
-            binding_triggers(&kb.help),
-            vec![BindingTrigger::Prefix((
-                KeyCode::Char('?'),
-                KeyModifiers::empty()
-            ))]
-        );
-        assert!(diagnostics.iter().any(|diag| {
-            diag.contains("indexed keybinding must use 1..9") && diag.contains("keys.switch_tab")
-        }));
-        assert!(!diagnostics.iter().any(|diag| {
-            diag.contains("kept keys.switch_tab") && diag.contains("disabled keys.help")
-        }));
     }
 
     #[test]

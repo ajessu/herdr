@@ -6,9 +6,7 @@ use tracing::{info, warn};
 
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
-use crate::layout::PaneId;
-#[cfg(test)]
-use crate::layout::{find_in_direction, NavDirection};
+use crate::layout::{find_in_direction, NavDirection, PaneId};
 use crate::selection::Selection;
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
 use crate::workspace::WorkspaceGitStatus;
@@ -1109,7 +1107,10 @@ impl AppState {
             .min(crate::ui::mobile_switcher_max_scroll(self));
     }
 
-    #[cfg(test)]
+    // TODO(upstream-merge): upstream gates switch_tab/previous_tab/
+    // focus_agent_entry/navigate_pane #[cfg(test)] and routes production
+    // callers through runtime adapters; fork modal/sticky dispatch still calls
+    // these directly, so they stay ungated until that dispatch is rewired.
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws_idx) = self.active {
             let previous_focus = self.current_pane_focus_target();
@@ -1289,7 +1290,6 @@ impl AppState {
         }
     }
 
-    #[cfg(test)]
     pub fn previous_tab(&mut self) {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
@@ -1313,7 +1313,6 @@ impl AppState {
         self.cycle_agent_entry(false);
     }
 
-    #[cfg(test)]
     pub fn focus_agent_entry(&mut self, idx: usize) -> bool {
         let entries = crate::ui::agent_panel_entries(self);
         let Some(target) = entries.get(idx) else {
@@ -1613,7 +1612,6 @@ pub(crate) struct PaneZoomOutcome {
 }
 
 impl AppState {
-    #[cfg(test)]
     pub fn navigate_pane(&mut self, direction: NavDirection) {
         let Some(ws_idx) = self.active else {
             return;
@@ -5903,6 +5901,7 @@ mod tests {
                 path: vec![false],
                 direction: Direction::Horizontal,
                 area: ratatui::layout::Rect::new(0, 0, 80, 24),
+                grab_offset: 0,
             },
         });
         state.workspace_press = Some(WorkspacePressState {

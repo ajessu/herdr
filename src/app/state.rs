@@ -2314,6 +2314,7 @@ mod tests {
             rect,
             inner_rect: rect,
             scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
             is_focused: false,
             stack: Some(StackMember {
                 collapsed: true,
@@ -2326,6 +2327,7 @@ mod tests {
             rect: Rect::new(0, 1, 80, 22),
             inner_rect: Rect::new(0, 1, 80, 22),
             scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
             is_focused: true,
             stack: Some(StackMember {
                 collapsed: false,

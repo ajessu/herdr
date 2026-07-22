@@ -602,7 +602,6 @@ impl Workspace {
         true
     }
 
-    #[cfg(test)]
     pub fn close_active_tab(&mut self) -> bool {
         self.close_tab(self.active_tab)
     }

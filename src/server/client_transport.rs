@@ -51,9 +51,11 @@ pub(crate) struct ClientWriter {
     pub(crate) render: ClientRenderWriter,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "web"))]
 impl ClientWriter {
-    pub(crate) fn test_channel(
+    /// Writer backed by plain mpsc channels. Used by tests and by the web
+    /// bridge, which pumps the channel receivers on its own thread.
+    pub(crate) fn from_channels(
         control: std::sync::mpsc::Sender<Vec<u8>>,
         render: std::sync::mpsc::SyncSender<Vec<u8>>,
     ) -> Self {
@@ -66,6 +68,14 @@ impl ClientWriter {
             },
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel(
+        control: std::sync::mpsc::Sender<Vec<u8>>,
+        render: std::sync::mpsc::SyncSender<Vec<u8>>,
+    ) -> Self {
+        Self::from_channels(control, render)
+    }
 }
 
 #[derive(Debug)]
@@ -76,7 +86,7 @@ pub(crate) struct ClientControlWriter {
 #[derive(Debug)]
 enum ClientControlTarget {
     Queue(Arc<ClientWriterQueue>),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "web"))]
     Channel(std::sync::mpsc::Sender<Vec<u8>>),
 }
 
@@ -88,7 +98,7 @@ pub(crate) struct ClientRenderWriter {
 #[derive(Debug)]
 enum ClientRenderTarget {
     Queue(Arc<ClientWriterQueue>),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "web"))]
     Channel(std::sync::mpsc::SyncSender<Vec<u8>>),
 }
 
@@ -101,7 +111,7 @@ impl Clone for ClientControlWriter {
                     target: ClientControlTarget::Queue(queue.clone()),
                 }
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "web"))]
             ClientControlTarget::Channel(sender) => Self {
                 target: ClientControlTarget::Channel(sender.clone()),
             },
@@ -113,7 +123,7 @@ impl Drop for ClientControlWriter {
     fn drop(&mut self) {
         match &self.target {
             ClientControlTarget::Queue(queue) => queue.remove_sender(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "web"))]
             ClientControlTarget::Channel(_) => {}
         }
     }
@@ -130,7 +140,7 @@ impl ClientControlWriter {
     pub(crate) fn send(&self, data: Vec<u8>) -> Result<(), SendError<Vec<u8>>> {
         match &self.target {
             ClientControlTarget::Queue(queue) => queue.send_control(data),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "web"))]
             ClientControlTarget::Channel(sender) => sender.send(data),
         }
     }
@@ -145,7 +155,7 @@ impl Clone for ClientRenderWriter {
                     target: ClientRenderTarget::Queue(queue.clone()),
                 }
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "web"))]
             ClientRenderTarget::Channel(sender) => Self {
                 target: ClientRenderTarget::Channel(sender.clone()),
             },
@@ -157,7 +167,7 @@ impl Drop for ClientRenderWriter {
     fn drop(&mut self) {
         match &self.target {
             ClientRenderTarget::Queue(queue) => queue.remove_sender(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "web"))]
             ClientRenderTarget::Channel(_) => {}
         }
     }
@@ -174,7 +184,7 @@ impl ClientRenderWriter {
     pub(crate) fn try_send(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
         match &self.target {
             ClientRenderTarget::Queue(queue) => queue.try_send_render(data),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "web"))]
             ClientRenderTarget::Channel(sender) => sender.try_send(data),
         }
     }

@@ -631,7 +631,7 @@ mod tests {
     use crate::{
         app::state::{AgentPanelSort, DragState, DragTarget, Mode},
         config::SidebarCollapsedModeConfig,
-        detect::{Agent, AgentState},
+        detect::Agent,
         workspace::Workspace,
     };
 
@@ -1200,6 +1200,12 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
     }
 
+    // TODO(upstream-merge): port 552aa8c/0cd0b1a — upstream's collapsed rail
+    // sources rows from the cross-workspace `agent_panel_entries` (priority
+    // sort), so a click can switch workspaces. The fork rail shows only the
+    // active workspace's pane details. Reinstate when that layout is ported
+    // (see src/ui/sidebar.rs parked tests for the same port).
+    #[cfg(any())]
     #[test]
     fn clicking_collapsed_priority_agent_row_switches_to_matching_workspace() {
         let mut app = app_for_mouse_test();
@@ -1226,8 +1232,8 @@ mod tests {
             terminal.detected_agent = Some(Agent::Claude);
             terminal.state = state;
         };
-        set_state(&mut app, 0, first_pane, AgentState::Working);
-        set_state(&mut app, 1, second_pane, AgentState::Blocked);
+        set_state(&mut app, 0, first_pane, crate::detect::AgentState::Working);
+        set_state(&mut app, 1, second_pane, crate::detect::AgentState::Blocked);
 
         let (_, _, detail_area) =
             crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);

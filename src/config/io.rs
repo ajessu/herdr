@@ -1038,9 +1038,11 @@ move_tab_left = "alt+i"
                 legacy[0]
             );
         }
-        // The diagnostics feed the user-visible startup notification summary.
+        // The diagnostics still trigger the user-visible startup notification;
+        // the summary is now upstream's compact banner pointing at
+        // `herdr config check`, where the aggregated diagnostic appears.
         let summary = config_diagnostic_summary(&loaded.diagnostics);
-        assert!(summary.is_some_and(|s| s.contains("no longer recognized")));
+        assert!(summary.is_some_and(|s| s.contains("herdr config check")));
 
         std::env::remove_var(CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_file(path);

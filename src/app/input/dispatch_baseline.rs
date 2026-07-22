@@ -421,6 +421,7 @@ mod tests {
             cursor_col: 0,
             entry_offset_from_bottom: 0,
             selection: None,
+            search: Default::default(),
         });
 
         let runtimes = TerminalRuntimeRegistry::new();
@@ -443,6 +444,7 @@ mod tests {
             cursor_col: 0,
             entry_offset_from_bottom: 0,
             selection: None,
+            search: Default::default(),
         });
 
         let runtimes = TerminalRuntimeRegistry::new();
@@ -470,6 +472,7 @@ mod tests {
             cursor_col: 5,
             entry_offset_from_bottom: 0,
             selection: None,
+            search: Default::default(),
         });
 
         let runtimes = TerminalRuntimeRegistry::new();

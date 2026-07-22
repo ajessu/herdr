@@ -135,10 +135,7 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState, _conn_guard: C
 
     let (control_tx, control_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
-    let writer = ClientWriter {
-        control: control_tx,
-        render: render_tx,
-    };
+    let writer = ClientWriter::from_channels(control_tx, render_tx);
 
     if state
         .server_event_tx

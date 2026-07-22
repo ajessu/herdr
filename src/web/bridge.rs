@@ -140,6 +140,9 @@ fn convert_server_message(msg: ServerMessage) -> Option<BridgeMessage> {
         ServerMessage::MouseCapture { enabled } => as_text(ServerControl::MouseCapture { enabled }),
         ServerMessage::ServerShutdown { reason } => Some(BridgeMessage::Close(reason)),
         ServerMessage::Graphics { .. } | ServerMessage::ReloadSoundConfig => None,
+        // ASCII input-source switching is a local-terminal IME concern; the
+        // web client has no OS input source to swap.
+        ServerMessage::PrefixInputSource { .. } => None,
         ServerMessage::Welcome { .. } | ServerMessage::Frame(_) => None,
     }
 }
