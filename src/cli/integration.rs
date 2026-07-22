@@ -52,9 +52,38 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
             }
         };
         println!("{target}: {state} ({})", status.path.display());
+
+        // For an installed Claude integration, surface the statusLine wrapper's last
+        // confirmed-report epoch so "the model never appears" is distinguishable between
+        // wrapper-failing, never-reported, and an unreadable state dir (design FR9b
+        // diagnosability). Skipped when not installed — the diagnostic and its PATH note
+        // only make sense once the wrapper exists.
+        #[cfg(unix)]
+        if status.target == IntegrationTarget::Claude
+            && status.state != crate::integration::IntegrationStatusKind::NotInstalled
+        {
+            print_claude_statusline_report();
+        }
     }
 
     Ok(0)
+}
+
+/// Print the statusLine wrapper's last-report diagnostic. The rendering and staleness
+/// decision live in the pure `crate::integration::format_claude_statusline_report`
+/// (unit-tested there); this shell only supplies the current wall-clock time.
+#[cfg(unix)]
+fn print_claude_statusline_report() {
+    // `None` when the clock is unavailable, so the formatter can say "age unknown"
+    // rather than the misleading "0s ago" a `unwrap_or(0)` would print.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .ok();
+    let report = crate::integration::claude_statusline_report_status();
+    for line in crate::integration::format_claude_statusline_report(report, now) {
+        println!("{line}");
+    }
 }
 
 fn integration_install(args: &[String]) -> std::io::Result<i32> {

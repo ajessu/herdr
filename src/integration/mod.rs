@@ -29,6 +29,22 @@ const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
 };
 const CLAUDE_INTEGRATION_VERSION: u32 = 6;
 const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
+// The Claude statusLine wrapper reports the active model to herdr and then
+// chains the user's prior statusLine command. It is a POSIX shell asset with no
+// Windows counterpart, so the install is gated to unix.
+#[cfg(unix)]
+const CLAUDE_STATUSLINE_INSTALL_NAME: &str = "herdr-statusline.sh";
+#[cfg(unix)]
+const CLAUDE_STATUSLINE_ASSET: &str = include_str!("assets/claude/herdr-statusline.sh");
+// The user's prior statusLine value is recorded verbatim under this settings.json
+// key so uninstall can restore it. Written once; a reinstall never overwrites it.
+#[cfg(unix)]
+const CLAUDE_STATUSLINE_SIDECAR_KEY: &str = "herdrStatusLine";
+// Report TTL the wrapper reports with; the install-side refresh cadence is chosen
+// so an idle Claude session re-runs the wrapper well within the TTL (FR9a). The
+// Claude Code `refreshInterval` unit is seconds.
+#[cfg(unix)]
+const CLAUDE_STATUSLINE_REFRESH_INTERVAL_SECS: u64 = 60;
 const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {
@@ -183,6 +199,10 @@ const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 pub(crate) struct ClaudeInstallPaths {
     pub hook_path: PathBuf,
     pub settings_path: PathBuf,
+    /// The installed statusLine wrapper (unix only; the wrapper is a POSIX shell
+    /// asset with no Windows counterpart).
+    #[cfg(unix)]
+    pub statusline_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -328,6 +348,11 @@ pub(crate) struct ClaudeUninstallResult {
     pub settings_path: PathBuf,
     pub removed_hook_file: bool,
     pub updated_settings: bool,
+    /// The statusLine wrapper path (unix only) and whether it was removed.
+    #[cfg(unix)]
+    pub statusline_path: PathBuf,
+    #[cfg(unix)]
+    pub removed_statusline_file: bool,
 }
 
 #[derive(Debug)]
@@ -527,7 +552,7 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
         }
         crate::api::schema::IntegrationTarget::Claude => {
             let installed = install_claude()?;
-            vec![
+            let mut messages = vec![
                 format!(
                     "installed claude integration hook to {}",
                     installed.hook_path.display()
@@ -536,7 +561,21 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                     "ensured claude settings at {}",
                     installed.settings_path.display()
                 ),
-            ]
+            ];
+            #[cfg(unix)]
+            {
+                messages.push(format!(
+                    "installed claude statusLine wrapper to {}",
+                    installed.statusline_path.display()
+                ));
+                messages.push(
+                    "the statusLine reports the model via `herdr`; ensure `herdr` is on the \
+                     statusLine subprocess PATH (otherwise the model report silently no-ops \
+                     while your statusline still renders)"
+                        .to_string(),
+                );
+            }
+            messages
         }
         crate::api::schema::IntegrationTarget::Codex => {
             let installed = install_codex()?;
@@ -723,6 +762,18 @@ pub(crate) fn uninstall_target(
                 messages.push(format!(
                     "no herdr claude hook entries found in {}",
                     result.settings_path.display()
+                ));
+            }
+            #[cfg(unix)]
+            if result.removed_statusline_file {
+                messages.push(format!(
+                    "removed claude statusLine wrapper at {}",
+                    result.statusline_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no claude statusLine wrapper found at {}",
+                    result.statusline_path.display()
                 ));
             }
             messages
@@ -1450,6 +1501,585 @@ fn remove_legacy_pi_extension_from_omp_dir(dir: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
+/// Read `path` as opaque JSON (or `{}` if absent), let `mutate` edit the parsed
+/// value, and write the result back with three safety properties (design FR9b):
+///
+/// - **atomic**: the new content is written to a temp file in the *same directory*
+///   and atomically renamed over the target, so a reader never sees a partial file.
+/// - **validated with rollback**: after the rename the file is re-read and re-parsed;
+///   if it does not parse or does not round-trip to the intended value, the exact
+///   pre-edit content is restored and an error is returned.
+/// - **optimistic CAS**: the file is re-read immediately before the rename and
+///   compared byte-for-byte against the bytes read at the start; on a mismatch the
+///   whole read-merge-write is retried once, then fails. This narrows the clobber
+///   window to the tiny read-to-rename interval rather than eliminating it — a true
+///   guarantee against a concurrent writer (Claude Code itself) would need file
+///   locking, which is out of scope here.
+///
+/// A pre-existing file that does not parse is a hard error with no write.
+///
+/// `mutate` returns whether it made a change worth persisting: when it returns
+/// `false` the file is left completely untouched (no reformat, no mtime bump), so a
+/// no-op uninstall does not disturb a user's hand-formatted settings. It must be
+/// idempotent, since a CAS retry runs it again against freshly read bytes.
+fn edit_json_settings_atomically<F>(path: &Path, context: &str, mut mutate: F) -> io::Result<bool>
+where
+    F: FnMut(&mut Value) -> io::Result<bool>,
+{
+    // One retry after a detected concurrent write; the second mismatch is fatal.
+    let mut last_err = None;
+    for attempt in 0..2 {
+        let original_bytes = if path.is_file() {
+            Some(fs::read_to_string(path)?)
+        } else {
+            None
+        };
+
+        let mut value = match original_bytes.as_deref() {
+            Some(bytes) => serde_json::from_str::<Value>(bytes).map_err(|err| {
+                io::Error::other(format!("failed to parse {}: {err}", path.display()))
+            })?,
+            None => json!({}),
+        };
+
+        let changed = mutate(&mut value)?;
+        if !changed {
+            return Ok(false);
+        }
+
+        let new_bytes = serde_json::to_string_pretty(&value)?;
+
+        // CAS: re-read just before the rename. If the on-disk bytes moved since our
+        // initial read, a concurrent writer raced us — abort and retry once.
+        let current_bytes = if path.is_file() {
+            Some(fs::read_to_string(path)?)
+        } else {
+            None
+        };
+        if current_bytes != original_bytes {
+            last_err = Some(io::Error::other(format!(
+                "{context}: {} changed concurrently during edit; aborted without clobbering",
+                path.display()
+            )));
+            if attempt == 0 {
+                tracing::debug!(path = %path.display(), "{context}: concurrent write detected, retrying");
+                continue;
+            }
+            break;
+        }
+
+        write_file_atomically(path, &new_bytes)?;
+
+        // Test-only seam: let a test corrupt the just-written file so the rollback
+        // branch below is exercised end-to-end (there is no natural way to inject a
+        // torn write in a unit test).
+        #[cfg(test)]
+        corrupt_settings_for_test(path);
+
+        // Validate the write and roll back on corruption — but never clobber a
+        // concurrent writer. If the reread differs from what we wrote, distinguish:
+        //   - unparseable  → a genuine torn/corrupt write (only our own rename could
+        //     leave garbage here); restore the exact pre-edit content.
+        //   - parseable-but-different → a concurrent writer (e.g. Claude Code) landed
+        //     valid JSON in the rename→reread window; leave their write in place and
+        //     error, rather than reverting it to our stale snapshot.
+        let reread = fs::read_to_string(path)?;
+        match settings_write_outcome(&value, &reread) {
+            SettingsWriteOutcome::Survived => return Ok(true),
+            SettingsWriteOutcome::Corrupt => {
+                match original_bytes.as_deref() {
+                    Some(bytes) => write_file_atomically(path, bytes)?,
+                    None => {
+                        let _ = fs::remove_file(path);
+                    }
+                }
+                return Err(io::Error::other(format!(
+                    "{context}: post-write validation of {} failed; restored the pre-edit contents",
+                    path.display()
+                )));
+            }
+            SettingsWriteOutcome::ConcurrentWrite => {
+                return Err(io::Error::other(format!(
+                    "{context}: {} was overwritten by another process during the edit; \
+                     left the concurrent write in place without clobbering",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    // Only reachable via the CAS `break` above, which always sets `last_err` first.
+    Err(last_err.unwrap_or_else(|| io::Error::other("settings edit aborted")))
+}
+
+/// The three outcomes of reading a settings file back after an atomic write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsWriteOutcome {
+    /// The reread is byte-for-byte the value herdr wrote — the write landed intact.
+    Survived,
+    /// The reread does not parse as JSON — a genuine torn/corrupt write. Only herdr's
+    /// own rename could leave garbage here, so it is safe to roll back to pre-edit.
+    Corrupt,
+    /// The reread parses but differs from what herdr wrote — a concurrent writer landed
+    /// valid JSON after the rename. Rolling back would clobber it, so it must not.
+    ConcurrentWrite,
+}
+
+/// Post-write validation core (pure, no I/O): classify the bytes read back after the
+/// write. Deep-equality catches a key that failed to round-trip (e.g. a sibling silently
+/// dropped); the parse check separates herdr's own corruption (roll back) from a valid
+/// concurrent write (leave in place). Extracted from the I/O path so it can be exercised
+/// directly with malformed input (design FR9b Testing Strategy).
+fn settings_write_outcome(intended: &Value, reread_bytes: &str) -> SettingsWriteOutcome {
+    match serde_json::from_str::<Value>(reread_bytes) {
+        Ok(parsed) if &parsed == intended => SettingsWriteOutcome::Survived,
+        Ok(_) => SettingsWriteOutcome::ConcurrentWrite,
+        Err(_) => SettingsWriteOutcome::Corrupt,
+    }
+}
+
+/// Write `contents` to `path` via a same-directory temp file + atomic rename so a
+/// concurrent reader never observes a partially written file. The temp file is
+/// created in the target's parent (required for the rename to stay on one filesystem).
+///
+/// Two properties keep the write from surprising a user's file setup:
+/// - **symlink write-through**: if `path` is a symlink (a dotfile-manager setup —
+///   chezmoi/stow/yadm point `~/.claude/settings.json` at a repo copy), the rename
+///   targets the *resolved* real file and lands in its directory, so the symlink and
+///   the managed copy survive instead of being replaced by a plain file. This holds
+///   even for a *dangling* link (target not yet materialized, e.g. a partial
+///   `chezmoi apply`): the link's target path is resolved via `read_link` so the write
+///   creates the target rather than clobbering the link with a regular file.
+/// - **mode preservation**: the rename replaces the target inode, so on unix the
+///   existing file's mode is copied onto the temp file first — otherwise a user who
+///   tightened `settings.json` to `0600` would have it silently widened to the umask
+///   default (typically `0644`) on every edit.
+fn write_file_atomically(path: &Path, contents: &str) -> io::Result<()> {
+    let resolved = resolve_write_target(path);
+    let parent = resolved.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = resolved
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings.json");
+    let tmp_path = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    fs::write(&tmp_path, contents)?;
+
+    #[cfg(unix)]
+    if let Ok(meta) = fs::metadata(&resolved) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(err) = fs::set_permissions(
+            &tmp_path,
+            fs::Permissions::from_mode(meta.permissions().mode()),
+        ) {
+            // Fail-open (the write still lands), but surface it: a swallowed error here
+            // is exactly how a tightened 0600 would get silently widened to the umask
+            // default, the outcome this block exists to prevent.
+            tracing::debug!(
+                path = %resolved.display(),
+                %err,
+                "could not preserve settings file mode on atomic write"
+            );
+        }
+    }
+
+    if let Err(err) = fs::rename(&tmp_path, &resolved) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Resolve the real file an atomic write should target, following a symlink at `path`
+/// through to its destination so a dotfile-manager link survives the rename:
+/// - Not a symlink → `path` itself (canonicalize is unnecessary; a plain file is its own
+///   target and a nonexistent path is a fresh install).
+/// - Symlink with an existing target → the canonicalized real path.
+/// - **Dangling** symlink (target missing) → the link's target resolved via `read_link`
+///   (relative targets joined against the link's parent), so the write creates the
+///   target instead of `rename` replacing the link with a regular file.
+fn resolve_write_target(path: &Path) -> PathBuf {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => match fs::canonicalize(path) {
+            Ok(real) => real,
+            Err(_) => match fs::read_link(path) {
+                Ok(target) if target.is_absolute() => target,
+                Ok(target) => path
+                    .parent()
+                    .map(|parent| parent.join(&target))
+                    .unwrap_or(target),
+                // Unreadable link: fall back to the link path (best effort).
+                Err(_) => path.to_path_buf(),
+            },
+        },
+        // Plain file, or path does not exist (fresh install): use as-is.
+        _ => path.to_path_buf(),
+    }
+}
+
+// Test-only write-injection hook: when a test arms this with some bytes, the next
+// `edit_json_settings_atomically` write overwrites the just-renamed file with those bytes
+// (simulating either a torn write with garbage, or a concurrent writer landing valid
+// JSON). Consumed once (cleared on read).
+#[cfg(test)]
+thread_local! {
+    static INJECT_AFTER_WRITE_HOOK: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn arm_corrupt_settings_for_test() {
+    arm_inject_after_write_for_test("{ corrupted by test ");
+}
+
+#[cfg(test)]
+fn arm_inject_after_write_for_test(bytes: &str) {
+    INJECT_AFTER_WRITE_HOOK.with(|hook| *hook.borrow_mut() = Some(bytes.to_string()));
+}
+
+#[cfg(test)]
+fn corrupt_settings_for_test(path: &Path) {
+    INJECT_AFTER_WRITE_HOOK.with(|hook| {
+        if let Some(bytes) = hook.borrow_mut().take() {
+            let _ = fs::write(path, bytes);
+        }
+    });
+}
+
+/// The statusLine command herdr installs: a `bash '<wrapper>'` invocation, prefixed
+/// with `HERDR_STATUSLINE_CHAIN=<prior command>` when a prior command was recorded so
+/// the wrapper can chain it. Both the wrapper path and the chained command are
+/// single-quoted, so no value is interpolated in a way that changes shell word
+/// boundaries.
+#[cfg(unix)]
+fn build_claude_statusline_command(wrapper_path: &Path, chain: Option<&str>) -> String {
+    let base = format!(
+        "bash {}",
+        shell_single_quote(&wrapper_path.display().to_string())
+    );
+    match chain {
+        Some(chain) if !chain.is_empty() => {
+            format!(
+                "HERDR_STATUSLINE_CHAIN={} {base}",
+                shell_single_quote(chain)
+            )
+        }
+        _ => base,
+    }
+}
+
+/// Extract the scalar command string from a `statusLine` value, handling both the
+/// bare-string shape (`"statusLine": "cmd"`) and the object shape
+/// (`"statusLine": {"type":"command","command":"cmd", ...}`). Any other shape
+/// (null, object without a string `command`) yields `None`.
+#[cfg(unix)]
+fn statusline_command_str(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(command) => Some(command.as_str()),
+        Value::Object(object) => object.get("command").and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+/// herdr ownership of a `statusLine` is decided solely by whether its command
+/// references the fixed wrapper path — never by content — so a version bump can
+/// never mistake herdr's own older wrapper for a user command. The env-prefixed
+/// install form still contains the `bash '<wrapper>'` substring, so it matches too.
+#[cfg(unix)]
+fn statusline_is_herdr_owned(value: &Value, wrapper_path: &Path) -> bool {
+    statusline_command_str(value)
+        .is_some_and(|command| command.contains(&wrapper_path.display().to_string()))
+}
+
+/// Install (or refresh) the herdr `statusLine` object, preserving everything else in
+/// `settings`. Returns whether anything changed. Idempotent across reinstalls.
+///
+/// The sidecar `herdrStatusLine.original` records whatever command herdr is about to
+/// displace, so uninstall can put it back:
+/// - When the current `statusLine` is a **user** command (not herdr-owned), it is
+///   recorded verbatim — including a command the user set *after* a prior install, so a
+///   later reinstall never silently loses it.
+/// - When the current `statusLine` is **already herdr-owned** (a genuine version-bump
+///   reinstall), the existing sidecar is preserved untouched, so the true original
+///   survives the bump. If herdr owns it but the sidecar is missing (hand-deleted), the
+///   original is unrecoverable and `null` is recorded, so uninstall removes the
+///   statusLine rather than resurrecting herdr's own wrapper command.
+///
+/// The active statusLine object is (re)built from the CURRENT on-disk object, so every
+/// user sub-field is carried forward — both those on the pre-takeover original and any
+/// the user edits on herdr's active object between reinstalls — with only `type`,
+/// `command`, and `refreshInterval` overridden.
+#[cfg(unix)]
+fn apply_claude_statusline(settings: &mut Value, wrapper_path: &Path) -> io::Result<bool> {
+    let object = settings
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("claude settings root is not a JSON object"))?;
+
+    let current = object.get("statusLine").cloned();
+    let already_owned = current
+        .as_ref()
+        .is_some_and(|value| statusline_is_herdr_owned(value, wrapper_path));
+
+    if already_owned {
+        // Version-bump reinstall: never overwrite the recorded original. Only backfill
+        // `null` when no sidecar exists at all (hand-deleted; original unrecoverable).
+        if !object.contains_key(CLAUDE_STATUSLINE_SIDECAR_KEY) {
+            object.insert(
+                CLAUDE_STATUSLINE_SIDECAR_KEY.to_string(),
+                json!({ "original": Value::Null }),
+            );
+        }
+    } else {
+        // The current command is the user's (or there is none): record it as the
+        // original herdr displaces, overwriting any stale sidecar so a command the user
+        // set after a prior install is not lost on this reinstall.
+        object.insert(
+            CLAUDE_STATUSLINE_SIDECAR_KEY.to_string(),
+            json!({ "original": current.clone().unwrap_or(Value::Null) }),
+        );
+    }
+
+    let recorded_original = object
+        .get(CLAUDE_STATUSLINE_SIDECAR_KEY)
+        .and_then(|sidecar| sidecar.get("original"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let chain = statusline_command_str(&recorded_original).map(str::to_string);
+
+    let command = build_claude_statusline_command(wrapper_path, chain.as_deref());
+    // Seed from the CURRENT on-disk statusLine object so every sub-field the user set
+    // survives onto herdr's active object — both the ones on their pre-takeover original
+    // (first install) and any they edited on herdr's own object afterward (version-bump
+    // reinstall). Then override only the three fields herdr owns. A non-object current
+    // value (bare-string command or none) contributes no sub-fields.
+    let mut new_statusline = match &current {
+        Some(Value::Object(existing)) => existing.clone(),
+        _ => serde_json::Map::new(),
+    };
+    new_statusline.insert("type".to_string(), json!("command"));
+    new_statusline.insert("command".to_string(), json!(command));
+    new_statusline.insert(
+        "refreshInterval".to_string(),
+        json!(CLAUDE_STATUSLINE_REFRESH_INTERVAL_SECS),
+    );
+
+    let new_value = Value::Object(new_statusline);
+    let changed = object.get("statusLine") != Some(&new_value);
+    object.insert("statusLine".to_string(), new_value);
+    Ok(changed)
+}
+
+/// Reverse `apply_claude_statusline`: if herdr still owns the `statusLine`, restore
+/// the recorded original (or remove `statusLine` entirely when none was recorded);
+/// if the user has since changed the command, leave `statusLine` untouched. Either
+/// way the sidecar key is removed. Returns whether anything changed.
+#[cfg(unix)]
+fn restore_claude_statusline(settings: &mut Value, wrapper_path: &Path) -> io::Result<bool> {
+    let Some(object) = settings.as_object_mut() else {
+        return Ok(false);
+    };
+
+    let mut changed = false;
+
+    let owned = object
+        .get("statusLine")
+        .is_some_and(|value| statusline_is_herdr_owned(value, wrapper_path));
+
+    if owned {
+        let recorded_original = object
+            .get(CLAUDE_STATUSLINE_SIDECAR_KEY)
+            .and_then(|sidecar| sidecar.get("original"))
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        if recorded_original.is_null() {
+            if object.remove("statusLine").is_some() {
+                changed = true;
+            }
+        } else if object.get("statusLine") != Some(&recorded_original) {
+            object.insert("statusLine".to_string(), recorded_original);
+            changed = true;
+        }
+    }
+
+    if object.remove(CLAUDE_STATUSLINE_SIDECAR_KEY).is_some() {
+        changed = true;
+    }
+
+    Ok(changed)
+}
+
+/// The runtime directories the statusLine wrapper may write its `<model>\t<epoch>`
+/// state files into, paired with whether the dir needs the shared-`/tmp` trust guard.
+/// This mirrors the wrapper's own resolution
+/// (`${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/herdr-statusline[-<uid>]`): `XDG_RUNTIME_DIR`
+/// is already per-user so its dir is unqualified and trusted, while the shared `/tmp`
+/// fallback is uid-qualified and must be re-checked for symlink/ownership before we read
+/// it. Keep this in sync with `assets/claude/herdr-statusline.sh`; the shell asset is the
+/// source of truth for the on-disk layout.
+#[cfg(unix)]
+fn claude_statusline_state_dirs() -> Vec<(PathBuf, bool)> {
+    let uid = unsafe {
+        // SAFETY: getuid() reads the caller's real uid and is always safe; the libc
+        // signature is unsafe only because it is an extern "C" fn.
+        libc::getuid()
+    };
+    let mut dirs = Vec::new();
+    if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
+        dirs.push((PathBuf::from(xdg).join("herdr-statusline"), false));
+    }
+    let tmp = std::env::var_os("TMPDIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    dirs.push((tmp.join(format!("herdr-statusline-{uid}")), true));
+    dirs
+}
+
+/// The shared-`/tmp` fallback state dir is only trusted when it is a real directory (not
+/// a symlink) owned by the current uid — the same guard the wrapper enforces before it
+/// writes. This stops a local attacker who pre-creates
+/// `/tmp/herdr-statusline-<uid>` (or symlinks it elsewhere) from feeding the status read
+/// a planted or oversized state file. Absent or unreadable dirs return `false` (skip).
+#[cfg(unix)]
+fn claude_statusline_tmp_dir_is_trusted(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe {
+        // SAFETY: see claude_statusline_state_dirs.
+        libc::getuid()
+    };
+    // symlink_metadata does not follow a symlinked dir, so a symlink is detectable here.
+    match fs::symlink_metadata(dir) {
+        Ok(meta) => !meta.file_type().is_symlink() && meta.uid() == uid,
+        Err(_) => false,
+    }
+}
+
+/// Read the confirmed-report epoch (unix seconds) from one `<model>\t<epoch>` state file.
+/// The read is byte-bounded so a hostile or runaway file in the shared `/tmp` fallback
+/// cannot force an unbounded read. The last tab-separated field of the first line is
+/// parsed as the epoch (for a tab-less line that is the whole line), so a non-integer
+/// epoch or non-UTF-8 prefix yields `None`.
+#[cfg(unix)]
+fn claude_statusline_read_epoch(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    // The state line is `<model>\t<epoch>`; the model is a control-char-stripped display
+    // name, so 4 KiB comfortably covers the first newline in the normal case. The bound
+    // is a hard fail-safe against a hostile/runaway file, not a correctness assumption
+    // about the model length.
+    let mut buf = String::new();
+    fs::File::open(path)
+        .ok()?
+        .take(4096)
+        .read_to_string(&mut buf)
+        .ok()?;
+    buf.lines()
+        .next()
+        .and_then(|line| line.rsplit('\t').next())
+        .and_then(|epoch| epoch.trim().parse::<u64>().ok())
+}
+
+/// Diagnostic outcome for the statusLine wrapper, distinguishing the three cases the
+/// design's diagnosability requirement cares about: a confirmed report (with its epoch),
+/// no report yet, and a state dir that exists but could not be read (a permission signal
+/// an operator needs, not silently folded into "never reported").
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeStatuslineReport {
+    Reported(u64),
+    NeverReported,
+    Unreadable,
+}
+
+/// The wrapper's most-recent confirmed-report epoch across all state files.
+/// `integration status` typically runs outside a herdr pane, so the exact
+/// `<server_gen>-<pane_id>` key is unknowable; we scan for the newest epoch instead. A
+/// found epoch wins; otherwise an unreadable (existing but permission-denied) dir reports
+/// `Unreadable`, and a merely-absent dir reports `NeverReported`. Corrupt files and
+/// untrusted `/tmp` dirs are skipped rather than erroring.
+#[cfg(unix)]
+pub(crate) fn claude_statusline_report_status() -> ClaudeStatuslineReport {
+    let mut newest: Option<u64> = None;
+    let mut saw_unreadable = false;
+    for (dir, needs_guard) in claude_statusline_state_dirs() {
+        if needs_guard && !claude_statusline_tmp_dir_is_trusted(&dir) {
+            continue;
+        }
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            // The dir exists but we cannot list it (e.g. permissions) — a real signal.
+            Err(_) => {
+                saw_unreadable = true;
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                continue;
+            }
+            if let Some(epoch) = claude_statusline_read_epoch(&entry.path()) {
+                newest = Some(newest.map_or(epoch, |current| current.max(epoch)));
+            }
+        }
+    }
+    match newest {
+        Some(epoch) => ClaudeStatuslineReport::Reported(epoch),
+        None if saw_unreadable => ClaudeStatuslineReport::Unreadable,
+        None => ClaudeStatuslineReport::NeverReported,
+    }
+}
+
+/// The report TTL the wrapper stamps (`--ttl-ms 900000`, 15 minutes). A confirmed report
+/// older than this has expired from the sidebar, so the diagnostic flags it stale.
+#[cfg(unix)]
+const CLAUDE_STATUSLINE_REPORT_TTL_SECS: u64 = 900;
+
+/// Render the statusLine diagnostic lines for `herdr integration status claude` (pure, so
+/// the staleness boundary and clock-failure branch are unit-testable). `now_secs` is the
+/// current unix time, or `None` when the clock is unavailable — in which case a reported
+/// epoch is shown without a misleading age rather than as "0s ago".
+#[cfg(unix)]
+pub(crate) fn format_claude_statusline_report(
+    report: ClaudeStatuslineReport,
+    now_secs: Option<u64>,
+) -> Vec<String> {
+    // The scan cannot key to a single pane (see claude_statusline_report_status), so a
+    // fresh epoch means "some session reported recently," not necessarily this one. The
+    // PATH caveat therefore rides EVERY outcome, not just NeverReported — a per-session
+    // failure (e.g. `herdr` off this pane's PATH) can hide behind another pane's report.
+    let path_note = "  note: reports are aggregated across all sessions; the wrapper \
+                     reports via `herdr`, so if `herdr` is not on a session's statusLine \
+                     PATH that session's model silently never appears"
+        .to_string();
+    match report {
+        ClaudeStatuslineReport::Reported(epoch) => {
+            let head = match now_secs {
+                Some(now) => {
+                    let age = now.saturating_sub(epoch);
+                    let staleness = if age > CLAUDE_STATUSLINE_REPORT_TTL_SECS {
+                        " (stale)"
+                    } else {
+                        ""
+                    };
+                    format!("  statusLine last reported: {age}s ago{staleness} (epoch {epoch}, newest across sessions)")
+                }
+                None => format!(
+                    "  statusLine last reported: epoch {epoch} (age unknown; system clock unavailable)"
+                ),
+            };
+            vec![head, path_note]
+        }
+        ClaudeStatuslineReport::NeverReported => {
+            vec!["  statusLine last reported: never".to_string(), path_note]
+        }
+        ClaudeStatuslineReport::Unreadable => vec![
+            "  statusLine last reported: unknown (state directory exists but could not \
+             be read; check permissions)"
+                .to_string(),
+        ],
+    }
+}
+
 pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     let dir = claude_dir()?;
     if !dir.is_dir() {
@@ -1466,48 +2096,64 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     fs::write(&hook_path, CLAUDE_HOOK_ASSET)?;
     make_executable(&hook_path)?;
 
-    let settings_path = dir.join("settings.json");
-    let mut settings = if settings_path.is_file() {
-        serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?).map_err(|err| {
-            io::Error::other(format!(
-                "failed to parse {}: {err}",
-                settings_path.display()
-            ))
-        })?
-    } else {
-        json!({})
+    // The statusLine wrapper is a POSIX shell asset with no Windows variant. On unix,
+    // install it beside the lifecycle hook so the settings.json edit below can point
+    // `statusLine.command` at its fixed path. Writing it also repairs a dangling
+    // reference (settings point here but the file was missing).
+    #[cfg(unix)]
+    let statusline_path = {
+        let path = hooks_dir.join(CLAUDE_STATUSLINE_INSTALL_NAME);
+        fs::write(&path, CLAUDE_STATUSLINE_ASSET)?;
+        make_executable(&path)?;
+        path
     };
 
-    let hooks = ensure_hooks_object(
-        &mut settings,
-        &settings_path,
-        "claude settings",
-        "claude settings hooks",
-    )?;
-    remove_hook_commands(hooks, "PostToolUse", &hook_path, Some("working"))?;
-    remove_hook_commands(hooks, "PostToolUseFailure", &hook_path, Some("working"))?;
-    remove_hook_commands(hooks, "SubagentStop", &hook_path, Some("working"))?;
-    remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
-    remove_hook_commands(hooks, "SessionStart", &hook_path, Some("idle"))?;
-    remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
-    remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
-    remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
-    remove_hook_commands(hooks, "SessionEnd", &hook_path, Some("release"))?;
-    remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
-    ensure_command_hook(
-        hooks,
-        "SessionStart",
-        hook_command(&hook_path, Some("session")),
-        10,
-        Some("*"),
-    )?;
-    remove_legacy_bash_hook_file(&hook_path)?;
+    let settings_path = dir.join("settings.json");
+    // Route the entire settings edit (hooks surgery + statusLine takeover) through the
+    // field-preserving, atomic, CAS-guarded, validated write (FR9b). Unknown sibling
+    // keys such as `subagentStatusLine` are retained (values and keys, though not their
+    // on-disk order) because the parsed value is mutated in place rather than rebuilt.
+    edit_json_settings_atomically(&settings_path, "claude settings", |settings| {
+        let hooks = ensure_hooks_object(
+            settings,
+            &settings_path,
+            "claude settings",
+            "claude settings hooks",
+        )?;
+        remove_hook_commands(hooks, "PostToolUse", &hook_path, Some("working"))?;
+        remove_hook_commands(hooks, "PostToolUseFailure", &hook_path, Some("working"))?;
+        remove_hook_commands(hooks, "SubagentStop", &hook_path, Some("working"))?;
+        remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
+        remove_hook_commands(hooks, "SessionStart", &hook_path, Some("idle"))?;
+        remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
+        remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
+        remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
+        remove_hook_commands(hooks, "SessionEnd", &hook_path, Some("release"))?;
+        remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
+        ensure_command_hook(
+            hooks,
+            "SessionStart",
+            hook_command(&hook_path, Some("session")),
+            10,
+            Some("*"),
+        )?;
 
-    fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+        #[cfg(unix)]
+        apply_claude_statusline(settings, &statusline_path)?;
+
+        // Always report a change so the settings write lands unconditionally: install
+        // is expected to (re)materialize herdr's settings even when this run's hook and
+        // statusLine edits happened to be idempotent.
+        Ok(true)
+    })?;
+
+    remove_legacy_bash_hook_file(&hook_path)?;
 
     Ok(ClaudeInstallPaths {
         hook_path,
         settings_path,
+        #[cfg(unix)]
+        statusline_path,
     })
 }
 
@@ -1902,59 +2548,64 @@ pub(crate) fn uninstall_omp() -> io::Result<OmpUninstallResult> {
 }
 
 pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
-    let hook_path = claude_dir()?.join("hooks").join(CLAUDE_HOOK_INSTALL_NAME);
+    let hooks_dir = claude_dir()?.join("hooks");
+    let hook_path = hooks_dir.join(CLAUDE_HOOK_INSTALL_NAME);
     let settings_path = claude_dir()?.join("settings.json");
-    let mut updated_settings = false;
+    #[cfg(unix)]
+    let statusline_path = hooks_dir.join(CLAUDE_STATUSLINE_INSTALL_NAME);
 
-    if settings_path.is_file() {
-        let mut settings = serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?)
-            .map_err(|err| {
-                io::Error::other(format!(
-                    "failed to parse {}: {err}",
-                    settings_path.display()
-                ))
-            })?;
+    // Remove the herdr hook entries and restore the statusLine through the same
+    // atomic, CAS-guarded, validated write used by install (FR9b). A pre-existing
+    // invalid settings.json is a hard error with no write (the core parses first).
+    let updated_settings =
+        edit_json_settings_atomically(&settings_path, "claude settings", |settings| {
+            let mut changed = false;
 
-        if let Some(hooks) = hooks_object_if_present(
-            &mut settings,
-            &settings_path,
-            "claude settings",
-            "claude settings hooks",
-        )? {
-            updated_settings |=
-                remove_hook_commands(hooks, "SessionStart", &hook_path, Some("idle"))?;
-            updated_settings |=
-                remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
-            updated_settings |=
-                remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
-            updated_settings |=
-                remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
-            updated_settings |=
-                remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
-            updated_settings |=
-                remove_hook_commands(hooks, "PostToolUse", &hook_path, Some("working"))?;
-            updated_settings |=
-                remove_hook_commands(hooks, "PostToolUseFailure", &hook_path, Some("working"))?;
-            updated_settings |=
-                remove_hook_commands(hooks, "SubagentStop", &hook_path, Some("working"))?;
-            updated_settings |= remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
-            updated_settings |=
-                remove_hook_commands(hooks, "SessionEnd", &hook_path, Some("release"))?;
-        }
+            if let Some(hooks) = hooks_object_if_present(
+                settings,
+                &settings_path,
+                "claude settings",
+                "claude settings hooks",
+            )? {
+                changed |= remove_hook_commands(hooks, "SessionStart", &hook_path, Some("idle"))?;
+                changed |=
+                    remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
+                changed |=
+                    remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
+                changed |= remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
+                changed |=
+                    remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
+                changed |= remove_hook_commands(hooks, "PostToolUse", &hook_path, Some("working"))?;
+                changed |=
+                    remove_hook_commands(hooks, "PostToolUseFailure", &hook_path, Some("working"))?;
+                changed |=
+                    remove_hook_commands(hooks, "SubagentStop", &hook_path, Some("working"))?;
+                changed |= remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
+                changed |= remove_hook_commands(hooks, "SessionEnd", &hook_path, Some("release"))?;
+            }
 
-        if updated_settings {
-            fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
-        }
-    }
+            #[cfg(unix)]
+            {
+                changed |= restore_claude_statusline(settings, &statusline_path)?;
+            }
+
+            Ok(changed)
+        })?;
 
     let removed_hook_file =
         remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    #[cfg(unix)]
+    let removed_statusline_file = remove_file_if_exists(&statusline_path)?;
 
     Ok(ClaudeUninstallResult {
         hook_path,
         settings_path,
         removed_hook_file,
         updated_settings,
+        #[cfg(unix)]
+        statusline_path,
+        #[cfg(unix)]
+        removed_statusline_file,
     })
 }
 
@@ -4556,6 +5207,839 @@ mod tests {
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_claude_installs_statusline_wrapper_and_wires_settings() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let installed = install_claude().unwrap();
+        let statusline_path = installed.statusline_path.clone();
+        assert_eq!(
+            statusline_path,
+            claude_dir
+                .join("hooks")
+                .join(CLAUDE_STATUSLINE_INSTALL_NAME)
+        );
+        assert_eq!(
+            fs::read_to_string(&statusline_path).unwrap(),
+            CLAUDE_STATUSLINE_ASSET
+        );
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+        assert_eq!(settings["statusLine"]["type"], "command");
+        assert_eq!(
+            settings["statusLine"]["refreshInterval"],
+            json!(CLAUDE_STATUSLINE_REFRESH_INTERVAL_SECS)
+        );
+        // No prior statusLine: the command is a bare wrapper invocation and the
+        // sidecar records `null` so uninstall removes statusLine entirely.
+        let command = settings["statusLine"]["command"].as_str().unwrap();
+        assert!(command.contains(&statusline_path.display().to_string()));
+        assert!(!command.contains("HERDR_STATUSLINE_CHAIN="));
+        assert_eq!(settings["herdrStatusLine"]["original"], Value::Null);
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_claude_preserves_prior_statusline_and_sibling_keys() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        // A prior object-shaped statusLine plus an unrelated sibling key that must
+        // survive the field-preserving merge.
+        let seed = serde_json::json!({
+            "statusLine": {"type": "command", "command": "my-bar.sh", "padding": 2, "hideVimModeIndicator": true},
+            "subagentStatusLine": {"type": "command", "command": "sub.sh"},
+            "permissions": {"allow": ["Read"]}
+        });
+        fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string(&seed).unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let installed = install_claude().unwrap();
+        let statusline_path = installed.statusline_path.clone();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+
+        // Sibling keys retained verbatim.
+        assert_eq!(settings["subagentStatusLine"]["command"], "sub.sh");
+        assert_eq!(settings["permissions"]["allow"][0], "Read");
+
+        // Original recorded verbatim in the sidecar; the chained command carries it.
+        assert_eq!(
+            settings["herdrStatusLine"]["original"]["command"],
+            "my-bar.sh"
+        );
+        let command = settings["statusLine"]["command"].as_str().unwrap();
+        assert!(command.contains("HERDR_STATUSLINE_CHAIN="));
+        assert!(command.contains("my-bar.sh"));
+        assert!(command.contains(&statusline_path.display().to_string()));
+        // Prior padding AND other user sub-fields carried forward onto herdr's active
+        // object (task item 11: preserve padding and other object fields).
+        assert_eq!(settings["statusLine"]["padding"], json!(2));
+        assert_eq!(settings["statusLine"]["hideVimModeIndicator"], json!(true));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_claude_reinstall_never_overwrites_recorded_original() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let seed = serde_json::json!({
+            "statusLine": "user-bar --flag"
+        });
+        fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string(&seed).unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_claude().unwrap();
+        // Simulate a version bump by re-running install; the recorded original must
+        // survive even though statusLine.command is now herdr-owned.
+        install_claude().unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["herdrStatusLine"]["original"], "user-bar --flag");
+        let command = settings["statusLine"]["command"].as_str().unwrap();
+        assert!(command.contains("user-bar --flag"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_claude_reinstall_preserves_sub_field_edited_on_active_object() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_claude().unwrap();
+        // The user tweaks a sub-field on herdr's OWN active statusLine object (command
+        // stays herdr-owned). A version-bump reinstall must carry that live edit forward,
+        // not revert it to the (empty) pre-takeover snapshot.
+        let mut settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        settings["statusLine"]["padding"] = json!(7);
+        fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+
+        install_claude().unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["statusLine"]["padding"], json!(7));
+        assert_eq!(
+            settings["statusLine"]["refreshInterval"],
+            json!(CLAUDE_STATUSLINE_REFRESH_INTERVAL_SECS)
+        );
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_claude_rerecords_user_command_replaced_after_install() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let seed = serde_json::json!({"statusLine": "first-bar.sh"});
+        fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string(&seed).unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_claude().unwrap();
+        // The user later replaces herdr's command with their own; a subsequent reinstall
+        // must record THIS command (not resurrect the stale first-bar.sh) so uninstall
+        // restores what the user actually had.
+        let mut settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        settings["statusLine"] = json!("second-bar.sh");
+        fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+
+        install_claude().unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["herdrStatusLine"]["original"], "second-bar.sh");
+        assert!(settings["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("second-bar.sh"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_claude_restores_prior_statusline() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let seed = serde_json::json!({"statusLine": "my-bar.sh"});
+        fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string(&seed).unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_claude().unwrap();
+        let result = uninstall_claude().unwrap();
+        assert!(result.removed_statusline_file);
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["statusLine"], "my-bar.sh");
+        assert!(settings.get("herdrStatusLine").is_none());
+        assert!(!result.statusline_path.exists());
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_claude_removes_statusline_when_no_original_recorded() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        // No prior statusLine → install records `null` → uninstall removes it entirely.
+        install_claude().unwrap();
+        uninstall_claude().unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert!(settings.get("statusLine").is_none());
+        assert!(settings.get("herdrStatusLine").is_none());
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_claude_leaves_user_changed_statusline_untouched() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_claude().unwrap();
+        // User replaces the command with their own after install; the sidecar still
+        // records the herdr takeover, but uninstall must not clobber the new command.
+        let mut settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        settings["statusLine"] = json!("user-took-over.sh");
+        fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+
+        uninstall_claude().unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["statusLine"], "user-took-over.sh");
+        // Sidecar is still cleaned up.
+        assert!(settings.get("herdrStatusLine").is_none());
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_claude_repairs_dangling_wrapper_reference() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        let hooks_dir = claude_dir.join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        // Settings point at the wrapper, but the wrapper file is missing (dangling).
+        let wrapper = hooks_dir.join(CLAUDE_STATUSLINE_INSTALL_NAME);
+        let seed = serde_json::json!({
+            "statusLine": {"type": "command", "command": format!("bash '{}'", wrapper.display())}
+        });
+        fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string(&seed).unwrap(),
+        )
+        .unwrap();
+        assert!(!wrapper.exists());
+
+        install_claude().unwrap();
+        // Install rewrites the wrapper file, repairing the dangling reference.
+        assert!(wrapper.exists());
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn edit_json_settings_rejects_preexisting_invalid_json() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let path = base.join("settings.json");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&path, "{ not valid json ").unwrap();
+
+        let err = edit_json_settings_atomically(&path, "test settings", |value| {
+            value["x"] = json!(1);
+            Ok(true)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("failed to parse"));
+        // The invalid file is left exactly as it was — no write.
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ not valid json ");
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn edit_json_settings_no_op_leaves_file_bytes_untouched() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let path = base.join("settings.json");
+        fs::create_dir_all(&base).unwrap();
+        // Deliberately compact / hand-formatted; a no-op edit must not reformat it.
+        let original = "{\"a\":1}";
+        fs::write(&path, original).unwrap();
+
+        let changed = edit_json_settings_atomically(&path, "test settings", |_| Ok(false)).unwrap();
+        assert!(!changed);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn edit_json_settings_preserves_sibling_keys() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let path = base.join("settings.json");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&path, r#"{"keep":{"nested":true},"other":42}"#).unwrap();
+
+        edit_json_settings_atomically(&path, "test settings", |value| {
+            value["added"] = json!("new");
+            Ok(true)
+        })
+        .unwrap();
+
+        let result: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(result["keep"]["nested"], true);
+        assert_eq!(result["other"], 42);
+        assert_eq!(result["added"], "new");
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn settings_write_outcome_classifies_reread() {
+        let intended = json!({"statusLine": {"command": "x"}, "keep": 1});
+        // Byte-identical round-trip → Survived.
+        assert_eq!(
+            settings_write_outcome(&intended, &serde_json::to_string_pretty(&intended).unwrap()),
+            SettingsWriteOutcome::Survived
+        );
+        // Truncated / unparseable content → Corrupt (our own torn write; safe to roll back).
+        assert_eq!(
+            settings_write_outcome(&intended, "{ truncated"),
+            SettingsWriteOutcome::Corrupt
+        );
+        // Parseable but different (dropped sibling) → ConcurrentWrite (do NOT clobber).
+        assert_eq!(
+            settings_write_outcome(&intended, r#"{"statusLine":{"command":"x"}}"#),
+            SettingsWriteOutcome::ConcurrentWrite
+        );
+        // Parseable but a changed value → ConcurrentWrite.
+        assert_eq!(
+            settings_write_outcome(&intended, r#"{"statusLine":{"command":"x"},"keep":2}"#),
+            SettingsWriteOutcome::ConcurrentWrite
+        );
+    }
+
+    #[test]
+    fn edit_json_settings_rolls_back_on_post_write_corruption() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let path = base.join("settings.json");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&path, r#"{"keep":1}"#).unwrap();
+
+        // The test hook corrupts the file right after the write, so post-write
+        // validation fails and the pre-edit content must be restored exactly.
+        arm_corrupt_settings_for_test();
+        let err = edit_json_settings_atomically(&path, "test settings", |value| {
+            value["added"] = json!(true);
+            Ok(true)
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("post-write validation"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"keep":1}"#);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn edit_json_settings_rolls_back_by_removing_a_newly_created_file() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let path = base.join("settings.json");
+        fs::create_dir_all(&base).unwrap();
+        // No pre-existing file: a corrupted write must roll back by removing the file
+        // herdr created, not leaving corrupt bytes behind.
+        assert!(!path.exists());
+
+        arm_corrupt_settings_for_test();
+        let err = edit_json_settings_atomically(&path, "test settings", |value| {
+            value["added"] = json!(true);
+            Ok(true)
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("post-write validation"));
+        assert!(!path.exists());
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn edit_json_settings_does_not_clobber_a_concurrent_valid_write() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let path = base.join("settings.json");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&path, r#"{"v":0}"#).unwrap();
+
+        // Simulate a concurrent writer landing VALID JSON in the rename→reread window.
+        // The rollback must NOT revert it to herdr's pre-edit snapshot — the concurrent
+        // write is preserved and herdr errors instead.
+        arm_inject_after_write_for_test(r#"{"v":0,"claude_wrote_this":true}"#);
+        let err = edit_json_settings_atomically(&path, "test settings", |value| {
+            value["added"] = json!(true);
+            Ok(true)
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("overwritten by another process"));
+        let on_disk: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["claude_wrote_this"], true,
+            "concurrent write preserved"
+        );
+        assert!(
+            on_disk.get("added").is_none(),
+            "herdr's change not forced in"
+        );
+        assert_eq!(on_disk["v"], 0);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_atomically_preserves_target_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let path = base.join("settings.json");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_file_atomically(&path, "new").unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "0600 must survive the atomic rename");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_atomically_writes_through_live_symlink() {
+        use std::os::unix::fs::symlink;
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        fs::create_dir_all(&base).unwrap();
+        // A dotfile-manager setup: settings.json is a symlink into a repo copy.
+        let real = base.join("repo").join("settings.json");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, "old").unwrap();
+        let link = base.join("settings.json");
+        symlink(&real, &link).unwrap();
+
+        write_file_atomically(&link, "new").unwrap();
+
+        // The link survives (still a symlink) and the write landed in the real file.
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_atomically_writes_through_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        fs::create_dir_all(&base).unwrap();
+        // A dangling link (target not yet materialized, e.g. a partial `chezmoi apply`):
+        // the write must CREATE the target, not replace the link with a regular file.
+        let real = base.join("repo").join("settings.json");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        let link = base.join("settings.json");
+        symlink(&real, &link).unwrap();
+        assert!(!real.exists());
+
+        write_file_atomically(&link, "new").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "dangling link must survive, not be clobbered into a regular file"
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quotes() {
+        assert_eq!(shell_single_quote("plain"), "'plain'");
+        assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
+        // A value that itself looks like a flag/metachar stays inert inside the quotes.
+        assert_eq!(shell_single_quote("$(rm -rf /)"), "'$(rm -rf /)'");
+    }
+
+    #[test]
+    fn edit_json_settings_cas_retries_once_then_succeeds() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let path = base.join("settings.json");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&path, r#"{"v":0}"#).unwrap();
+        let path_for_closure = path.clone();
+
+        // The closure writes a "concurrent" change into the file on the first pass
+        // only, so the pre-rename re-read mismatches and the whole edit retries; the
+        // second pass sees a stable file and lands.
+        let mut passes = 0;
+        let changed = edit_json_settings_atomically(&path, "test settings", |value| {
+            passes += 1;
+            if passes == 1 {
+                fs::write(&path_for_closure, r#"{"v":1}"#).unwrap();
+            }
+            value["added"] = json!(true);
+            Ok(true)
+        })
+        .unwrap();
+
+        assert!(changed);
+        assert_eq!(passes, 2);
+        let result: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // The retry re-read the concurrent writer's bytes ({"v":1}) as the new base,
+        // so its change is preserved alongside ours — no clobber.
+        assert_eq!(result["v"], 1);
+        assert_eq!(result["added"], true);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn edit_json_settings_cas_aborts_without_clobber_on_persistent_race() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let path = base.join("settings.json");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&path, r#"{"v":0}"#).unwrap();
+        let path_for_closure = path.clone();
+
+        // A writer that mutates the file on every pass forces a mismatch on both the
+        // initial and the retry attempt, so the edit aborts.
+        let mut counter = 0;
+        let err = edit_json_settings_atomically(&path, "test settings", |value| {
+            counter += 1;
+            fs::write(&path_for_closure, format!(r#"{{"v":{counter}}}"#)).unwrap();
+            value["added"] = json!(true);
+            Ok(true)
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("changed concurrently"));
+        // The concurrent writer's last bytes survive; herdr wrote nothing.
+        let result: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(result.get("added").is_none());
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_statusline_report_status_reads_newest() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let runtime = base.join("runtime");
+        let state_dir = runtime.join("herdr-statusline");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_dir.join("gen-1"), "Opus 4.8\t1000\n").unwrap();
+        fs::write(state_dir.join("gen-2"), "Fable 5\t2500\n").unwrap();
+        // Corrupt entry (no tab / non-numeric) is skipped, not an error.
+        fs::write(state_dir.join("gen-3"), "garbage-no-tab\n").unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+        // Point the /tmp fallback at the sandbox too, so the scan never reaches the real
+        // /tmp/herdr-statusline-<uid> (which would flake for anyone dogfooding herdr).
+        std::env::set_var("TMPDIR", &base);
+
+        assert_eq!(
+            claude_statusline_report_status(),
+            ClaudeStatuslineReport::Reported(2500)
+        );
+
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::remove_var("TMPDIR");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_statusline_report_status_reads_tmp_fallback() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        // No XDG_RUNTIME_DIR → the uid-qualified /tmp fallback is used. It must be
+        // uid-owned and not a symlink to be trusted; a freshly created dir satisfies that.
+        let uid = unsafe { libc::getuid() };
+        let state_dir = base.join(format!("herdr-statusline-{uid}"));
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_dir.join("gen-1"), "Opus 4.8\t4200\n").unwrap();
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::set_var("TMPDIR", &base);
+
+        assert_eq!(
+            claude_statusline_report_status(),
+            ClaudeStatuslineReport::Reported(4200)
+        );
+
+        std::env::remove_var("TMPDIR");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_statusline_report_status_skips_symlinked_tmp_fallback() {
+        let _lock = integration_env_lock();
+        use std::os::unix::fs::symlink;
+        let base = unique_base();
+        let uid = unsafe { libc::getuid() };
+        // A hostile symlinked /tmp fallback dir is not trusted, so its contents are
+        // ignored (the attacker cannot feed the status read a planted epoch).
+        let real = base.join("planted");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("gen-1"), "Evil\t9999\n").unwrap();
+        symlink(&real, base.join(format!("herdr-statusline-{uid}"))).unwrap();
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::set_var("TMPDIR", &base);
+
+        assert_eq!(
+            claude_statusline_report_status(),
+            ClaudeStatuslineReport::NeverReported
+        );
+
+        std::env::remove_var("TMPDIR");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_statusline_report_status_none_when_absent() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let runtime = base.join("runtime-empty");
+        fs::create_dir_all(&runtime).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+        std::env::set_var("TMPDIR", &base);
+
+        assert_eq!(
+            claude_statusline_report_status(),
+            ClaudeStatuslineReport::NeverReported
+        );
+
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::remove_var("TMPDIR");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_statusline_read_epoch_is_byte_bounded() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        fs::create_dir_all(&base).unwrap();
+        // A first line longer than the 4 KiB read bound truncates mid-line, so no valid
+        // epoch is parsed — the read stays bounded rather than slurping a runaway file.
+        let huge = format!("model\t{}\n", "9".repeat(8192));
+        let path = base.join("state");
+        fs::write(&path, huge).unwrap();
+
+        assert_eq!(claude_statusline_read_epoch(&path), None);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_statusline_report_status_unreadable_when_dir_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = integration_env_lock();
+        // root ignores the permission bit, so this signal cannot be produced as root.
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
+        let base = unique_base();
+        let runtime = base.join("runtime");
+        let state_dir = runtime.join("herdr-statusline");
+        fs::create_dir_all(&state_dir).unwrap();
+        // Dir exists but is unlistable → the three-way status must report Unreadable, not
+        // fold into NeverReported (the operator-facing permission signal).
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+        std::env::set_var("TMPDIR", &base);
+
+        let report = claude_statusline_report_status();
+
+        // Restore perms so cleanup can remove the dir.
+        let _ = fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700));
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::remove_var("TMPDIR");
+        let _ = fs::remove_dir_all(base);
+
+        assert_eq!(report, ClaudeStatuslineReport::Unreadable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn format_claude_statusline_report_renders_all_cases() {
+        // Fresh report: age, no stale flag, and the aggregated-across-sessions PATH note.
+        let fresh =
+            format_claude_statusline_report(ClaudeStatuslineReport::Reported(1000), Some(1100));
+        assert!(fresh[0].contains("100s ago"));
+        assert!(fresh[0].contains("epoch 1000"));
+        assert!(!fresh[0].contains("(stale)"));
+        assert!(
+            fresh
+                .iter()
+                .any(|line| line.contains("across all sessions")),
+            "the PATH caveat must ride a Reported outcome, not only NeverReported"
+        );
+        // Just past the TTL boundary → stale.
+        let stale = format_claude_statusline_report(
+            ClaudeStatuslineReport::Reported(1000),
+            Some(1000 + CLAUDE_STATUSLINE_REPORT_TTL_SECS + 1),
+        );
+        assert!(
+            stale[0].contains("(stale)"),
+            "past TTL must be flagged stale"
+        );
+        // Exactly at the TTL boundary → not yet stale.
+        let edge = format_claude_statusline_report(
+            ClaudeStatuslineReport::Reported(1000),
+            Some(1000 + CLAUDE_STATUSLINE_REPORT_TTL_SECS),
+        );
+        assert!(!edge[0].contains("(stale)"), "at TTL must not be stale");
+        // Clock unavailable → age unknown, never the misleading "0s ago".
+        let no_clock =
+            format_claude_statusline_report(ClaudeStatuslineReport::Reported(1000), None);
+        assert!(no_clock[0].contains("age unknown"));
+        assert!(!no_clock[0].contains("0s ago"));
+        // A future-dated epoch saturates to 0 rather than underflowing.
+        let future =
+            format_claude_statusline_report(ClaudeStatuslineReport::Reported(2000), Some(1000));
+        assert!(future[0].contains("0s ago"));
+        // Never / unreadable variants.
+        assert!(
+            format_claude_statusline_report(ClaudeStatuslineReport::NeverReported, Some(1))[0]
+                .contains("never")
+        );
+        assert!(
+            format_claude_statusline_report(ClaudeStatuslineReport::Unreadable, Some(1))[0]
+                .contains("could not")
+        );
     }
 
     #[test]
