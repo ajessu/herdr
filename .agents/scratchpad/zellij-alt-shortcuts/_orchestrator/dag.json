@@ -1,0 +1,51 @@
+{
+  "design": ".agents/planning/zellij-alt-shortcuts/design/detailed-design.md",
+  "created": "2026-06-19",
+  "tasks": {
+    "step-1": {
+      "description": "Implement Alt shortcuts with config, dispatch, helpers, and tests",
+      "deps": [],
+      "criteria": [
+        "Alt+h/j/k/l focus the pane left/down/up/right in terminal mode",
+        "Alt+n splits the focused pane along its longer dimension (SplitAuto)",
+        "Alt+x closes the focused pane, Alt+z toggles zoom",
+        "Alt+=/- resize with axis fallback; stacked layout does not silently no-op",
+        "AppState::resize_pane returns bool; existing callers compile unchanged; mark_session_dirty gated",
+        "Alt+i/o move the active tab left/right with correct insert-before semantics",
+        "All existing prefix bindings unchanged",
+        "Single-string user configs still parse; absent new fields deserialize as unbound",
+        "Default config produces zero conflict diagnostics",
+        "TOML round-trip lossless for Many-valued bindings",
+        "Keybind help screen renders new Alt bindings alongside prefix bindings",
+        "resize_mode (prefix+r) unchanged",
+        "just check passes"
+      ],
+      "affected_areas": [
+        "src/config/model.rs",
+        "src/config/keybinds.rs",
+        "src/app/input/navigate.rs",
+        "src/app/input/mod.rs",
+        "src/app/actions.rs",
+        "src/app/state.rs",
+        "src/ui/keybind_help.rs",
+        "src/layout.rs"
+      ]
+    },
+    "step-2": {
+      "description": "Document Alt shortcuts in unreleased docs",
+      "deps": ["step-1"],
+      "criteria": [
+        "Unreleased docs include default Alt shortcut table",
+        "Known limitations documented (unconditional interception, terminal-mode-only, outer multiplexer)",
+        "Alt+x destructive behavior called out specifically",
+        "Config shape change documented (TOML arrays, single-string parses)",
+        "Diagnosing 'my Alt key does nothing' guidance included",
+        "docs/next/CHANGELOG.md updated with feature entry"
+      ],
+      "affected_areas": [
+        "docs/next/website/src/content/docs/",
+        "docs/next/CHANGELOG.md"
+      ]
+    }
+  }
+}
