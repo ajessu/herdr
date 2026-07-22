@@ -10,9 +10,16 @@
 
 set -euo pipefail
 
-FORK_REPO=/workplace/albjessu/herdr
-UPSTREAM_REPO=/workplace/albjessu/herdr-upstream
-INSTALL=/home/albjessu/.local/bin/herdr
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+FORK_REPO=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+UPSTREAM_REPO="${FORK_REPO}-upstream"
+
+INSTALL=$(command -v herdr || true)
+if [[ -z "$INSTALL" ]]; then
+    echo "error: 'herdr' not found on PATH; install once before using this script" >&2
+    exit 1
+fi
+INSTALL=$(readlink -f "$INSTALL")
 TARGET=x86_64-unknown-linux-musl
 ZIG_VERSION=0.15.2
 RUST_IMAGE=rust:1-bookworm
