@@ -958,6 +958,9 @@ impl AppState {
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
             let previous_focus = self.current_pane_focus_target();
+            self.drag = None;
+            self.workspace_press = None;
+            self.tab_press = None;
             self.selection = None;
             self.selection_autoscroll = None;
             self.active = Some(idx);
@@ -993,6 +996,9 @@ impl AppState {
 
         let previous_focus = self.current_pane_focus_target();
         let workspace_changed = self.active != Some(ws_idx);
+        self.drag = None;
+        self.workspace_press = None;
+        self.tab_press = None;
         self.selection = None;
         self.selection_autoscroll = None;
         self.active = Some(ws_idx);
@@ -1097,6 +1103,9 @@ impl AppState {
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws_idx) = self.active {
             let previous_focus = self.current_pane_focus_target();
+            self.drag = None;
+            self.workspace_press = None;
+            self.tab_press = None;
             self.selection = None;
             self.selection_autoscroll = None;
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
@@ -5738,5 +5747,60 @@ mod tests {
         crate::ui::compute_view(&mut single, ratatui::layout::Rect::new(0, 0, 100, 30));
         let not_changed = single.resize_pane(NavDirection::Right);
         assert!(!not_changed);
+    }
+
+    fn set_synthetic_drag(state: &mut AppState) {
+        use crate::app::state::{DragState, DragTarget, TabPressState, WorkspacePressState};
+        state.drag = Some(DragState {
+            target: DragTarget::SidebarDivider,
+        });
+        state.workspace_press = Some(WorkspacePressState {
+            ws_idx: 0,
+            start_col: 5,
+            start_row: 5,
+        });
+        state.tab_press = Some(TabPressState {
+            ws_idx: 0,
+            tab_idx: 0,
+            start_col: 10,
+            start_row: 0,
+        });
+    }
+
+    #[test]
+    fn switch_tab_clears_drag_state() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(Some("second"));
+        set_synthetic_drag(&mut state);
+
+        state.switch_tab(1);
+
+        assert!(state.drag.is_none());
+        assert!(state.workspace_press.is_none());
+        assert!(state.tab_press.is_none());
+    }
+
+    #[test]
+    fn switch_workspace_clears_drag_state() {
+        let mut state = app_with_workspaces(&["a", "b"]);
+        set_synthetic_drag(&mut state);
+
+        state.switch_workspace(1);
+
+        assert!(state.drag.is_none());
+        assert!(state.workspace_press.is_none());
+        assert!(state.tab_press.is_none());
+    }
+
+    #[test]
+    fn switch_workspace_tab_clears_drag_state() {
+        let mut state = app_with_workspaces(&["a", "b"]);
+        set_synthetic_drag(&mut state);
+
+        state.switch_workspace_tab(1, 0);
+
+        assert!(state.drag.is_none());
+        assert!(state.workspace_press.is_none());
+        assert!(state.tab_press.is_none());
     }
 }

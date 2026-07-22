@@ -1,0 +1,105 @@
+{
+  "design": ".agents/planning/2026-06-22-tab-sidebar-ux/design/detailed-design.md",
+  "created": "2026-06-23",
+  "tasks": {
+    "step-1": {
+      "description": "Make both pane and sidebar scrollbars visibly thicker via fuller glyphs",
+      "deps": [],
+      "criteria": [
+        "The scrollbar thumb renders a fuller glyph than today for both the focused-pane and the unfocused/sidebar paths",
+        "The track no longer uses the hardcoded glyph literal; the track is visibly denser",
+        "Both the pane scrollback scrollbar and the sidebar list scrollbars (workspace list, agent panel) are visibly thicker",
+        "No geometry or hit-test change is required for the glyph swap; existing scrollbar drag works unchanged",
+        "Unit tests assert the thumb renders the fuller glyph and the track no longer emits the hardcoded literal for both pane and sidebar callers",
+        "just check passes"
+      ],
+      "affected_areas": ["src/ui/scrollbar.rs", "src/ui/sidebar.rs"]
+    },
+    "step-2": {
+      "description": "Add a right-aligned Alt-shortcut section to the bottom hint bar",
+      "deps": [],
+      "criteria": [
+        "The hint bar renders a right-aligned Alt-shortcut section sourcing key strings from active keybinds",
+        "Many-bindings show the Alt-modifier alternative, not the primary prefix form; entries with no Alt alternative after remap are dropped",
+        "Alt-shortcut entries are sanitized for control/bidi characters explicitly",
+        "Degrades full labels then short labels then drop Alt section then ellipsis; sections never overlap (left_used + right_width <= width enforced, including pad==0 and would-be-negative boundaries)",
+        "No input/dispatch change",
+        "Unit tests cover each FR4 tier as a distinct transition, Many-binding Alt resolution, drop-on-remap, and bidi/control sanitization",
+        "just check passes"
+      ],
+      "affected_areas": ["src/ui/hint_bar.rs"]
+    },
+    "step-3": {
+      "description": "Clear stale drag state on tab switch, workspace switch, and outer focus loss",
+      "deps": [],
+      "criteria": [
+        "Active drag state is cleared on tab switch, workspace switch, and outer-focus-lost",
+        "Existing tab-activation paths route through a single tab-switch chokepoint where the clear fires",
+        "press then move then (tab switch / workspace switch / outer-focus-lost) then move leaves drag cleared and changes no pane ratio or scroll offset",
+        "Unit tests cover each of the three clear triggers",
+        "just check passes"
+      ],
+      "affected_areas": ["src/app/actions.rs", "src/app/runtime.rs"]
+    },
+    "step-4": {
+      "description": "Widen the minimized sidebar rail into a button-like interactive surface with a prominent toggle",
+      "deps": ["step-3"],
+      "criteria": [
+        "Rail width computed by a function returning 4..=7 cols, clamped to total width with a 4-col floor, wired through main view computation keeping the sidebar rect / debug assert consistent",
+        "Each row renders as a button-like cell (bg on active/selected/hover, centered icon, optional attention marker, no text), no collision at widths 4 and 7",
+        "Workspace-row click switches workspace; attention detail-row click focuses the pane; non-attention detail row does not steal focus",
+        "Rail-click switch/focus paths route through step-3's drag-clearing chokepoints",
+        "Render and hit-test consume the same shared collapsed-rail layout (ws_area, divider_y, detail_area, toggle)",
+        "Below the detail-area height floor, status-jump is inert while workspace rows stay switchable",
+        "Toggle rendered with accent treatment and hit area >=1 cell larger than its glyph; rect and hit-test match",
+        "Resize handle (design 3e) is out of scope; its NFR5 divider clause is not a gate here",
+        "Mobile/web path verified; restating the phone success measure is a recorded design-level decision, not a silent step outcome",
+        "Geometry/hit-rects computed compute-side, no state mutation in render(); assert_invariants_for_test passes after a rail-click",
+        "Unit tests cover boundary widths 4 and 7, height-boundary, workspace switch, attention vs non-attention jump, enlarged toggle, and in-bounds non-overlapping rects at the mobile threshold",
+        "just check passes"
+      ],
+      "affected_areas": ["src/ui/sidebar.rs", "src/ui.rs", "src/app/input/sidebar.rs"]
+    },
+    "step-5": {
+      "description": "Replace tab compression/scroll with stateless centered-active batch overflow and zellij-style painting",
+      "deps": ["step-3"],
+      "criteria": [
+        "With more tabs than fit, the active tab is always visible at full untruncated width; clickable left/right +N indicators appear per overflowing side and jump to the nearest hidden tab",
+        "Centered-active fill is stateless; prior scroll fields, their writers/readers, the compression tier, scroll-button widths, the chevron block, and related helpers are removed",
+        "tab_hit_areas stays a dense vec (len == tab count, hidden width 0); jump targets are tab indices, range-asserted",
+        "For every visible tab rect a position->index round-trip returns the same index; active tab rect width > 0; clicking each visible tab and each +N indicator activates the exact expected tab id",
+        "Tab width math uses Unicode display width; user-writable tab/workspace custom names are sanitized at the render chokepoint",
+        "Active tab renders accent bg / contrast fg; inactive/alternate tabs render the specified distinct coloring",
+        "Powerline separators render when ui.tabs.powerline is ON (default), fall back to alternating-background when OFF via an explicit painter param (no probing); OFF emits zero Powerline codepoints and only single-cell-width glyphs",
+        "+N indicator has a touch-adequate hit zone (NFR5)",
+        "ui.tabs.powerline (nested under ui, default ON) parses, is not flagged unknown, round-trips, and selects the separator style; roundtrip test covers OFF",
+        "Without mouse chrome the hidden count shows as a non-clickable marker; both branches use the centered fill",
+        "Drop-indicator coupling re-pointed at the new indicator rects with rewritten tests; reorder-drag drops at the correct index when an edge is clipped",
+        "Indicator-jump activation routes through the same tab-switch chokepoint that clears drag; press/move/indicator-jump/move test asserts drag cleared and no ratio/scroll change",
+        "Unit tests cover layout at N>width, identity round-trip with adversarial wide/combining/ZWJ names, non-mouse overflow branch, and separator paths; assert_invariants_for_test passes after a tab-jump",
+        "just check passes"
+      ],
+      "affected_areas": ["src/ui/tabs.rs", "src/app/input/mouse.rs", "src/app/input/sidebar.rs", "src/ui.rs", "src/app/state.rs", "src/config", "src/app/actions.rs"]
+    },
+    "step-6": {
+      "description": "Add attention badges to the spaces list, agent panel, and tab +N overflow indicators",
+      "deps": ["step-4", "step-5"],
+      "criteria": [
+        "Each indicator reports hidden count and hidden-attention count on the same single fill/scroll walk (no second O(n) rescan)",
+        "An attention badge renders only when >=1 hidden item is in attention, using the attention color, distinct from plain +N; no badge when none",
+        "Badge is clickable and jumps to the nearest hidden attention item (else nearest hidden) for spaces list, agent panel, and tab +N indicators",
+        "Each surface's jump target type is defined and range/identity-asserted; a jump landing on the wrong item fails its test",
+        "Spaces-list badge jump advances the scroll-aware window so the resolved target is no longer hidden after the click",
+        "Agent-panel badge-jump drag-clear behavior is explicitly decided (routes through a clearing path, or stated that focus-pane cannot strand a drag latch)",
+        "Spaces list and agent panel reuse the existing aggregate/attention/seen model, no new persisted state; predicate is Blocked or (Idle, seen=false)",
+        "Per-tab attention threaded into the tab-bar view without new persisted state",
+        "Sidebar rail bounded to a scroll-aware visible window (prerequisite for the spaces-list half)",
+        "Tab-bar attention work re-runs and preserves step-5's identity round-trip and assert_invariants_for_test",
+        "Geometry/hit-rects compute-side, no render mutation; badge is part of its indicator's clickable rect with a touch-adequate hit zone",
+        "Unit tests cover correct counts, badge-only-when-attention, click-to-nearest-attention (and nearest hidden when none), zero-hidden, and hidden-but-no-attention",
+        "just check passes"
+      ],
+      "affected_areas": ["src/ui/sidebar.rs", "src/ui/tabs.rs", "src/app/input/sidebar.rs", "src/app/input/mouse.rs"]
+    }
+  }
+}

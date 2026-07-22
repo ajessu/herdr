@@ -154,7 +154,10 @@ impl App {
             }
             crate::raw_input::RawInputEvent::OuterFocusLost => {
                 self.state.outer_terminal_focus = Some(false);
-                false
+                self.state.drag = None;
+                self.state.workspace_press = None;
+                self.state.tab_press = None;
+                true
             }
             crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                 self.update_host_terminal_theme(kind, color)
@@ -1049,5 +1052,31 @@ mod tests {
             .pending_agent_resume_plan
             .is_some());
         assert!(app.pending_agent_resume_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn outer_focus_lost_clears_drag_state() {
+        let (mut app, _pane_id) = test_app_with_pane();
+        app.state.drag = Some(state::DragState {
+            target: state::DragTarget::SidebarDivider,
+        });
+        app.state.workspace_press = Some(state::WorkspacePressState {
+            ws_idx: 0,
+            start_col: 5,
+            start_row: 5,
+        });
+        app.state.tab_press = Some(state::TabPressState {
+            ws_idx: 0,
+            tab_idx: 0,
+            start_col: 10,
+            start_row: 0,
+        });
+
+        app.handle_raw_input_batch(crate::raw_input::RawInputEvent::OuterFocusLost)
+            .await;
+
+        assert!(app.state.drag.is_none());
+        assert!(app.state.workspace_press.is_none());
+        assert!(app.state.tab_press.is_none());
     }
 }
