@@ -83,8 +83,6 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
-#[cfg(feature = "web")]
-mod web;
 mod workspace;
 mod worktree;
 

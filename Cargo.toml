@@ -9,7 +9,7 @@ repository = "https://github.com/ogulcancelik/herdr"
 homepage = "https://herdr.dev"
 keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
-include = ["src/**/*", "assets/sounds/*", "web-assets/**/*", "README.md", "LICENSE", "Cargo.toml"]
+include = ["src/**/*", "assets/sounds/*", "README.md", "LICENSE", "Cargo.toml"]
 
 [dependencies]
 base64 = "0.22.1"
@@ -27,26 +27,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
-tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
-
-axum = { version = "0.8", features = ["ws"], optional = true }
-axum-extra = { version = "0.10", features = ["cookie"], optional = true }
-getrandom = { version = "0.3", optional = true }
-rust-embed = { version = "8", optional = true }
-subtle = { version = "2", optional = true }
-tower-http = { version = "0.6", features = ["cors"], optional = true }
-
-[features]
-web = ["axum", "axum-extra", "tower-http", "rust-embed", "subtle", "getrandom"]
-
-[dev-dependencies]
-tokio-tungstenite = "0.29"
-futures-util = "0.3"
-http = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

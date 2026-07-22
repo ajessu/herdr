@@ -1,14 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "web")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum WebMode {
-    #[default]
-    Standalone,
-    TrustProxy,
-}
-
 use super::agents::AgentInfo;
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
@@ -232,25 +223,6 @@ pub enum ResponseResult {
     ConfigReload {
         status: crate::config::ConfigReloadStatus,
         diagnostics: Vec<String>,
-    },
-    #[cfg(feature = "web")]
-    WebStarted {
-        url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        token: Option<String>,
-        #[serde(default)]
-        mode: WebMode,
-    },
-    #[cfg(feature = "web")]
-    WebAlreadyRunning {
-        url: String,
-        #[serde(default)]
-        mode: WebMode,
-    },
-    #[cfg(feature = "web")]
-    WebStatus {
-        running: bool,
-        url: Option<String>,
     },
     Ok {},
 }

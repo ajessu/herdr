@@ -71,14 +71,6 @@ use crate::server::client_transport::ClientWriter;
 #[cfg(test)]
 use std::fs;
 
-#[cfg(feature = "web")]
-struct WebServerState {
-    url: String,
-    mode: api::schema::WebMode,
-    #[allow(dead_code)]
-    cancellation: tokio_util::sync::CancellationToken,
-}
-
 fn sound_notify_message(sound: crate::sound::Sound) -> &'static str {
     match sound {
         crate::sound::Sound::Done => "agent done",
@@ -237,8 +229,6 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
-    #[cfg(feature = "web")]
-    web_state: Option<WebServerState>,
 }
 
 fn apply_terminal_attach_scroll(
@@ -428,8 +418,6 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
-            #[cfg(feature = "web")]
-            web_state: None,
         })
     }
 
@@ -2580,18 +2568,6 @@ impl HeadlessServer {
                 let _ = msg.respond_to.send(response);
                 return true;
             }
-            #[cfg(feature = "web")]
-            api::schema::Method::WebStart(params) => {
-                let response = self.handle_web_start_api(msg.request.id.clone(), params.clone());
-                let _ = msg.respond_to.send(response);
-                return false;
-            }
-            #[cfg(feature = "web")]
-            api::schema::Method::WebStatus(_) => {
-                let response = self.handle_web_status_api(msg.request.id.clone());
-                let _ = msg.respond_to.send(response);
-                return false;
-            }
             _ => {}
         }
 
@@ -2847,7 +2823,7 @@ impl HeadlessServer {
             trace!(
                 client_id,
                 enabled,
-                "streaming mouse capture state to web client"
+                "streaming mouse capture state to client"
             );
             client.host_mouse_capture_active = Some(enabled);
         }
@@ -3565,184 +3541,6 @@ impl HeadlessServer {
         }
         Ok(())
     }
-
-    #[cfg(feature = "web")]
-    fn handle_web_start_api(
-        &mut self,
-        request_id: String,
-        params: api::schema::WebStartParams,
-    ) -> String {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-        const DEFAULT_BIND: SocketAddr =
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7681);
-        const DEFAULT_SESSION_TTL_SECS: u64 = 86400;
-        const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1800;
-
-        let requested_mode = if params.trust_proxy {
-            api::schema::WebMode::TrustProxy
-        } else {
-            api::schema::WebMode::Standalone
-        };
-
-        if let Some(ref ws) = self.web_state {
-            if ws.mode != requested_mode {
-                warn!(
-                    running_mode = ?ws.mode,
-                    requested_mode = ?requested_mode,
-                    "web server already running in a different mode; requested mode/flags NOT applied"
-                );
-            }
-            return serde_json::to_string(&api::schema::SuccessResponse {
-                id: request_id,
-                result: api::schema::ResponseResult::WebAlreadyRunning {
-                    url: ws.url.clone(),
-                    mode: ws.mode,
-                },
-            })
-            .unwrap_or_default();
-        }
-
-        let bind_addr: SocketAddr = match params.bind_addr.as_deref() {
-            Some(s) => match s.parse() {
-                Ok(addr) => addr,
-                Err(err) => {
-                    return serde_json::to_string(&api::schema::ErrorResponse {
-                        id: request_id,
-                        error: api::schema::ErrorBody {
-                            code: "invalid_bind_addr".into(),
-                            message: format!("invalid bind_addr {s:?}: {err}"),
-                        },
-                    })
-                    .unwrap_or_default();
-                }
-            },
-            None => DEFAULT_BIND,
-        };
-
-        let public_origins: Vec<crate::web::Origin> = params
-            .public_origins
-            .iter()
-            .filter_map(|s| crate::web::origin::normalize_origin(s))
-            .collect();
-
-        if let Err(err) = crate::web::validate_web_config(
-            params.trust_proxy,
-            &public_origins,
-            &params.public_origins,
-        ) {
-            let code = match &err {
-                crate::web::WebConfigError::TrustProxyRequiresPublicOrigin => {
-                    "trust_proxy_requires_public_origin"
-                }
-                crate::web::WebConfigError::InvalidPublicOrigin(_) => "invalid_public_origin",
-                crate::web::WebConfigError::MixedSchemePublicOrigins => {
-                    "mixed_scheme_public_origins"
-                }
-            };
-            return serde_json::to_string(&api::schema::ErrorResponse {
-                id: request_id,
-                error: api::schema::ErrorBody {
-                    code: code.into(),
-                    message: err.to_string(),
-                },
-            })
-            .unwrap_or_default();
-        }
-
-        let token = params.token.unwrap_or_else(crate::web::generate_token);
-
-        let session_ttl =
-            Duration::from_secs(params.session_ttl_secs.unwrap_or(DEFAULT_SESSION_TTL_SECS));
-        let idle_timeout = Duration::from_secs(
-            params
-                .idle_timeout_secs
-                .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
-        );
-
-        let config = crate::web::WebServerConfig {
-            bind_addr,
-            token: token.clone(),
-            tls: None,
-            session_ttl,
-            idle_timeout,
-            trust_proxy: params.trust_proxy,
-            public_origins,
-        };
-
-        let listener = match crate::web::bind_web_server(&config) {
-            Ok(listener) => listener,
-            Err(err) => {
-                return serde_json::to_string(&api::schema::ErrorResponse {
-                    id: request_id,
-                    error: api::schema::ErrorBody {
-                        code: "web_bind_failed".into(),
-                        message: err.to_string(),
-                    },
-                })
-                .unwrap_or_default();
-            }
-        };
-
-        let cancellation = tokio_util::sync::CancellationToken::new();
-        let next_client_id = self.next_client_id.clone();
-        let server_event_tx = self.server_event_tx.clone();
-        let cancel_clone = cancellation.clone();
-
-        let actual_addr = listener.local_addr().unwrap_or(bind_addr);
-        let scheme = "http";
-        let url = format!("{scheme}://{actual_addr}");
-
-        tokio::spawn(async move {
-            if let Err(err) = crate::web::serve_web_server(
-                listener,
-                config,
-                server_event_tx,
-                next_client_id,
-                cancel_clone,
-            )
-            .await
-            {
-                error!("web server failed: {err}");
-            }
-        });
-
-        self.web_state = Some(WebServerState {
-            url: url.clone(),
-            mode: requested_mode,
-            cancellation,
-        });
-
-        let token_field = if params.trust_proxy {
-            None
-        } else {
-            Some(token)
-        };
-
-        serde_json::to_string(&api::schema::SuccessResponse {
-            id: request_id,
-            result: api::schema::ResponseResult::WebStarted {
-                url,
-                token: token_field,
-                mode: requested_mode,
-            },
-        })
-        .unwrap_or_default()
-    }
-
-    #[cfg(feature = "web")]
-    fn handle_web_status_api(&self, request_id: String) -> String {
-        let (running, url) = match &self.web_state {
-            Some(ws) => (true, Some(ws.url.clone())),
-            None => (false, None),
-        };
-
-        serde_json::to_string(&api::schema::SuccessResponse {
-            id: request_id,
-            result: api::schema::ResponseResult::WebStatus { running, url },
-        })
-        .unwrap_or_default()
-    }
 }
 
 impl Drop for HeadlessServer {
@@ -4150,8 +3948,6 @@ mod tests {
             should_quit,
             server_event_rx,
             server_event_tx,
-            #[cfg(feature = "web")]
-            web_state: None,
         }
     }
 

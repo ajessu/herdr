@@ -91,13 +91,8 @@ docker run "${docker_args[@]}" \
         export LIBGHOSTTY_VT_SIMD=true
         mkdir -p /src/.local/zig-cache
         export ZIG_GLOBAL_CACHE_DIR=/src/.local/zig-cache
-        # --features web is always on for this machine: the web module and its
-        # tests/web_client.rs suite are gated behind #[cfg(feature = "web")], and
-        # without the flag nextest silently skips all 22 web tests. rebuild-host.sh
-        # builds the installed binary with --features web, so the test runner must
-        # match or it would green-light web breakage the shipped binary still has.
         status=0
-        cargo nextest run --locked --features web "$@" || status=$?
+        cargo nextest run --locked "$@" || status=$?
         # Record which target zig-out was built for so rebuild-host.sh (musl)
         # detects the cross-ABI mismatch and wipes it.
         if [ -d vendor/libghostty-vt/zig-out/lib ]; then

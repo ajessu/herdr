@@ -119,7 +119,7 @@ docker run --rm \
         export LIBGHOSTTY_VT_SIMD=true
         mkdir -p /src/.local/zig-cache
         export ZIG_GLOBAL_CACHE_DIR=/src/.local/zig-cache
-        cargo build --release --locked --target "${TARGET}" --features web
+        cargo build --release --locked --target "${TARGET}"
         # Record which target zig-out was built for so the next run can detect
         # a cross-ABI mismatch and wipe it.
         printf '%s\n' "${TARGET}" > vendor/libghostty-vt/zig-out/.herdr-build-target

@@ -191,12 +191,6 @@ pub enum Method {
     PluginPaneFocus(PluginPaneFocusParams),
     #[serde(rename = "plugin.pane.close")]
     PluginPaneClose(PluginPaneCloseParams),
-    #[cfg(feature = "web")]
-    #[serde(rename = "web.start")]
-    WebStart(WebStartParams),
-    #[cfg(feature = "web")]
-    #[serde(rename = "web.status")]
-    WebStatus(WebStatusParams),
 }
 
 #[cfg(test)]
