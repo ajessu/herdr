@@ -893,7 +893,7 @@ fn state_label_text(state: AgentState, seen: bool) -> &'static str {
     }
 }
 
-fn tab_aggregate_state(
+pub(crate) fn tab_aggregate_state(
     tab: &crate::workspace::Tab,
     terminals: &std::collections::HashMap<
         crate::terminal::TerminalId,
@@ -5695,5 +5695,71 @@ mod tests {
         assert!(!deferred);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
+    }
+
+    #[test]
+    fn tab_aggregate_state_priority_order() {
+        let mut state = app_with_workspaces(&["test"]);
+        state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+
+        let pane_ids: Vec<_> = state.workspaces[0].tabs[0].panes.keys().copied().collect();
+        assert_eq!(pane_ids.len(), 4);
+
+        let mut tids = Vec::new();
+        for pid in &pane_ids {
+            let tid = state.workspaces[0].tabs[0]
+                .panes
+                .get(pid)
+                .unwrap()
+                .attached_terminal_id
+                .clone();
+            tids.push((*pid, tid));
+        }
+
+        state.terminals.get_mut(&tids[0].1).unwrap().state = AgentState::Unknown;
+        state.terminals.get_mut(&tids[1].1).unwrap().state = AgentState::Idle;
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&tids[1].0)
+            .unwrap()
+            .seen = true;
+        state.terminals.get_mut(&tids[2].1).unwrap().state = AgentState::Working;
+        state.terminals.get_mut(&tids[3].1).unwrap().state = AgentState::Blocked;
+
+        let (agent, seen) = tab_aggregate_state(&state.workspaces[0].tabs[0], &state.terminals);
+        assert_eq!(agent, AgentState::Blocked);
+        assert!(seen);
+
+        state.terminals.get_mut(&tids[3].1).unwrap().state = AgentState::Idle;
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&tids[3].0)
+            .unwrap()
+            .seen = false;
+        let (agent, seen) = tab_aggregate_state(&state.workspaces[0].tabs[0], &state.terminals);
+        assert_eq!(agent, AgentState::Working);
+        assert!(seen);
+
+        state.terminals.get_mut(&tids[2].1).unwrap().state = AgentState::Idle;
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&tids[2].0)
+            .unwrap()
+            .seen = true;
+        let (agent, seen) = tab_aggregate_state(&state.workspaces[0].tabs[0], &state.terminals);
+        assert_eq!(agent, AgentState::Idle);
+        assert!(!seen);
+
+        assert!(
+            state_priority(AgentState::Blocked, true) > state_priority(AgentState::Working, true)
+        );
+        assert!(
+            state_priority(AgentState::Working, true) > state_priority(AgentState::Idle, false)
+        );
+        assert!(state_priority(AgentState::Idle, false) > state_priority(AgentState::Idle, true));
+        assert!(state_priority(AgentState::Idle, true) > state_priority(AgentState::Unknown, true));
     }
 }

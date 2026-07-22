@@ -97,7 +97,22 @@ pub enum AgentPanelSortConfig {
     Priority,
 }
 
+<<<<<<< HEAD
 impl AgentPanelSortConfig {
+||||||| parent of bf1b0bc (feat: add TabStatusMode config and AppState plumbing)
+impl AgentPanelScopeConfig {
+=======
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TabStatusMode {
+    #[default]
+    Off,
+    Attention,
+    All,
+}
+
+impl AgentPanelScopeConfig {
+>>>>>>> bf1b0bc (feat: add TabStatusMode config and AppState plumbing)
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Spaces => "spaces",
@@ -819,6 +834,8 @@ pub struct UiConfig {
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
+    /// Show agent status dots on tab bar labels.
+    pub show_tab_status: TabStatusMode,
     /// Optional visual toast notifications for background workspace events.
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
@@ -1027,6 +1044,7 @@ impl Default for UiConfig {
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             sidebar: SidebarConfig::default(),
             accent: "cyan".into(),
+            show_tab_status: TabStatusMode::Off,
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
         }
@@ -1754,6 +1772,7 @@ scrollback_lines = 12345
     }
 
     #[test]
+<<<<<<< HEAD
     fn allow_nested_defaults_true_when_missing_from_toml() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.experimental.allow_nested);
@@ -1772,5 +1791,41 @@ scrollback_lines = 12345
     fn allow_nested_rust_default_is_true() {
         let config = Config::default();
         assert!(config.experimental.allow_nested);
+||||||| parent of bf1b0bc (feat: add TabStatusMode config and AppState plumbing)
+=======
+    fn tab_status_mode_defaults_off_and_parses() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.show_tab_status, TabStatusMode::Off);
+
+        let toml_off = r#"
+[ui]
+show_tab_status = "off"
+"#;
+        let config: Config = toml::from_str(toml_off).unwrap();
+        assert_eq!(config.ui.show_tab_status, TabStatusMode::Off);
+
+        let toml_attention = r#"
+[ui]
+show_tab_status = "attention"
+"#;
+        let config: Config = toml::from_str(toml_attention).unwrap();
+        assert_eq!(config.ui.show_tab_status, TabStatusMode::Attention);
+
+        let toml_all = r#"
+[ui]
+show_tab_status = "all"
+"#;
+        let config: Config = toml::from_str(toml_all).unwrap();
+        assert_eq!(config.ui.show_tab_status, TabStatusMode::All);
+    }
+
+    #[test]
+    fn tab_status_mode_rejects_unknown_value() {
+        let toml = r#"
+[ui]
+show_tab_status = "blocked"
+"#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+>>>>>>> bf1b0bc (feat: add TabStatusMode config and AppState plumbing)
     }
 }
