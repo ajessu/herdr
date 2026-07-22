@@ -217,6 +217,17 @@ impl ActionKeybinds {
             Some(labels.join(" / "))
         }
     }
+
+    pub fn alt_direct_label(&self) -> Option<String> {
+        self.bindings.iter().find_map(|binding| {
+            if let BindingTrigger::Direct((_code, mods)) = binding.trigger {
+                if mods.contains(KeyModifiers::ALT) {
+                    return Some(binding.label.clone());
+                }
+            }
+            None
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

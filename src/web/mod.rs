@@ -316,8 +316,7 @@ mod tests {
 
     #[test]
     fn validate_web_config_invalid_origin() {
-        let err =
-            validate_web_config(false, &[], &["not-a-url".to_string()]).unwrap_err();
+        let err = validate_web_config(false, &[], &["not-a-url".to_string()]).unwrap_err();
         assert!(matches!(err, WebConfigError::InvalidPublicOrigin(_)));
     }
 

@@ -477,10 +477,7 @@ fn setup_trust_proxy_env(public_origins: &[&str]) -> TrustProxyTestEnv {
         "workspace create failed: {created}"
     );
 
-    let origins_json: Vec<String> = public_origins
-        .iter()
-        .map(|o| format!("\"{o}\""))
-        .collect();
+    let origins_json: Vec<String> = public_origins.iter().map(|o| format!("\"{o}\"")).collect();
     let origins_array = format!("[{}]", origins_json.join(","));
 
     let web_start = send_request(
@@ -543,7 +540,9 @@ async fn try_ws_upgrade(
     cookie: Option<&str>,
 ) -> Result<
     (
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         tungstenite::http::Response<Option<Vec<u8>>>,
     ),
     tungstenite::Error,
@@ -858,10 +857,7 @@ async fn trust_proxy_ws_allowlisted_origin_succeeds() {
     assert!(result.is_ok(), "allowlisted origin should upgrade to 101");
 
     let (_ws, response) = result.unwrap();
-    let has_set_cookie = response
-        .headers()
-        .get("set-cookie")
-        .is_some();
+    let has_set_cookie = response.headers().get("set-cookie").is_some();
     assert!(
         !has_set_cookie,
         "trust-proxy upgrade response must not have Set-Cookie"
@@ -985,8 +981,7 @@ async fn standalone_with_public_origin_allows_non_same_origin() {
 
     let session = authenticate(&web_url, token).await;
 
-    let result =
-        try_ws_upgrade(&web_url, "https://allowed.example.com", Some(&session)).await;
+    let result = try_ws_upgrade(&web_url, "https://allowed.example.com", Some(&session)).await;
     assert!(
         result.is_ok(),
         "standalone with allowlisted origin + valid session should succeed"

@@ -7,17 +7,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ClientControl {
-    Hello {
-        cols: u16,
-        rows: u16,
-    },
-    Resize {
-        cols: u16,
-        rows: u16,
-    },
-    Paste {
-        text: String,
-    },
+    Hello { cols: u16, rows: u16 },
+    Resize { cols: u16, rows: u16 },
+    Paste { text: String },
 }
 
 // ---------------------------------------------------------------------------
