@@ -1,0 +1,83 @@
+{
+  "design": ".agents/planning/2026-07-12-upstream-merge-strategy/design/detailed-design.md",
+  "created": "2026-07-13",
+  "tasks": {
+    "step-1": {
+      "description": "Preflight gate and web-client archive/drop: branch based on a1804a8 with preconditions confirmed and the web client archived and cleanly removed",
+      "deps": [],
+      "criteria": [
+        "Container image confirmed to provide Rust 1.96.1 before any merge work",
+        "Live snapshot directory backed up; real pre-merge snapshot corpus captured for step-3's merged-build restore check; snapshot format-version field confirmed or introduced",
+        "Annotated tag and branch archive/web-client at the pre-drop commit with build status recorded; both stay local-only",
+        "Web client fully removed: src/web/, web-assets/, src/cli/web.rs + wiring, web feature + Cargo.toml deps, main.rs/headless.rs/client_transport.rs wiring, api schema surface, tests/web_client.rs, test-host default, herdr-tunnel, swap-restart web handling",
+        "Container cargo check --locked passes on the post-drop tree",
+        "Working branch based on a1804a8, not 3e93d5f"
+      ],
+      "affected_areas": ["src/web/", "web-assets/", "src/cli/", "src/api/schema/", "src/server/", "src/remote/", "Cargo.toml", "tests/", "scripts/"],
+      "tier": "complex"
+    },
+    "step-2": {
+      "description": "Characterization and snapshot round-trip tests pinning every runtime-authority re-target surface and every fork persisted field",
+      "deps": [],
+      "criteria": [
+        "AppState::test_new() tests pin modal ModeAction dispatch, alt shortcuts, break_pane_to_tab, tab context-menu actions, floating/stacked pane focus",
+        "Stack-member inner-content geometry pinned via computed inner rect (representation-independent, expressible on both trees)",
+        "Adversarial identity-state invariants asserted via assert_invariants_for_test() with adversarial state constructors",
+        "Snapshot round-trip test asserts field-by-field equality of fork persisted fields against checked-in fixtures; constructive Workspace::test_new() corpus covers every fork persisted field",
+        "All new tests re-run green on top of step-1's post-drop commit before step-3 consumes them"
+      ],
+      "affected_areas": ["src/app/", "src/persist/", "tests/"],
+      "tier": "standard"
+    },
+    "step-3": {
+      "description": "Upstream merge, semantic repair against runtime adapters, and regeneration, ending with the full container suite green",
+      "deps": ["step-1", "step-2"],
+      "criteria": [
+        "rerere + zdiff3 configured; upstream remote verified and reviewed SHA pinned; POC rerere recordings confirmed reachable or the replay assumption abandoned explicitly",
+        "Pre-merge extraction of env scrub and ANSI perf done or confirmed separable",
+        "Merge committed with zero conflict markers; hot/trust-boundary rerere replays human-reviewed with recorded notes; four a1804a8 sidebar files re-resolved by hand",
+        "Duplicates resolved: 98c810a yields to 5449025; ad46cf0 and e713a0a dropped only after preservation check against upstream layout events",
+        "Correctness/security ports land pre-green: 2b99ced, b7015f1, 26db26e, 9c45342, plus ed31632 config field",
+        "Feature ports present or TODO(upstream-merge)-deferred with parked tests: 088922d/b708f85, bc764c8/b44ca3b, 552aa8c/0cd0b1a/f54d8e8; 32e3d7b stale TODO trimmed",
+        "Ungated-method equivalence tests pass for switch_tab, previous_tab, focus_agent_entry, navigate_pane, close_active_tab",
+        "Cargo.lock re-resolved in-container; herdr-api.schema.json regenerated; libghostty-vt patch index reverse-applies",
+        "PROTOCOL_VERSION bumped 16 to 17 with CURRENT_PROTOCOL updated and a wire-surface fingerprint test",
+        "SNAPSHOT_VERSION advanced past upstream's counter line with a snapshot-schema fingerprint test",
+        "CRITICAL: real pre-merge snapshot corpus restores cleanly through the merged build or via explicit versioned migration",
+        "Step-2 tests pass with asserted AppState effects unchanged (documented call-site adaptation allowed)",
+        "Focused security review over process-spawn/socket/auth/plugin-execution diffs recorded",
+        "Consolidated semantic-repair record exists",
+        "Post-merge divergence baseline recorded",
+        "Container just test fully green (documented /dev/ptmx quirk not a regression)"
+      ],
+      "affected_areas": ["src/config/", "src/app/", "src/ui/", "src/protocol/", "src/remote/", "src/server/", "src/persist/", "src/api/schema/", "vendor/", "Cargo.lock", "tests/"],
+      "tier": "complex"
+    },
+    "step-4": {
+      "description": "Verify the merged build against live-adjacent conditions and land: second instance smoke, rehearsed rollback, fast-forward main",
+      "deps": ["step-3", "step-5"],
+      "criteria": [
+        "Automatable smoke lives in nextest: nested-session guard, modal dispatch + Locked-mode rejection, tab-bar narrow-width batching",
+        "Second instance on separate socket using a container-built binary passes each visual smoke item's stated condition",
+        "Staged prior-binary revert path dry-run once",
+        "main fast-forwarded (including step-5 commits) and pushed with no force-push; live swap deferred to explicit user request",
+        "Post-ff wave-branch sweep recorded with flagged branches"
+      ],
+      "affected_areas": ["tests/", "scripts/", "git refs", "worktree inventory"],
+      "tier": "standard"
+    },
+    "step-5": {
+      "description": "FORK.md index with machine-checked enforcement and the documented recurring sync process",
+      "deps": ["step-3"],
+      "criteria": [
+        "FORK.md exists with one entry per KEEP patch and deferral following the design schema; modal-keybind entry labeled permanent; web-client revival note recorded",
+        "Maintenance test in just check fails on missing touched file or removal-condition commit ancestor of upstream/master; hard-fails with fetch-upstream-first message when upstream is absent or stale",
+        "Deferred-debt ratchet fails if TODO(upstream-merge) or parked-test counts rise; baseline counts persisted in-repo",
+        "Recurring sync process documented: cadence, missed-sync fallback, commands, behind-count alert, rerere human-review list, Phase-A-equivalent gate, per-sync snapshot backup and scrub audit, wave-branch migration note, shrink-metric baseline",
+        "Direct-mutation to runtime_* migration recipe recorded"
+      ],
+      "affected_areas": ["FORK.md", "scripts/", "justfile", "docs"],
+      "tier": "standard"
+    }
+  }
+}
