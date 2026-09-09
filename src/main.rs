@@ -22,6 +22,7 @@ mod client;
 mod config;
 mod copy_mode;
 mod detect;
+mod env;
 mod events;
 use ghostty_vt as ghostty;
 mod handoff_runtime;
@@ -411,7 +412,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
-# allow_nested = false
+# allow_nested = true
 # Save recent pane screen history across full server restarts.
 pane_history = false
 # While prefix mode is active, temporarily switch the host input source to
@@ -790,6 +791,31 @@ fn main() -> io::Result<()> {
     let loaded_config = config::Config::load();
     exit_if_nested_disabled(&loaded_config.config);
 
+    let herdr_env = std::env::var(HERDR_ENV_VAR).ok();
+    if herdr_env.as_deref() == Some(HERDR_ENV_VALUE)
+        && loaded_config.config.experimental.allow_nested
+    {
+        tracing::info!("nested launch permitted (HERDR_ENV=1, allow_nested=true)");
+    }
+
+    let api_socket = api::socket_path();
+    if server::autodetect::is_same_server_recursion(
+        herdr_env.as_deref(),
+        std::env::var(api::SOCKET_PATH_ENV_VAR).ok().as_deref(),
+        &api_socket,
+    ) {
+        tracing::warn!("same-server recursion detected, refusing to self-attach");
+        eprintln!(
+            "\x1b[1merror:\x1b[0m refusing to attach to own parent server \
+             (would create a recursive rendering loop)."
+        );
+        eprintln!(
+            "use 'herdr --remote <host>' for tunnels, \
+             or set experimental.allow_nested = false to block all nesting."
+        );
+        std::process::exit(1);
+    }
+
     let saved_federation =
         client::endpoint::EndpointCatalog::load().is_ok_and(|catalog| catalog.has_enabled_ssh());
     if let Err(err) = server::autodetect::auto_detect_launch(saved_federation) {
@@ -815,8 +841,9 @@ mod tests {
     }
 
     #[test]
-    fn nested_herdr_blocks_when_env_is_set() {
-        let config = config::Config::default();
+    fn nested_herdr_blocks_when_allow_nested_false() {
+        let config: config::Config =
+            toml::from_str("[experimental]\nallow_nested = false\n").unwrap();
         assert!(should_block_nested_for_env(&config, Some(HERDR_ENV_VALUE)));
     }
 
@@ -829,7 +856,8 @@ mod tests {
 
     #[test]
     fn nested_herdr_does_not_block_without_env() {
-        let config = config::Config::default();
+        let config: config::Config =
+            toml::from_str("[experimental]\nallow_nested = false\n").unwrap();
         assert!(!should_block_nested_for_env(&config, None));
     }
 
@@ -878,5 +906,11 @@ mod tests {
             args_as_utf8(args).unwrap_err(),
             "argument 2 is not valid UTF-8"
         );
+    }
+
+    #[test]
+    fn nested_herdr_allows_by_default_when_env_is_set() {
+        let config: config::Config = toml::from_str("").unwrap();
+        assert!(!should_block_nested_for_env(&config, Some(HERDR_ENV_VALUE)));
     }
 }
