@@ -4,7 +4,7 @@
 //! schema, server dispatch, tree construction, and re-export all run against a
 //! spawned `herdr server`.
 
-mod support;
+pub mod support;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};

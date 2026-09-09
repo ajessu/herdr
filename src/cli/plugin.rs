@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
