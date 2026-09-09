@@ -3353,6 +3353,32 @@ fn copy_local_stream_to_writer<W: io::Write>(
     Ok(total)
 }
 
+fn build_client_command(
+    local_socket: &Path,
+    reattach_command: &str,
+    keybindings: RemoteKeybindings,
+    target: &str,
+    session: &str,
+) -> io::Result<Command> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("client")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    // Scrub first, then set only the vars the remote client needs.
+    crate::env::scrub_herdr_runtime_env(&mut cmd);
+    configure_remote_client_environment(
+        &mut cmd,
+        local_socket,
+        reattach_command,
+        keybindings,
+        target,
+        session,
+    )?;
+    Ok(cmd)
+}
+
 fn run_client_process(
     local_socket: &Path,
     reattach_command: &str,
@@ -3360,23 +3386,9 @@ fn run_client_process(
     target: &str,
     session: &str,
 ) -> io::Result<()> {
-    let exe = std::env::current_exe()?;
-    let mut command = Command::new(exe);
-    command.arg("client");
-    configure_remote_client_environment(
-        &mut command,
-        local_socket,
-        reattach_command,
-        keybindings,
-        target,
-        session,
-    )?;
-    let status = command
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
-
+    let status =
+        build_client_command(local_socket, reattach_command, keybindings, target, session)?
+            .status()?;
     if status.success() {
         Ok(())
     } else {
@@ -5699,5 +5711,47 @@ function Get-Process {
         InstallSource::temporary(path, dir.clone()).cleanup();
 
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn build_client_command_strips_herdr_env_vars() {
+        let socket = Path::new("/tmp/test-client.sock");
+        let cmd = build_client_command(
+            socket,
+            "herdr --remote host",
+            RemoteKeybindings::Local,
+            "host",
+            "default",
+        )
+        .expect("build command");
+
+        let envs: std::collections::HashMap<String, Option<std::ffi::OsString>> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_owned())))
+            .collect();
+
+        // Explicit sets are preserved
+        assert!(
+            envs.get(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR)
+                .and_then(|v| v.as_ref())
+                .is_some(),
+            "CLIENT_SOCKET_PATH must be preserved"
+        );
+        // Runtime vars are removed (env_remove produces a None value in get_envs)
+        for var in [
+            crate::api::SOCKET_PATH_ENV_VAR,
+            crate::session::SESSION_ENV_VAR,
+            "HERDR_BIN_PATH",
+            crate::HERDR_ENV_VAR,
+            crate::integration::HERDR_WORKSPACE_ID_ENV_VAR,
+            crate::integration::HERDR_TAB_ID_ENV_VAR,
+            crate::integration::HERDR_PANE_ID_ENV_VAR,
+        ] {
+            assert_eq!(
+                envs.get(var),
+                Some(&None),
+                "{var} must be removed from subprocess"
+            );
+        }
     }
 }
