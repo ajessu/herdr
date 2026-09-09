@@ -2,6 +2,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
@@ -113,6 +114,22 @@ pub(crate) fn apply_pane_chrome(
         .iter()
         .cloned()
         .map(|mut info| {
+            // A stack's members are framed by render_collapsed_stack_member's lead
+            // glyph (collapsed) or a plain full border (expanded), not by gap
+            // adjacency to their stack siblings — the neighbor-based logic below
+            // doesn't understand stacking and would otherwise strip or shrink
+            // borders as if the members were regular tiled neighbors.
+            if info.stack.is_some() {
+                info.borders = if info.stack.as_ref().is_some_and(|member| member.collapsed) {
+                    Borders::NONE
+                } else if bordered {
+                    Borders::ALL
+                } else {
+                    Borders::NONE
+                };
+                return info;
+            }
+
             let right_neighbor = multi_pane.then(|| pane_to_right(&info, &panes)).flatten();
             let below_neighbor = multi_pane.then(|| pane_below(&info, &panes)).flatten();
 
@@ -156,6 +173,25 @@ pub(crate) fn apply_pane_chrome(
             info
         })
         .collect()
+}
+
+/// Stack-aware inner rect used by both PTY-resize loops.
+///
+/// A collapsed stack member has a height-1 outer rect; running it through
+/// `Block::inner` would subtract the top *and* bottom border rows and saturate
+/// to height 0, starving the runtime. Instead we bypass the border inset and
+/// hand the runtime the full 1-row rect, which it clamps to its 2-row minimum
+/// (`PaneRuntime::resize`, R13). Expanded members and non-stacked panes keep the
+/// normal bordered-inner path; single-pane mode uses the full area.
+fn pane_inner_for(info: &PaneInfo, area: Rect, multi_pane: bool) -> Rect {
+    if info.stack.as_ref().is_some_and(|member| member.collapsed) {
+        return info.rect;
+    }
+    if multi_pane {
+        pane_inner_rect(info.rect, info.borders)
+    } else {
+        area
+    }
 }
 
 fn runtime_for_tab_pane<'a>(
@@ -245,7 +281,7 @@ pub(super) fn resize_tab_panes(
         app.pane_gaps,
         app.pane_outer_borders,
     ) {
-        let pane_inner = pane_inner_rect(info.rect, info.borders);
+        let pane_inner = pane_inner_for(&info, area, multi_pane);
 
         if let Some((terminal_id, rt)) =
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, info.id)
@@ -316,6 +352,7 @@ pub(super) fn compute_pane_infos_for_tab(
             scrollbar_rect,
             borders,
             is_focused: true,
+            stack: None,
         }];
     }
 
@@ -327,7 +364,12 @@ pub(super) fn compute_pane_infos_for_tab(
     );
 
     for info in &mut pane_infos {
-        let pane_inner = pane_inner_rect(info.rect, info.borders);
+        // `Block::inner` subtracts a symmetric 1-row/1-col inset regardless of
+        // which border set draws it, so the thick-vs-plain choice does not change
+        // the inner rect. `pane_inner_for` covers the collapsed-bypass and
+        // single-pane cases and respects each pane's gap-aware `info.borders`;
+        // this loop just consumes its result.
+        let pane_inner = pane_inner_for(info, area, multi_pane);
 
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
@@ -401,6 +443,14 @@ pub(super) fn render_panes(
     };
 
     for info in pane_infos {
+        // A collapsed stack member draws as a single title row, not a bordered
+        // pane with terminal content (R2). The expanded member and non-stacked
+        // panes fall through to the normal path below.
+        if info.stack.as_ref().is_some_and(|member| member.collapsed) {
+            render_collapsed_stack_member(app, ws, frame, info);
+            continue;
+        }
+
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             let show_cursor = info.is_focused
                 && !pane_is_scrolled_back(rt)
@@ -706,6 +756,73 @@ fn line_cell_symbol(line: LineCell) -> &'static str {
     }
 }
 
+/// Draw a collapsed stack member as a single title row (R2): a leading frame
+/// glyph, the agent status dot, and the pane title. No border block, no terminal
+/// content, no scrollbar. Reuses the existing title/status-dot language.
+fn render_collapsed_stack_member(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    frame: &mut Frame,
+    info: &PaneInfo,
+) {
+    if info.rect.width == 0 || info.rect.height == 0 {
+        return;
+    }
+
+    let member = match &info.stack {
+        Some(member) => member,
+        None => return,
+    };
+
+    let border_color = if info.is_focused {
+        app.palette.accent
+    } else {
+        app.palette.overlay0
+    };
+    let text_style = Style::default().fg(panel_contrast_fg(&app.palette));
+
+    // A vertical-rule lead-in marks the row as part of the stack frame. The
+    // `[position/count]` hint is read from the `StackMember` marker, so render
+    // never re-reads the layout tree (render stays pure).
+    let lead_glyph = "│";
+
+    let terminal = ws
+        .pane_state(info.id)
+        .and_then(|pane| app.terminals.get(&pane.attached_terminal_id));
+
+    let (dot_glyph, dot_style) = terminal
+        .map(|terminal| {
+            let seen = ws.pane_state(info.id).map(|pane| pane.seen).unwrap_or(true);
+            super::status::stack_member_state_icon(terminal.state, seen, &app.palette)
+        })
+        .unwrap_or(("·", text_style));
+
+    let label = terminal
+        .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+        .unwrap_or_else(|| format!("pane {}", info.id.raw()));
+
+    let position_hint = format!("{}/{}", member.position + 1, member.count);
+    // Reserve room for: lead glyph + space + dot + space + " [n/m]".
+    let reserved = 4 + position_hint.len() + 3;
+    let label_width = (info.rect.width as usize).saturating_sub(reserved);
+    let label = truncate_end(label.trim(), label_width);
+
+    let line = Line::from(vec![
+        Span::styled(lead_glyph, Style::default().fg(border_color)),
+        Span::raw(" "),
+        Span::styled(dot_glyph, dot_style),
+        Span::raw(" "),
+        Span::styled(label, text_style),
+        Span::raw(" "),
+        Span::styled(
+            format!("[{position_hint}]"),
+            Style::default().fg(app.palette.overlay0),
+        ),
+    ]);
+
+    frame.render_widget(Paragraph::new(line), info.rect);
+}
+
 pub(crate) fn render_selection_highlight<P: PartialEq>(
     selection: Option<&crate::selection::Selection<P>>,
     buffer: &mut Buffer,
@@ -932,6 +1049,7 @@ mod tests {
             scrollbar_rect: None,
             borders: Borders::ALL,
             is_focused: false,
+            stack: None,
         }];
 
         let terminal_id = ws.tabs[0].panes[&pane_id].attached_terminal_id.clone();
@@ -1116,6 +1234,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::TOP | Borders::LEFT,
                 is_focused: true,
+                stack: None,
             },
             PaneInfo {
                 id: PaneId::from_raw(2),
@@ -1124,6 +1243,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::TOP | Borders::LEFT | Borders::RIGHT,
                 is_focused: false,
+                stack: None,
             },
             PaneInfo {
                 id: PaneId::from_raw(3),
@@ -1132,6 +1252,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::TOP | Borders::LEFT | Borders::BOTTOM,
                 is_focused: false,
+                stack: None,
             },
             PaneInfo {
                 id: PaneId::from_raw(4),
@@ -1140,6 +1261,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::ALL,
                 is_focused: false,
+                stack: None,
             },
         ];
         let split_borders = vec![
@@ -1186,6 +1308,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::ALL,
                 is_focused: true,
+                stack: None,
             },
             PaneInfo {
                 id: PaneId::from_raw(2),
@@ -1194,6 +1317,7 @@ mod tests {
                 scrollbar_rect: None,
                 borders: Borders::ALL,
                 is_focused: false,
+                stack: None,
             },
         ];
         let ws = Workspace::test_new("test");
@@ -1551,5 +1675,135 @@ mod tests {
                 fallback
             );
         }
+    }
+
+    fn app_with_stack(count: usize, expanded: usize) -> (AppState, Vec<PaneId>) {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("test");
+        let members = workspace.test_set_stack(count, expanded);
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        for id in &members {
+            app.workspaces[0].insert_test_runtime(
+                *id,
+                TerminalRuntime::test_with_scrollback_bytes(80, 24, 1024, b"hi\n"),
+            );
+        }
+        (app, members)
+    }
+
+    #[tokio::test]
+    async fn stacked_panes_geometry_collapsed_rows_expanded_remainder() {
+        // 4-member stack, expanded at index 1, area 80x24 → 3 collapsed rows of
+        // height 1, expanded member fills 24 - 3 = 21 rows (R2/R3).
+        let (app, members) = app_with_stack(4, 1);
+        let area = Rect::new(0, 0, 80, 24);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let infos = compute_pane_infos(
+            &app,
+            &terminal_runtimes,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+
+        assert_eq!(infos.len(), 4);
+        assert_eq!(infos[0].id, members[0]);
+        assert_eq!(infos[0].rect.height, 1);
+        assert_eq!(infos[1].id, members[1]);
+        assert_eq!(infos[1].rect.height, 21);
+        assert_eq!(infos[2].rect.height, 1);
+        assert_eq!(infos[3].rect.height, 1);
+
+        // Collapsed members bypass the border inset: their inner rect keeps the
+        // full 1-row height instead of saturating to 0 (R13).
+        assert_eq!(infos[0].inner_rect.height, 1);
+        assert_eq!(infos[2].inner_rect.height, 1);
+        // Expanded member uses the normal bordered inner path.
+        assert_eq!(infos[1].inner_rect.height, 19);
+    }
+
+    #[tokio::test]
+    async fn stacked_panes_render_collapsed_members_as_single_title_rows() {
+        let (mut app, _members) = app_with_stack(4, 1);
+        app.mode = crate::app::Mode::Terminal;
+        let area = Rect::new(0, 0, 80, 24);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        app.view.pane_infos = compute_pane_infos(
+            &app,
+            &terminal_runtimes,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        // Rendering is now target-addressed rather than reading `app.active`,
+        // and split borders left `ViewState`; a stack draws none anyway.
+        let target = Some(crate::ui::tab_surface::TabSurfaceTarget {
+            workspace_index: 0,
+            tab_index: 0,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_panes(
+                    &app,
+                    &terminal_runtimes,
+                    frame,
+                    target,
+                    &app.view.pane_infos,
+                    &[],
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // Row 0 is collapsed member 0: a single title row beginning with the
+        // stack lead glyph, not a box-drawing corner of a full bordered block.
+        let row0_first = buffer[(0, 0)].symbol();
+        assert_eq!(row0_first, "│");
+        // The expanded member (rows 1..22) draws a full border: its top-left is
+        // a corner glyph, distinct from the collapsed lead glyph.
+        let expanded_top_left = buffer[(0, 1)].symbol();
+        assert!(
+            expanded_top_left == "┌" || expanded_top_left == "┏",
+            "expected a border corner for the expanded member, got {expanded_top_left:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stacked_panes_zoom_shows_single_pane_unzoom_restores_stack() {
+        let (mut app, members) = app_with_stack(3, 1);
+        let area = Rect::new(0, 0, 80, 24);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+
+        // Zoomed: a single full-area PaneInfo for the expanded/focused member.
+        app.workspaces[0].zoomed = true;
+        let zoomed = compute_pane_infos(
+            &app,
+            &terminal_runtimes,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        assert_eq!(zoomed.len(), 1);
+        assert_eq!(zoomed[0].id, members[1]);
+        assert_eq!(zoomed[0].rect, area);
+
+        // Un-zoomed: full stack geometry restored.
+        app.workspaces[0].zoomed = false;
+        let restored = compute_pane_infos(
+            &app,
+            &terminal_runtimes,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored[0].rect.height, 1);
+        assert_eq!(restored[1].rect.height, 22);
+        assert_eq!(restored[2].rect.height, 1);
     }
 }

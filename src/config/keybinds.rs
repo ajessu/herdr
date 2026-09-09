@@ -395,6 +395,8 @@ pub struct Keybinds {
     pub last_pane: ActionKeybinds,
     pub split_vertical: ActionKeybinds,
     pub split_horizontal: ActionKeybinds,
+    pub stack_pane: ActionKeybinds,
+    pub unstack_pane: ActionKeybinds,
     pub close_pane: ActionKeybinds,
     pub zoom: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
@@ -578,6 +580,8 @@ impl Config {
             last_pane: empty_action!(),
             split_vertical: empty_action!(),
             split_horizontal: empty_action!(),
+            stack_pane: empty_action!(),
+            unstack_pane: empty_action!(),
             close_pane: empty_action!(),
             zoom: empty_action!(),
             resize_mode: empty_action!(),
@@ -726,6 +730,8 @@ impl Config {
             apply_action!(keybinds.cycle_pane_previous, cycle_pane_previous, source);
             apply_action!(keybinds.split_vertical, split_vertical, source);
             apply_action!(keybinds.split_horizontal, split_horizontal, source);
+            apply_action!(keybinds.stack_pane, stack_pane, source);
+            apply_action!(keybinds.unstack_pane, unstack_pane, source);
             apply_action!(keybinds.close_pane, close_pane, source);
             apply_action!(keybinds.zoom, zoom, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
@@ -1581,6 +1587,23 @@ mod tests {
             parse_key_combo("v"),
             Some((KeyCode::Char('v'), KeyModifiers::empty()))
         );
+    }
+
+    #[test]
+    fn default_stack_keybinds_are_registered_without_conflicts() {
+        let config = Config::default();
+        let (_prefix_diag, _prefix, diagnostics, keybinds) = config.validated_keybinds();
+
+        // The default stack/unstack bindings must not collide with any existing
+        // default binding; a conflict would emit a diagnostic and drop a binding.
+        assert!(
+            diagnostics.is_empty(),
+            "default keybinds produced diagnostics: {diagnostics:?}"
+        );
+        assert!(!keybinds.stack_pane.bindings.is_empty());
+        assert!(!keybinds.unstack_pane.bindings.is_empty());
+        // `prefix+s` stays on settings rather than stacking.
+        assert!(!keybinds.settings.bindings.is_empty());
     }
 
     #[test]
