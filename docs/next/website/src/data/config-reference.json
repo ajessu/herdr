@@ -800,6 +800,18 @@
           "description": "Toggle zoom for the focused pane. The legacy key name `fullscreen` is accepted as an alias."
         },
         {
+          "key": "keys.stack_pane",
+          "type": "keybinding",
+          "default": "\"prefix+shift+s\"",
+          "description": "Stack the focused pane with its adjacent sibling."
+        },
+        {
+          "key": "keys.unstack_pane",
+          "type": "keybinding",
+          "default": "\"prefix+shift+u\"",
+          "description": "Remove the focused pane from its stack and place it back as a sibling split."
+        },
+        {
           "key": "keys.resize_mode",
           "type": "keybinding",
           "default": "\"prefix+r\"",

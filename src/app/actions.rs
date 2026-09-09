@@ -792,6 +792,12 @@ impl AppState {
 
     /// Stack the focused pane with its adjacent sibling (R6). No-op when the
     /// focused pane is the lone root or its sibling is a multi-pane subtree.
+    // Interactive stack/unstack entry points. Their only callers were the
+    // keybind dispatch in src/app/input/, which upstream deleted in #3487 when
+    // input moved into the client shell; they are re-wired when that dispatch
+    // is rebuilt. Stacks themselves remain reachable and covered today through
+    // layout.apply/layout.export and session restore.
+    #[allow(dead_code)]
     pub fn stack_focused_pane(&mut self) -> bool {
         let Some(tab) = self
             .active
@@ -810,6 +816,7 @@ impl AppState {
 
     /// Remove the focused member from its stack and re-place it as a sibling
     /// split (R7). No-op when the focused pane is not in a stack.
+    #[allow(dead_code)]
     pub fn unstack_focused_pane(&mut self) -> bool {
         let Some(tab) = self
             .active

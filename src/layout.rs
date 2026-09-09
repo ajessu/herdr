@@ -300,6 +300,7 @@ impl TileLayout {
     }
 
     /// Returns true if the focused pane is inside a `Node::Stack`.
+    #[allow(dead_code)]
     pub fn focused_in_stack(&self) -> bool {
         contains_in_stack(&self.root, self.focus)
     }
@@ -400,6 +401,7 @@ impl TileLayout {
 
     /// Stack the focused pane with its adjacent sibling subtree. Returns false
     /// if not possible (lone root, sibling is a multi-pane Split subtree).
+    #[allow(dead_code)]
     pub fn stack_focused(&mut self) -> bool {
         let placeholder = PaneId::from_raw(0);
         let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
@@ -413,6 +415,7 @@ impl TileLayout {
 
     /// Remove the focused member from its stack and re-place as a sibling split.
     /// Returns false if the focused pane is not in a stack.
+    #[allow(dead_code)]
     pub fn unstack_focused(&mut self, direction: Direction, ratio: f32) -> bool {
         if !self.focused_in_stack() {
             return false;
@@ -430,6 +433,7 @@ impl TileLayout {
     /// expanded move to `new_id`. Returns false when `stack_member` is not in a
     /// stack, or the parent split containing {stack, Pane(new_id)} is not found,
     /// or capacity is exceeded. Caller then leaves the normal split.
+    #[allow(dead_code)]
     pub fn fold_new_pane_into_focused_stack(
         &mut self,
         new_id: PaneId,
@@ -705,6 +709,10 @@ fn range_center_distance(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> 
 
 /// Minimum height (in rows) the expanded member must retain for a stack to accept
 /// another member. Mirrors Zellij's MIN_TERMINAL_HEIGHT = 5.
+// Stack mutation helpers behind TileLayout's interactive entry points; dead for
+// the same reason (see src/app/actions.rs::stack_focused_pane) until the client
+// -side keybind dispatch is rebuilt.
+#[allow(dead_code)]
 pub const MIN_STACK_EXPANDED_ROWS: u16 = 5;
 
 // --- Stack geometry ---
@@ -1138,6 +1146,7 @@ fn find_promoted_after_close(node: &Node, neighbors: &[PaneId]) -> Option<PaneId
 /// Returns true if `id` is a direct leaf of this node (Pane match) or a
 /// direct member of this node (Stack containing id). Does not recurse into
 /// Split children.
+#[allow(dead_code)]
 fn node_directly_contains(node: &Node, id: PaneId) -> bool {
     match node {
         Node::Pane(p) => *p == id,
@@ -1148,6 +1157,7 @@ fn node_directly_contains(node: &Node, id: PaneId) -> bool {
 
 /// Merge the focused pane with its sibling into a stack. Returns the new tree
 /// and whether the operation succeeded.
+#[allow(dead_code)]
 fn stack_at_focus(node: Node, focus: PaneId) -> (Node, bool) {
     match node {
         Node::Pane(_) => (node, false),
@@ -1262,6 +1272,7 @@ fn stack_at_focus(node: Node, focus: PaneId) -> (Node, bool) {
 
 /// Remove the focused member from its stack and wrap the residual + unstacked
 /// pane in a new Split at the stack's tree position. Returns (new_tree, success).
+#[allow(dead_code)]
 fn unstack_at_focus(
     node: Node,
     focus: PaneId,
@@ -1342,6 +1353,7 @@ fn unstack_at_focus(
 /// Find the Split whose children are {node containing focus} and {Pane(new_id)},
 /// then merge new_id into the stack (or create a new 2-member stack). Returns
 /// (new_tree, success).
+#[allow(dead_code)]
 fn fold_into_stack(node: Node, focus: PaneId, new_id: PaneId) -> (Node, bool) {
     match node {
         Node::Pane(_) | Node::Stack { .. } => (node, false),
