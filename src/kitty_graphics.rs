@@ -327,6 +327,10 @@ fn collect_visible_placements(
     );
     let mut placements = Vec::new();
     for info in surface.pane_infos {
+        // Fork: a collapsed stack member is only a title row.
+        if info.stack.as_ref().is_some_and(|member| member.collapsed) {
+            continue;
+        }
         let runtime = match app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             Some(rt) => rt,
             None => {

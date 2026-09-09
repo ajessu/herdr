@@ -19,6 +19,14 @@ pub(crate) fn collect_retained(
             if workspace_index != target.workspace_index {
                 return None;
             }
+            // Fork: the surface carries no stack state; collapsed members are
+            // title rows and must not get image placements.
+            let collapsed = app
+                .state
+                .workspaces
+                .get(workspace_index)
+                .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                .is_some_and(|tab| tab.layout.is_collapsed_stack_member(id));
             Some(crate::layout::PaneInfo {
                 id,
                 rect: rect(pane.rect),
@@ -26,6 +34,11 @@ pub(crate) fn collect_retained(
                 scrollbar_rect: pane.scrollbar_rect.map(rect),
                 borders: ratatui::widgets::Borders::NONE,
                 is_focused: pane.focused,
+                stack: collapsed.then_some(crate::layout::StackMember {
+                    collapsed: true,
+                    position: 0,
+                    count: 0,
+                }),
             })
         })
         .collect::<Option<Vec<_>>>()?;
