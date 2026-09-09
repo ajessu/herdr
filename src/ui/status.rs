@@ -10,7 +10,37 @@ use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{CopyFeedback, Palette},
     config::ToastClipboardPosition,
+    detect::AgentState,
 };
+
+/// Status glyph for a collapsed stack member row.
+///
+/// Upstream moved the configurable indicator style (`ui.status_indicators`)
+/// into the client shell, but collapsed stack rows are painted server-side into
+/// the pane surface, where that preference is not reachable. This renders the
+/// `Dots` style unconditionally — the shipped default — so the glyph matches an
+/// unconfigured client. If stack rows ever need to honor `Symbols`, the style
+/// has to reach the server through the snapshot rather than be read here.
+pub(super) fn stack_member_state_icon(
+    state: AgentState,
+    seen: bool,
+    p: &Palette,
+) -> (&'static str, Style) {
+    let glyph = match (state, seen) {
+        (AgentState::Blocked, _) | (AgentState::Working, _) => "●",
+        (AgentState::Idle, false) => "●",
+        (AgentState::Idle, true) => "○",
+        (AgentState::Unknown, _) => "·",
+    };
+    let color = match (state, seen) {
+        (AgentState::Blocked, _) => p.red,
+        (AgentState::Working, _) => p.yellow,
+        (AgentState::Idle, false) => p.teal,
+        (AgentState::Idle, true) => p.green,
+        (AgentState::Unknown, _) => p.overlay0,
+    };
+    (glyph, Style::default().fg(color))
+}
 
 pub(crate) fn copy_feedback_rect(
     area: Rect,
