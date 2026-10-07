@@ -70,6 +70,14 @@ pub(crate) enum KeybindAction {
     OpenNotificationTarget,
     Detach,
     OpenNavigator,
+    // Fork: modal layer actions.
+    SplitAuto,
+    StackPane,
+    UnstackPane,
+    MoveTabLeft,
+    MoveTabRight,
+    ResizeGrow,
+    ResizeShrink,
 }
 
 pub(crate) fn resolve_direct_binding(
@@ -159,7 +167,7 @@ pub(crate) fn resolve_non_indexed_action(
             return Some(action);
         }
     }
-    None
+    super::modal::resolve_modal_direct_action(keybinds, key, dispatch)
 }
 
 pub(crate) fn resolve_custom_command(
@@ -231,7 +239,7 @@ fn resolve_exact_binding(
         .or_else(|| resolve_indexed_action(keybinds, key, dispatch).map(KeybindMatch::Action))
 }
 
-fn generated_character_key(key: &TerminalKey) -> Option<TerminalKey> {
+pub(super) fn generated_character_key(key: &TerminalKey) -> Option<TerminalKey> {
     let mut characters = key.generated_text.as_deref()?.chars();
     let character = characters.next()?;
     if character.is_control() || characters.next().is_some() {
@@ -243,7 +251,7 @@ fn generated_character_key(key: &TerminalKey) -> Option<TerminalKey> {
     ))
 }
 
-fn action_matches(
+pub(super) fn action_matches(
     bindings: &crate::config::ActionKeybinds,
     key: &TerminalKey,
     dispatch: KeybindDispatch,

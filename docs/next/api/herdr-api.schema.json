@@ -5563,6 +5563,38 @@
         {
           "properties": {
             "method": {
+              "const": "pane.stack",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.unstack",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.layout",
               "type": "string"
             },
@@ -8573,6 +8605,30 @@
           ],
           "type": "object"
         },
+        "PaneStackResult": {
+          "description": "Fork: result of `pane.stack` and `pane.unstack`. Focus never moves.",
+          "properties": {
+            "changed": {
+              "type": "boolean"
+            },
+            "focused_pane_id": {
+              "type": "string"
+            },
+            "layout": {
+              "$ref": "#/schemas/success_response/$defs/PaneLayoutSnapshot"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "changed",
+            "pane_id",
+            "focused_pane_id",
+            "layout"
+          ],
+          "type": "object"
+        },
         "PaneSwapReason": {
           "enum": [
             "no_neighbor",
@@ -9761,6 +9817,38 @@
               "required": [
                 "type",
                 "zoom"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "stack": {
+                  "$ref": "#/schemas/success_response/$defs/PaneStackResult"
+                },
+                "type": {
+                  "const": "pane_stack",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "stack"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "pane_unstack",
+                  "type": "string"
+                },
+                "unstack": {
+                  "$ref": "#/schemas/success_response/$defs/PaneStackResult"
+                }
+              },
+              "required": [
+                "type",
+                "unstack"
               ],
               "type": "object"
             },

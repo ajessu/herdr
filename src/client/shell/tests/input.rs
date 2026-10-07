@@ -373,7 +373,10 @@ fn raw_backspace_follows_the_host_tty_erase_character() {
         ),
         (None, ClientKeyCode::Char('h'), ClientKeyCode::Char('h')),
     ] {
-        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let mut config = Config::default();
+        // Fork: ctrl+h (0x08 when erase is DEL) enters Move mode by default.
+        config.keys.mode_move = crate::config::BindingConfig::one("");
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
         state.set_host_erase_byte(erase);
         state.set_snapshot(Box::new(snapshot()));
         state.set_pane_surface(surface());
@@ -735,14 +738,15 @@ fn shell_targets_unconsumed_input_and_keeps_prefix_local() {
         }] if *modifiers == KeyModifiers::CONTROL.bits()
     ));
 
-    let alt = state.handle_input_bytes(b"\x1b[120;3u");
+    // Fork: alt+x closes the pane by default, so probe with an unbound alt key.
+    let alt = state.handle_input_bytes(b"\x1b[121;3u");
     let ClientMessage::ClientShellPaneInput { events, .. } = &alt.requests[0] else {
         panic!("expected semantic alt key");
     };
     assert!(matches!(
         &events[..],
         [ClientPaneInputEvent::Key {
-            code: crate::protocol::ClientKeyCode::Char('x'),
+            code: crate::protocol::ClientKeyCode::Char('y'),
             modifiers,
             ..
         }] if *modifiers == KeyModifiers::ALT.bits()

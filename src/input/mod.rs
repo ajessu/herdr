@@ -1,6 +1,7 @@
 mod keybind_help;
 mod keybindings;
 mod lease;
+mod modal;
 mod model;
 pub(crate) mod mouse;
 mod parse;
@@ -14,6 +15,7 @@ pub(crate) use keybindings::{
     KeybindMatch,
 };
 pub(crate) use lease::{InputLease, InputLeaseKey, InputLeaseTable, RepeatPlan};
+pub(crate) use modal::{resolve_mode_entry, resolve_sticky_action, ModeEntry};
 #[cfg(not(windows))]
 pub use model::ime_compatible_keyboard_enhancement_flags;
 pub use model::WindowsKeyRecord;

@@ -309,7 +309,7 @@ impl HerdrPath {
         // Mirrors the client: Herdr pushes Kitty event types on Kitty hosts.
         state.set_host_reports_key_releases(host == HostProfile::Kitty);
         state.set_host_reports_all_keys(host_reports_all);
-        state.set_snapshot(Box::new(snapshot()));
+        state.set_snapshot(Box::new(middle_tab_snapshot()));
         state.set_pane_surface(surface());
         state
     }
@@ -364,6 +364,13 @@ impl HerdrPath {
                         }
                     }
                 }
+                // Fork: a direct shortcut (alt+h, alt+n, ...) answers with an
+                // endpoint request; only pane focus is a side request.
+                ClientShellAction::Endpoint { request, .. }
+                    if !matches!(request.method, crate::api::schema::Method::PaneFocus(_)) =>
+                {
+                    owned = true
+                }
                 ClientShellAction::Endpoint { .. } => {}
                 ClientShellAction::ReplayMouse(mouse) => replay.extend(mouse),
                 _ => owned = true,
@@ -407,6 +414,8 @@ impl HerdrPath {
             herdr_owned |= self.absorb(outcome, &mut events);
         }
         herdr_owned |= self.state.mode != ClientShellMode::Terminal || self.state.overlay.is_some();
+        // Fork: locked mode is a flag over Terminal; its toggle key is Herdr's.
+        herdr_owned |= self.state.modal_locked;
         if herdr_owned {
             return None;
         }
@@ -589,6 +598,27 @@ fn run_keyboard_conformance() -> Report {
         }
     }
     report
+}
+
+/// Fork: the focused tab sits between two others, so the fork's non-wrapping
+/// alt+i/alt+o tab moves answer with a `tab.move` request instead of a silent
+/// no-op at the edge.
+fn middle_tab_snapshot() -> ClientShellSnapshot {
+    let mut snapshot = snapshot();
+    let template = snapshot.tabs[0].clone();
+    snapshot.tabs = (1..=3)
+        .map(|number| ClientShellTab {
+            tab_id: format!("tab_{number}"),
+            number,
+            label: number.to_string(),
+            focused: number == 2,
+            ..template.clone()
+        })
+        .collect();
+    snapshot.focused_tab_id = Some("tab_2".into());
+    snapshot.workspaces[0].active_tab_id = "tab_2".into();
+    snapshot.panes[0].tab_id = "tab_2".into();
+    snapshot
 }
 
 fn print_report(report: &Report) {
