@@ -572,6 +572,15 @@ pub enum PaneMoveReason {
     ZoomedTab,
 }
 
+/// Fork: result of `pane.stack` and `pane.unstack`. Focus never moves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneStackResult {
+    pub changed: bool,
+    pub pane_id: String,
+    pub focused_pane_id: String,
+    pub layout: PaneLayoutSnapshot,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneZoomResult {
     pub changed: bool,

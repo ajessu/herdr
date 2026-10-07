@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 mod io;
 mod keybinds;
+mod modal_keys;
 mod model;
 mod sidebar;
 mod sound;
@@ -19,7 +20,7 @@ pub use self::{
     keybinds::{
         format_prefix_combos, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
         BindingConfig, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
-        IndexedKeybind, KeyCombo, Keybinds, LiveKeybindConfig,
+        IndexedKeybind, KeyCombo, Keybinds, LiveKeybindConfig, StickyMode,
     },
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
@@ -39,6 +40,7 @@ pub use self::{
 };
 
 pub(crate) use self::keybinds::parse_key_combo;
+pub(crate) use self::keybinds::{DefaultMode, ModalAction}; // Fork: modal layer.
 pub(crate) use self::write::{update_file_at, write_edit, ConfigEdit};
 pub(crate) use self::{
     io::upsert_top_level_bool,

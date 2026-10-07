@@ -535,6 +535,7 @@ impl ClientShellState {
                 | PendingEndpointKind::IntegrationInstall
                 | PendingEndpointKind::SelectionCopy
                 | PendingEndpointKind::PaneScroll { .. }
+                | PendingEndpointKind::ModalResizeFallback { .. }
                 | PendingEndpointKind::WordSelection { .. }
                 | PendingEndpointKind::PaneLinkActivate { .. }
                 | PendingEndpointKind::PaneLinkResolve { .. }
