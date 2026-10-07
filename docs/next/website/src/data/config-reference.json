@@ -482,6 +482,382 @@
           "description": "Prefix key(s) to enter prefix mode (e.g. \"ctrl+b\", \"f12\", \"esc\", or an array to accept several)."
         },
         {
+          "key": "keys.default_mode",
+          "type": "string",
+          "default": "\"modal\"",
+          "values": [
+            "modal",
+            "locked"
+          ],
+          "description": "Mode the client starts in. `\"locked\"` starts with every key forwarded to the pane until `keys.mode_locked` is pressed."
+        },
+        {
+          "key": "keys.mode_pane",
+          "type": "keybinding",
+          "default": "\"ctrl+p\"",
+          "description": "Enter Pane mode (sticky)."
+        },
+        {
+          "key": "keys.mode_tab",
+          "type": "keybinding",
+          "default": "\"ctrl+t\"",
+          "description": "Enter Tab mode (sticky)."
+        },
+        {
+          "key": "keys.mode_resize",
+          "type": "keybinding",
+          "default": "\"ctrl+n\"",
+          "description": "Enter Resize mode (sticky)."
+        },
+        {
+          "key": "keys.mode_move",
+          "type": "keybinding",
+          "default": "\"ctrl+h\"",
+          "description": "Enter Move mode (sticky). Terminals that send ^H for Backspace enter it on Backspace; set \"\" to disable."
+        },
+        {
+          "key": "keys.mode_session",
+          "type": "keybinding",
+          "default": "\"ctrl+o\"",
+          "description": "Enter Session mode (sticky)."
+        },
+        {
+          "key": "keys.mode_locked",
+          "type": "keybinding",
+          "default": "\"ctrl+g\"",
+          "description": "Toggle Locked mode, which forwards every other key to the pane."
+        },
+        {
+          "key": "keys.split_auto",
+          "type": "keybinding",
+          "default": "\"alt+n\"",
+          "description": "Split the focused pane along its longer side."
+        },
+        {
+          "key": "keys.move_tab_left",
+          "type": "keybinding",
+          "default": "\"alt+i\"",
+          "description": "Move the active tab one position left, without wrapping."
+        },
+        {
+          "key": "keys.move_tab_right",
+          "type": "keybinding",
+          "default": "\"alt+o\"",
+          "description": "Move the active tab one position right, without wrapping."
+        },
+        {
+          "key": "keys.resize_grow",
+          "type": "keybinding",
+          "default": "[\"alt+=\", \"alt+plus\"]",
+          "description": "Grow the focused pane."
+        },
+        {
+          "key": "keys.resize_shrink",
+          "type": "keybinding",
+          "default": "\"alt+-\"",
+          "description": "Shrink the focused pane."
+        },
+        {
+          "key": "keys.pane.focus_left",
+          "type": "keybinding",
+          "default": "[\"h\", \"left\"]",
+          "description": "Focus the pane to the left."
+        },
+        {
+          "key": "keys.pane.focus_down",
+          "type": "keybinding",
+          "default": "[\"j\", \"down\"]",
+          "description": "Focus the pane below."
+        },
+        {
+          "key": "keys.pane.focus_up",
+          "type": "keybinding",
+          "default": "[\"k\", \"up\"]",
+          "description": "Focus the pane above."
+        },
+        {
+          "key": "keys.pane.focus_right",
+          "type": "keybinding",
+          "default": "[\"l\", \"right\"]",
+          "description": "Focus the pane to the right."
+        },
+        {
+          "key": "keys.pane.split_auto",
+          "type": "keybinding",
+          "default": "\"n\"",
+          "description": "Split along the focused pane's longer side."
+        },
+        {
+          "key": "keys.pane.split_down",
+          "type": "keybinding",
+          "default": "\"d\"",
+          "description": "Split the focused pane downward."
+        },
+        {
+          "key": "keys.pane.split_right",
+          "type": "keybinding",
+          "default": "\"r\"",
+          "description": "Split the focused pane to the right."
+        },
+        {
+          "key": "keys.pane.stack",
+          "type": "keybinding",
+          "default": "\"s\"",
+          "description": "Stack the focused pane with its adjacent sibling."
+        },
+        {
+          "key": "keys.pane.close",
+          "type": "keybinding",
+          "default": "\"x\"",
+          "description": "Close the focused pane."
+        },
+        {
+          "key": "keys.pane.zoom",
+          "type": "keybinding",
+          "default": "[\"f\", \"z\"]",
+          "description": "Toggle zoom for the focused pane."
+        },
+        {
+          "key": "keys.pane.rename",
+          "type": "keybinding",
+          "default": "\"c\"",
+          "description": "Rename the focused pane."
+        },
+        {
+          "key": "keys.pane.cycle_next",
+          "type": "keybinding",
+          "default": "\"p\"",
+          "description": "Cycle to the next pane."
+        },
+        {
+          "key": "keys.tab.previous",
+          "type": "keybinding",
+          "default": "[\"h\", \"left\", \"k\", \"up\"]",
+          "description": "Select the previous tab."
+        },
+        {
+          "key": "keys.tab.next",
+          "type": "keybinding",
+          "default": "[\"l\", \"right\", \"j\", \"down\"]",
+          "description": "Select the next tab."
+        },
+        {
+          "key": "keys.tab.new",
+          "type": "keybinding",
+          "default": "\"n\"",
+          "description": "Create a new tab."
+        },
+        {
+          "key": "keys.tab.close",
+          "type": "keybinding",
+          "default": "\"x\"",
+          "description": "Close the active tab."
+        },
+        {
+          "key": "keys.tab.rename",
+          "type": "keybinding",
+          "default": "\"r\"",
+          "description": "Rename the active tab."
+        },
+        {
+          "key": "keys.tab.last_pane",
+          "type": "keybinding",
+          "default": "\"tab\"",
+          "description": "Focus the last focused pane across workspaces and tabs."
+        },
+        {
+          "key": "keys.resize.increase_left",
+          "type": "keybinding",
+          "default": "[\"h\", \"left\"]",
+          "description": "Resize the focused pane toward the left."
+        },
+        {
+          "key": "keys.resize.increase_down",
+          "type": "keybinding",
+          "default": "[\"j\", \"down\"]",
+          "description": "Resize the focused pane downward."
+        },
+        {
+          "key": "keys.resize.increase_up",
+          "type": "keybinding",
+          "default": "[\"k\", \"up\"]",
+          "description": "Resize the focused pane upward."
+        },
+        {
+          "key": "keys.resize.increase_right",
+          "type": "keybinding",
+          "default": "[\"l\", \"right\"]",
+          "description": "Resize the focused pane toward the right."
+        },
+        {
+          "key": "keys.resize.decrease_left",
+          "type": "keybinding",
+          "default": "\"H\"",
+          "description": "Shrink the focused pane from the left."
+        },
+        {
+          "key": "keys.resize.decrease_down",
+          "type": "keybinding",
+          "default": "\"J\"",
+          "description": "Shrink the focused pane from below."
+        },
+        {
+          "key": "keys.resize.decrease_up",
+          "type": "keybinding",
+          "default": "\"K\"",
+          "description": "Shrink the focused pane from above."
+        },
+        {
+          "key": "keys.resize.decrease_right",
+          "type": "keybinding",
+          "default": "\"L\"",
+          "description": "Shrink the focused pane from the right."
+        },
+        {
+          "key": "keys.resize.grow",
+          "type": "keybinding",
+          "default": "[\"plus\", \"=\"]",
+          "description": "Grow the focused pane."
+        },
+        {
+          "key": "keys.resize.shrink",
+          "type": "keybinding",
+          "default": "\"-\"",
+          "description": "Shrink the focused pane."
+        },
+        {
+          "key": "keys.move.swap_left",
+          "type": "keybinding",
+          "default": "[\"h\", \"left\"]",
+          "description": "Swap the focused pane with the pane to the left."
+        },
+        {
+          "key": "keys.move.swap_down",
+          "type": "keybinding",
+          "default": "[\"j\", \"down\"]",
+          "description": "Swap the focused pane with the pane below."
+        },
+        {
+          "key": "keys.move.swap_up",
+          "type": "keybinding",
+          "default": "[\"k\", \"up\"]",
+          "description": "Swap the focused pane with the pane above."
+        },
+        {
+          "key": "keys.move.swap_right",
+          "type": "keybinding",
+          "default": "[\"l\", \"right\"]",
+          "description": "Swap the focused pane with the pane to the right."
+        },
+        {
+          "key": "keys.move.cycle_next",
+          "type": "keybinding",
+          "default": "[\"n\", \"tab\"]",
+          "description": "Cycle to the next pane."
+        },
+        {
+          "key": "keys.move.cycle_previous",
+          "type": "keybinding",
+          "default": "\"p\"",
+          "description": "Cycle to the previous pane."
+        },
+        {
+          "key": "keys.session.workspace_up",
+          "type": "keybinding",
+          "default": "[\"k\", \"up\"]",
+          "description": "Move the workspace selection up."
+        },
+        {
+          "key": "keys.session.workspace_down",
+          "type": "keybinding",
+          "default": "[\"j\", \"down\"]",
+          "description": "Move the workspace selection down."
+        },
+        {
+          "key": "keys.session.focus_left",
+          "type": "keybinding",
+          "default": "[\"h\", \"left\"]",
+          "description": "Focus the pane to the left."
+        },
+        {
+          "key": "keys.session.focus_right",
+          "type": "keybinding",
+          "default": "[\"l\", \"right\"]",
+          "description": "Focus the pane to the right."
+        },
+        {
+          "key": "keys.session.cycle_next",
+          "type": "keybinding",
+          "default": "\"tab\"",
+          "description": "Cycle to the next pane."
+        },
+        {
+          "key": "keys.session.goto",
+          "type": "keybinding",
+          "default": "\"g\"",
+          "description": "Open the session navigator."
+        },
+        {
+          "key": "keys.session.workspace_picker",
+          "type": "keybinding",
+          "default": "\"w\"",
+          "description": "Open the workspace navigation surface."
+        },
+        {
+          "key": "keys.session.new_workspace",
+          "type": "keybinding",
+          "default": "\"n\"",
+          "description": "Create a new workspace."
+        },
+        {
+          "key": "keys.session.new_worktree",
+          "type": "keybinding",
+          "default": "\"N\"",
+          "description": "Create a Git worktree from the selected workspace."
+        },
+        {
+          "key": "keys.session.rename_workspace",
+          "type": "keybinding",
+          "default": "\"r\"",
+          "description": "Rename the selected workspace."
+        },
+        {
+          "key": "keys.session.close_workspace",
+          "type": "keybinding",
+          "default": "\"x\"",
+          "description": "Close the selected workspace."
+        },
+        {
+          "key": "keys.session.settings",
+          "type": "keybinding",
+          "default": "\"s\"",
+          "description": "Open settings."
+        },
+        {
+          "key": "keys.session.help",
+          "type": "keybinding",
+          "default": "\"?\"",
+          "description": "Open keybinding help."
+        },
+        {
+          "key": "keys.session.detach",
+          "type": "keybinding",
+          "default": "\"d\"",
+          "description": "Detach the current client from its Herdr server."
+        },
+        {
+          "key": "keys.session.previous_agent",
+          "type": "keybinding",
+          "default": "\"[\"",
+          "description": "Focus the previous agent shown in the agent panel."
+        },
+        {
+          "key": "keys.session.next_agent",
+          "type": "keybinding",
+          "default": "\"]\"",
+          "description": "Focus the next agent shown in the agent panel."
+        },
+        {
           "key": "keys.help",
           "type": "keybinding",
           "default": "\"prefix+?\"",
@@ -580,7 +956,7 @@
         {
           "key": "keys.detach",
           "type": "keybinding",
-          "default": "\"prefix+q\"",
+          "default": "[\"prefix+q\", \"ctrl+q\"]",
           "description": "Detach the current client from its Herdr server."
         },
         {
@@ -634,13 +1010,13 @@
         {
           "key": "keys.new_tab",
           "type": "keybinding",
-          "default": "\"prefix+c\"",
+          "default": "[\"prefix+c\", \"alt+t\"]",
           "description": "Create a new tab in the active workspace."
         },
         {
           "key": "keys.rename_tab",
           "type": "keybinding",
-          "default": "\"prefix+shift+t\"",
+          "default": "[\"prefix+shift+t\", \"alt+r\"]",
           "description": "Rename the active tab."
         },
         {
@@ -712,25 +1088,25 @@
         {
           "key": "keys.focus_pane_left",
           "type": "keybinding",
-          "default": "\"prefix+h\"",
+          "default": "[\"prefix+h\", \"alt+h\"]",
           "description": "Focus the pane to the left."
         },
         {
           "key": "keys.focus_pane_down",
           "type": "keybinding",
-          "default": "\"prefix+j\"",
+          "default": "[\"prefix+j\", \"alt+j\"]",
           "description": "Focus the pane below."
         },
         {
           "key": "keys.focus_pane_up",
           "type": "keybinding",
-          "default": "\"prefix+k\"",
+          "default": "[\"prefix+k\", \"alt+k\"]",
           "description": "Focus the pane above."
         },
         {
           "key": "keys.focus_pane_right",
           "type": "keybinding",
-          "default": "\"prefix+l\"",
+          "default": "[\"prefix+l\", \"alt+l\"]",
           "description": "Focus the pane to the right."
         },
         {
@@ -790,13 +1166,13 @@
         {
           "key": "keys.close_pane",
           "type": "keybinding",
-          "default": "\"prefix+x\"",
+          "default": "[\"prefix+x\", \"alt+x\"]",
           "description": "Close the focused pane."
         },
         {
           "key": "keys.zoom",
           "type": "keybinding",
-          "default": "\"prefix+z\"",
+          "default": "[\"prefix+z\", \"alt+z\"]",
           "description": "Toggle zoom for the focused pane. The legacy key name `fullscreen` is accepted as an alias."
         },
         {

@@ -195,6 +195,7 @@ pub(crate) fn keybind_help_groups(
         ),
     ];
 
+    groups.extend(super::modal::modal_help_groups(keybinds)); // Fork: modal layer.
     if !keybinds.custom_commands.is_empty() {
         groups.push((
             "custom",

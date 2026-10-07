@@ -13,6 +13,11 @@ pub type KeyCombo = (KeyCode, KeyModifiers);
 /// Built-in prefix used when `keys.prefix` is unset or invalid.
 pub(crate) const DEFAULT_PREFIX: KeyCombo = (KeyCode::Char('b'), KeyModifiers::CONTROL);
 
+// Fork: modal layer resolution.
+mod modal;
+pub(crate) use modal::ModalAction;
+pub use modal::{DefaultMode, ModalKeybinds, StickyMode};
+
 #[derive(Debug, Clone)]
 pub struct LiveKeybindConfig {
     /// Every configured prefix key. The first entry is the primary prefix used
@@ -406,6 +411,8 @@ pub struct Keybinds {
     pub resize_pane_right: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
+    /// Fork: modal layer (entry keys, extra direct shortcuts, per-mode tables).
+    pub modal: ModalKeybinds,
 }
 
 impl Default for Keybinds {
@@ -591,6 +598,7 @@ impl Config {
             resize_pane_right: empty_action!(),
             toggle_sidebar: empty_action!(),
             custom_commands: Vec::new(),
+            modal: ModalKeybinds::default(),
         };
 
         macro_rules! field_source {
@@ -653,6 +661,13 @@ impl Config {
         }
 
         for source in [BindingSource::User, BindingSource::Default] {
+            modal::apply_modal_direct_bindings(
+                self,
+                &mut keybinds.modal,
+                &mut registry,
+                &mut diagnostics,
+                source,
+            );
             apply_navigate!(
                 keybinds.navigate.workspace_up,
                 navigate_workspace_up,
@@ -777,6 +792,7 @@ impl Config {
                 );
             }
         }
+        modal::finish_modal_keybinds(self, &mut keybinds, &registry, &mut diagnostics);
 
         (prefix_diag, prefix, diagnostics, keybinds)
     }
@@ -2294,11 +2310,12 @@ switch_tab = "prefix+?"
             .switch_tab
             .iter()
             .all(|binding| binding.trigger.is_prefix()));
+        // Fork: alt+t is appended as a direct shortcut; the prefix binding stays first.
         assert!(kb
             .new_tab
             .bindings
-            .iter()
-            .all(|binding| binding.trigger.is_prefix()));
+            .first()
+            .is_some_and(|binding| binding.trigger.is_prefix()));
         assert_eq!(
             binding_triggers(&kb.swap_pane_left),
             vec![BindingTrigger::Prefix((

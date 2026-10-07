@@ -274,6 +274,8 @@ pub(super) enum ClientShellMode {
     Navigate,
     Resize,
     Copy,
+    /// Fork: a sticky Pane/Tab/Move/Session mode. Resize reuses `Resize`.
+    Modal(super::modal::ModalMode),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -644,6 +646,11 @@ pub(super) enum PendingEndpointKind {
         pane_id: String,
         serial: u64,
     },
+    /// Fork: grow/shrink retries on `fallback` when the first resize moved nothing.
+    ModalResizeFallback {
+        pane_id: String,
+        fallback: crate::api::schema::PaneDirection,
+    },
     WordSelection {
         pane_id: String,
         absolute_row: u32,
@@ -745,6 +752,8 @@ pub(super) enum ClientInputTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ClientInputContext {
     pub(super) mode: ClientShellMode,
+    /// Fork: so holding the lock key does not toggle it on every repeat.
+    pub(super) modal_locked: bool,
     pub(super) overlay: Option<ClientShellOverlayKind>,
     pub(super) popup_terminal_id: Option<String>,
     pub(super) popup_pending: bool,
@@ -887,6 +896,9 @@ pub(crate) struct ClientShellState {
     pub(super) active_endpoint_id: ClientEndpointId,
     pub(super) collapsed_endpoints: HashSet<ClientEndpointId>,
     pub(super) mode: ClientShellMode,
+    /// Fork: locked mode, a flag over `Terminal`; only `keys.mode_locked` is not
+    /// forwarded to the pane.
+    pub(super) modal_locked: bool,
     pub(super) navigate_workspace_id: Option<WorkspaceNavigationTarget>,
     pub(super) pending_workspace_highlight: Option<PendingWorkspaceHighlight>,
     pub(super) reveal_navigation_workspace: bool,
@@ -973,6 +985,9 @@ pub(super) struct WorkspaceEntry {
 impl ClientShellState {
     pub(crate) fn new(mut config: ClientShellConfig) -> Self {
         let preferences = config.preferences.clone();
+        // Fork: keys.default_mode = "locked".
+        let start_locked =
+            config.keybinds.keybinds.modal.default_mode == crate::config::DefaultMode::Locked;
         let local_config_diagnostic = config.startup_config_diagnostic.take();
         let overlay = config
             .startup_onboarding
@@ -1052,6 +1067,7 @@ impl ClientShellState {
             active_endpoint_id: ClientEndpointId::Local,
             collapsed_endpoints: HashSet::new(),
             mode: ClientShellMode::Terminal,
+            modal_locked: start_locked,
             navigate_workspace_id: None,
             pending_workspace_highlight: None,
             reveal_navigation_workspace: false,
@@ -1377,10 +1393,14 @@ impl ClientShellState {
             } else if active_keymap_changed
                 && matches!(
                     self.mode,
-                    ClientShellMode::Prefix | ClientShellMode::Navigate | ClientShellMode::Resize
+                    ClientShellMode::Prefix
+                        | ClientShellMode::Navigate
+                        | ClientShellMode::Resize
+                        | ClientShellMode::Modal(_)
                 )
             {
                 self.mode = ClientShellMode::Terminal;
+                self.navigate_workspace_id = None; // Fork: Session mode's cursor.
             }
         }
         let tab_layout_changed = self.snapshot.as_deref().is_none_or(|current| {
@@ -1489,7 +1509,7 @@ impl ClientShellState {
                 }
             }
         }
-        if self.mode == ClientShellMode::Navigate && self.navigate_workspace_id.is_none() {
+        if self.navigates_workspaces() && self.navigate_workspace_id.is_none() {
             self.navigate_workspace_id = snapshot
                 .focused_workspace_id
                 .as_deref()

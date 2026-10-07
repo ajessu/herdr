@@ -4,6 +4,10 @@ use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
+    modal_keys::{
+        MoveModeKeysConfig, PaneModeKeysConfig, ResizeModeKeysConfig, SessionModeKeysConfig,
+        TabModeKeysConfig,
+    },
     ActionKeybinds, BindingConfig, CommandKeybindConfig, IndexedKeybind, Keybinds, SidebarConfig,
     SoundConfig, TabBarRightEntryConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD,
     DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
@@ -337,6 +341,42 @@ pub struct KeysConfig {
     /// Prefix key(s) to enter prefix mode (e.g. "ctrl+b", "f12", "esc", or an
     /// array to accept several).
     pub prefix: BindingConfig,
+    // Fork: modal layer (zellij-style sticky modes). Tables live in modal_keys.rs.
+    /// Mode the client starts in: "modal" (default) or "locked".
+    pub default_mode: String,
+    /// Enter Pane mode (sticky). Default: "ctrl+p".
+    pub mode_pane: BindingConfig,
+    /// Enter Tab mode (sticky). Default: "ctrl+t".
+    pub mode_tab: BindingConfig,
+    /// Enter Resize mode (sticky). Default: "ctrl+n".
+    pub mode_resize: BindingConfig,
+    /// Enter Move mode (sticky). Default: "ctrl+h". Terminals that send ^H for Backspace enter it on Backspace; set "" to disable.
+    pub mode_move: BindingConfig,
+    /// Enter Session mode (sticky). Default: "ctrl+o".
+    pub mode_session: BindingConfig,
+    /// Toggle Locked mode, which forwards every other key to the pane. Default: "ctrl+g".
+    pub mode_locked: BindingConfig,
+    /// Split the focused pane along its longer side. Default: "alt+n".
+    pub split_auto: BindingConfig,
+    /// Move the active tab one position left, without wrapping. Default: "alt+i".
+    pub move_tab_left: BindingConfig,
+    /// Move the active tab one position right, without wrapping. Default: "alt+o".
+    pub move_tab_right: BindingConfig,
+    /// Grow the focused pane. Default: ["alt+=", "alt+plus"].
+    pub resize_grow: BindingConfig,
+    /// Shrink the focused pane. Default: "alt+-".
+    pub resize_shrink: BindingConfig,
+    /// Bindings active in Pane mode.
+    pub pane: PaneModeKeysConfig,
+    /// Bindings active in Tab mode.
+    pub tab: TabModeKeysConfig,
+    /// Bindings active in Resize mode.
+    pub resize: ResizeModeKeysConfig,
+    /// Bindings active in Move mode.
+    #[serde(rename = "move")]
+    pub move_: MoveModeKeysConfig,
+    /// Bindings active in Session mode.
+    pub session: SessionModeKeysConfig,
     /// Open keybinding help. Default: "prefix+?"
     pub help: BindingConfig,
     /// Open settings. Default: "prefix+s"
@@ -478,6 +518,41 @@ pub(crate) struct KeysConfigOverlay {
     /// new clients merge it into the effective prefix list.
     #[serde(skip_serializing_if = "Option::is_none")]
     extra_prefixes: Option<BindingConfig>,
+    // Fork: modal layer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode_pane: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode_tab: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode_resize: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode_move: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode_session: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode_locked: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    split_auto: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    move_tab_left: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    move_tab_right: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_grow: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_shrink: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pane: Option<PaneModeKeysConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tab: Option<TabModeKeysConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize: Option<ResizeModeKeysConfig>,
+    #[serde(rename = "move", skip_serializing_if = "Option::is_none")]
+    move_: Option<MoveModeKeysConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<SessionModeKeysConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     help: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -652,6 +727,24 @@ impl<'de> Deserialize<'de> for KeysConfig {
             };
         }
 
+        // Fork: modal layer.
+        apply_field!(default_mode);
+        apply_field!(mode_pane);
+        apply_field!(mode_tab);
+        apply_field!(mode_resize);
+        apply_field!(mode_move);
+        apply_field!(mode_session);
+        apply_field!(mode_locked);
+        apply_field!(split_auto);
+        apply_field!(move_tab_left);
+        apply_field!(move_tab_right);
+        apply_field!(resize_grow);
+        apply_field!(resize_shrink);
+        apply_field!(pane);
+        apply_field!(tab);
+        apply_field!(resize);
+        apply_field!(move_);
+        apply_field!(session);
         apply_field!(help);
         apply_field!(settings);
         apply_field!(new_workspace);
@@ -759,6 +852,23 @@ impl KeysConfig {
         }
 
         profile.prefix = Some(self.prefix.clone());
+        // Fork: modal layer. default_mode is a local startup preference and is not published.
+        copy_effective_action_field!(mode_pane, keybinds.modal.entry.pane);
+        copy_effective_action_field!(mode_tab, keybinds.modal.entry.tab);
+        copy_effective_action_field!(mode_resize, keybinds.modal.entry.resize);
+        copy_effective_action_field!(mode_move, keybinds.modal.entry.move_);
+        copy_effective_action_field!(mode_session, keybinds.modal.entry.session);
+        copy_effective_action_field!(mode_locked, keybinds.modal.entry.locked);
+        copy_effective_action_field!(split_auto, keybinds.modal.split_auto);
+        copy_effective_action_field!(move_tab_left, keybinds.modal.move_tab_left);
+        copy_effective_action_field!(move_tab_right, keybinds.modal.move_tab_right);
+        copy_effective_action_field!(resize_grow, keybinds.modal.resize_grow);
+        copy_effective_action_field!(resize_shrink, keybinds.modal.resize_shrink);
+        copy_user_field!(pane);
+        copy_user_field!(tab);
+        copy_user_field!(resize);
+        copy_user_field!(move_);
+        copy_user_field!(session);
         copy_effective_action_field!(help, keybinds.help);
         copy_effective_action_field!(settings, keybinds.settings);
         copy_effective_action_field!(new_workspace, keybinds.new_workspace);
@@ -1142,8 +1252,26 @@ impl Default for ExperimentalConfig {
 
 impl Default for KeysConfig {
     fn default() -> Self {
-        Self {
+        let mut keys = Self {
             prefix: BindingConfig::one("ctrl+b"),
+            // Fork: modal layer.
+            default_mode: "modal".into(),
+            mode_pane: BindingConfig::one("ctrl+p"),
+            mode_tab: BindingConfig::one("ctrl+t"),
+            mode_resize: BindingConfig::one("ctrl+n"),
+            mode_move: BindingConfig::one("ctrl+h"),
+            mode_session: BindingConfig::one("ctrl+o"),
+            mode_locked: BindingConfig::one("ctrl+g"),
+            split_auto: BindingConfig::one("alt+n"),
+            move_tab_left: BindingConfig::one("alt+i"),
+            move_tab_right: BindingConfig::one("alt+o"),
+            resize_grow: BindingConfig::Many(vec!["alt+=".into(), "alt+plus".into()]),
+            resize_shrink: BindingConfig::one("alt+-"),
+            pane: PaneModeKeysConfig::default(),
+            tab: TabModeKeysConfig::default(),
+            resize: ResizeModeKeysConfig::default(),
+            move_: MoveModeKeysConfig::default(),
+            session: SessionModeKeysConfig::default(),
             help: BindingConfig::one("prefix+?"),
             settings: BindingConfig::one("prefix+s"),
             new_workspace: BindingConfig::one("prefix+shift+n"),
@@ -1208,7 +1336,9 @@ impl Default for KeysConfig {
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),
-        }
+        };
+        super::modal_keys::append_fork_direct_defaults(&mut keys);
+        keys
     }
 }
 

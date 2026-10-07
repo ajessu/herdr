@@ -790,51 +790,6 @@ impl AppState {
         }
     }
 
-    /// Stack the focused pane with its adjacent sibling (R6). No-op when the
-    /// focused pane is the lone root or its sibling is a multi-pane subtree.
-    // Interactive stack/unstack entry points. Their only callers were the
-    // keybind dispatch in src/app/input/, which upstream deleted in #3487 when
-    // input moved into the client shell; they are re-wired when that dispatch
-    // is rebuilt. Stacks themselves remain reachable and covered today through
-    // layout.apply/layout.export and session restore.
-    #[allow(dead_code)]
-    pub fn stack_focused_pane(&mut self) -> bool {
-        let Some(tab) = self
-            .active
-            .and_then(|i| self.workspaces.get_mut(i))
-            .and_then(|ws| ws.active_tab_mut())
-        else {
-            return false;
-        };
-        if tab.layout.stack_focused() {
-            self.mark_session_dirty();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Remove the focused member from its stack and re-place it as a sibling
-    /// split (R7). No-op when the focused pane is not in a stack.
-    #[allow(dead_code)]
-    pub fn unstack_focused_pane(&mut self) -> bool {
-        let Some(tab) = self
-            .active
-            .and_then(|i| self.workspaces.get_mut(i))
-            .and_then(|ws| ws.active_tab_mut())
-        else {
-            return false;
-        };
-        if tab
-            .layout
-            .unstack_focused(ratatui::layout::Direction::Vertical, 0.5)
-        {
-            self.mark_session_dirty();
-            true
-        } else {
-            false
-        }
-    }
     #[cfg(test)]
     pub fn resize_pane(&mut self, direction: NavDirection) {
         if let Some(first) = self.view.pane_infos.first() {

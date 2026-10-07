@@ -34,6 +34,9 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if self.record_modal_keybind_action(action, outcome) {
+                    return; // Fork: modal layer actions.
+                }
                 if matches!(
                     action,
                     crate::input::KeybindAction::NewWorktree
@@ -621,6 +624,9 @@ impl ClientShellState {
                         (true, Vec::new())
                     }
                 };
+            }
+            PendingEndpointKind::ModalResizeFallback { pane_id, fallback } => {
+                return (false, self.complete_modal_resize(pane_id, fallback, result));
             }
             PendingEndpointKind::PaneScroll { pane_id, serial } => {
                 let mut outcome = ClientShellInput::default();

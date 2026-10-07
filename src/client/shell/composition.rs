@@ -35,14 +35,14 @@ impl ClientShellState {
         } else {
             Rect::new(0, 1, cols, rows.saturating_sub(2))
         };
-        let valid_navigation_target = self.mode == ClientShellMode::Navigate
+        let valid_navigation_target = self.navigates_workspaces() // Fork: + Session mode.
             && self
                 .navigate_workspace_id
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
         let pending_workspace_highlight =
             self.pending_workspace_highlight.as_ref().filter(|pending| {
-                self.mode != ClientShellMode::Navigate
+                !self.navigates_workspaces()
                     && pending.target.endpoint_id == self.active_endpoint_id
                     && self.navigation_target_valid(&pending.target)
             });
@@ -154,19 +154,19 @@ impl ClientShellState {
     ) -> Option<crate::client::frame_output::ComposedFrame> {
         self.last_composed_at = Some(std::time::Instant::now());
         self.selection_repaint_deadline = None;
-        if self.last_composed_size != Some((cols, rows)) && self.mode == ClientShellMode::Navigate {
+        if self.last_composed_size != Some((cols, rows)) && self.navigates_workspaces() {
             self.reveal_navigation_workspace = true;
             self.reveal_mobile_workspace = true;
         }
         self.last_composed_size = Some((cols, rows));
-        let valid_navigation_target = self.mode == ClientShellMode::Navigate
+        let valid_navigation_target = self.navigates_workspaces() // Fork: + Session mode.
             && self
                 .navigate_workspace_id
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
         let pending_workspace_highlight =
             self.pending_workspace_highlight.as_ref().filter(|pending| {
-                self.mode != ClientShellMode::Navigate
+                !self.navigates_workspaces()
                     && pending.target.endpoint_id == self.active_endpoint_id
                     && self.navigation_target_valid(&pending.target)
             });

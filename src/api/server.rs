@@ -615,6 +615,8 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneSwap(_) => "pane.swap",
         Method::PaneMove(_) => "pane.move",
         Method::PaneZoom(_) => "pane.zoom",
+        Method::PaneStack(_) => "pane.stack",
+        Method::PaneUnstack(_) => "pane.unstack",
         Method::PaneLayout(_) => "pane.layout",
         Method::PaneProcessInfo(_) => "pane.process_info",
         Method::LayoutExport(_) => "layout.export",

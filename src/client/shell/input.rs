@@ -563,6 +563,9 @@ impl ClientShellState {
 
         match self.mode {
             ClientShellMode::Terminal => {
+                if let Some(routed) = self.route_modal_terminal_key(key, outcome) {
+                    return routed; // Fork: locked mode and mode-entry keys.
+                }
                 if let Some(binding) =
                     crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key)
                 {
@@ -612,6 +615,10 @@ impl ClientShellState {
             }
             ClientShellMode::Resize => {
                 self.route_resize_key(key, outcome);
+                None
+            }
+            ClientShellMode::Modal(mode) => {
+                self.route_sticky_key(mode.sticky(), key, outcome); // Fork: sticky modes.
                 None
             }
             ClientShellMode::Copy => {
@@ -925,34 +932,15 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) {
-        let resize_bindings = &self.config.keybinds.keybinds.resize_mode;
-        if key.code == KeyCode::Esc
-            || key.code == KeyCode::Enter
-            || resize_bindings.matches_prefix_key(key)
-            || resize_bindings.matches_direct_key(key)
-        {
-            self.mode = self.copy_or_terminal_mode();
-            outcome.repaint = true;
-            return;
-        }
-
-        let action = match key.code {
-            KeyCode::Char('h') | KeyCode::Left => Some(crate::input::KeybindAction::ResizePaneLeft),
-            KeyCode::Char('j') | KeyCode::Down => Some(crate::input::KeybindAction::ResizePaneDown),
-            KeyCode::Char('k') | KeyCode::Up => Some(crate::input::KeybindAction::ResizePaneUp),
-            KeyCode::Char('l') | KeyCode::Right => {
-                Some(crate::input::KeybindAction::ResizePaneRight)
-            }
-            _ => None,
-        };
-        if let Some(action) = action {
-            self.record_binding(crate::input::KeybindMatch::Action(action), outcome);
-        }
+        // Fork: resize mode is table-driven ([keys.resize]) and sticky like the
+        // other modes; see modal.rs.
+        self.route_sticky_key(crate::config::StickyMode::Resize, key, outcome);
     }
 
     fn input_context(&self) -> ClientInputContext {
         ClientInputContext {
             mode: self.mode,
+            modal_locked: self.modal_locked,
             overlay: self.overlay.as_ref().map(ClientShellOverlay::kind),
             popup_terminal_id: self.popup_input_target().and_then(|target| match target {
                 ClientInputTarget::Popup(terminal_id) => Some(terminal_id),

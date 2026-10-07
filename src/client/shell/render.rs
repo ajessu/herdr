@@ -193,6 +193,13 @@ pub(super) fn render_mode_bar(
                     ]);
                 }
             }
+            ClientShellMode::Modal(modal_mode) => segments.extend(super::modal::mode_bar_segments(
+                modal_mode,
+                &keybinds.keybinds,
+                key,
+                base,
+                mode_style,
+            )),
             ClientShellMode::Terminal => unreachable!(),
         }
     }

@@ -5,6 +5,7 @@ mod agents;
 mod env;
 mod integrations;
 mod layouts;
+mod pane_stack;
 mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
@@ -1110,6 +1111,20 @@ impl App {
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),
             Method::PaneZoom(params) => return self.handle_pane_zoom(request.id, params),
+            Method::PaneStack(target) => {
+                return self.handle_pane_stack_edit(
+                    request.id,
+                    target,
+                    pane_stack::StackEdit::Stack,
+                )
+            }
+            Method::PaneUnstack(target) => {
+                return self.handle_pane_stack_edit(
+                    request.id,
+                    target,
+                    pane_stack::StackEdit::Unstack,
+                )
+            }
             Method::PaneLayout(params) => return self.handle_pane_layout(request.id, params),
             Method::PaneProcessInfo(params) => {
                 return self.handle_pane_process_info(request.id, params);

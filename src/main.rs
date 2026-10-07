@@ -145,7 +145,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Prefix-mode actions
 # help = "prefix+?"
 # settings = "prefix+s"
-# detach = "prefix+q"
+# detach = ["prefix+q", "ctrl+q"]
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
 # workspace_picker = "prefix+w"
@@ -162,8 +162,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # next_agent = ""         # optional, unset by default
 # focus_agent = ""        # optional indexed binding, e.g. "prefix+alt+1..9"
 # remote_image_paste = "ctrl+v" # only active in herdr --remote; empty disables raw-key image paste
-# new_tab = "prefix+c"
-# rename_tab = "prefix+shift+t"
+# new_tab = ["prefix+c", "alt+t"]
+# rename_tab = ["prefix+shift+t", "alt+r"]
 # previous_tab = "prefix+p"
 # next_tab = "prefix+n"
 # move_tab_previous = ""   # optional, e.g. "alt+shift+left" moves the tab toward the front
@@ -174,10 +174,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # rename_pane = "prefix+shift+p"
 # edit_scrollback = "prefix+e"
 # clear_pane = ""                  # unbound; e.g. "prefix+ctrl+k"
-# focus_pane_left = "prefix+h"
-# focus_pane_down = "prefix+j"
-# focus_pane_up = "prefix+k"
-# focus_pane_right = "prefix+l"
+# focus_pane_left = ["prefix+h", "alt+h"]
+# focus_pane_down = ["prefix+j", "alt+j"]
+# focus_pane_up = ["prefix+k", "alt+k"]
+# focus_pane_right = ["prefix+l", "alt+l"]
 # cycle_pane_next = "prefix+tab"
 # cycle_pane_previous = "prefix+shift+tab"
 # last_pane = ""          # optional, unset by default; bind e.g. "prefix+tab" for global back-and-forth
@@ -185,8 +185,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # split_horizontal = "prefix+minus"
 # stack_pane = "prefix+shift+s"
 # unstack_pane = "prefix+shift+u"
-# close_pane = "prefix+x"
-# zoom = "prefix+z"       # legacy alias: fullscreen
+# close_pane = ["prefix+x", "alt+x"]
+# zoom = ["prefix+z", "alt+z"]       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
 # resize_pane_left = ""   # optional, e.g. "ctrl+shift+alt+left" resizes without entering resize mode
 # resize_pane_down = ""   # optional, e.g. "ctrl+shift+alt+down"
@@ -202,6 +202,35 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # navigate_pane_down = "j"
 # navigate_pane_up = "k"
 # navigate_pane_right = "l"     # right arrow always focuses the pane to the right
+
+# Sticky modes (zellij-style). An entry key opens a mode that stays active after
+# each action; leave with esc, enter, or the same entry key. Another entry key
+# switches modes directly. Empty ("") disables an entry key.
+# default_mode = "modal"  # or "locked": start with every key going to the pane
+# mode_pane = "ctrl+p"
+# mode_tab = "ctrl+t"
+# mode_resize = "ctrl+n"
+# mode_move = "ctrl+h"    # terminals that send ^H for backspace enter it on backspace
+# mode_session = "ctrl+o"
+# mode_locked = "ctrl+g"  # toggles locked: only this key is not sent to the pane
+# split_auto = "alt+n"    # splits along the focused pane's longer side
+# move_tab_left = "alt+i"
+# move_tab_right = "alt+o"
+# resize_grow = ["alt+=", "alt+plus"]
+# resize_shrink = "alt+-"
+# Per-mode tables take bare keys and only apply while that mode is active.
+# [keys.pane]    focus_left/down/up/right, split_auto, split_down, split_right,
+#                stack, close, zoom, rename, cycle_next
+# [keys.tab]     previous, next, new, close, rename, last_pane (1..9 switch tab)
+# [keys.resize]  increase_left/down/up/right, decrease_left/down/up/right, grow, shrink
+# [keys.move]    swap_left/down/up/right, cycle_next, cycle_previous
+# [keys.session] workspace_up/down, focus_left/right, cycle_next, goto,
+#                workspace_picker, new_workspace, new_worktree, rename_workspace,
+#                close_workspace, settings, help, detach, previous_agent, next_agent
+# For example:
+# [keys.pane]
+# split_auto = "n"
+# zoom = ["f", "z"]
 
 # Custom commands use the same binding syntax.
 # type = "shell" runs detached in the background.

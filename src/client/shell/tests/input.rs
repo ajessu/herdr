@@ -505,14 +505,15 @@ fn shell_targets_unconsumed_input_and_keeps_prefix_local() {
         }] if *modifiers == KeyModifiers::CONTROL.bits()
     ));
 
-    let alt = state.handle_input_bytes(b"\x1b[120;3u");
+    // Fork: alt+x closes the pane by default, so probe with an unbound alt key.
+    let alt = state.handle_input_bytes(b"\x1b[121;3u");
     let ClientMessage::ClientShellPaneInput { events, .. } = &alt.requests[0] else {
         panic!("expected semantic alt key");
     };
     assert!(matches!(
         &events[..],
         [ClientPaneInputEvent::Key {
-            code: crate::protocol::ClientKeyCode::Char('x'),
+            code: crate::protocol::ClientKeyCode::Char('y'),
             modifiers,
             ..
         }] if *modifiers == KeyModifiers::ALT.bits()

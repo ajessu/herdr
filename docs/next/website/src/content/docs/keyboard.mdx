@@ -132,3 +132,18 @@ A few `ctrl+alt` chords are taken elsewhere. Avoid these:
 | `ctrl+alt+f1..f12` | Linux virtual console switching |
 
 If a direct chord does nothing, your terminal or desktop environment consumed it before Herdr could see it. Rebind either side: free the chord in the terminal's settings, or pick another chord in Herdr.
+
+This build also ships zellij-style sticky modes on top of the prefix. An entry key opens a mode that stays active after each action, so you can press `h` four times instead of the prefix four times. Leave with Esc, Enter, or the same entry key. Another entry key switches modes directly, and keys a mode does not bind are swallowed rather than sent to the pane. An action that opens a dialog, closes something, or detaches drops you back to the terminal.
+
+| Entry key | Mode | What its bare keys do |
+| --- | --- | --- |
+| `ctrl+p` | Pane | `h/j/k/l` focus, `n` split along the longer side, `d`/`r` split down/right, `s` stack, `x` close, `f`/`z` zoom, `c` rename, `p` next pane |
+| `ctrl+t` | Tab | `h/l` previous/next, `n` new, `x` close, `r` rename, `tab` last pane, `1..9` jump |
+| `ctrl+n` | Resize | `h/j/k/l` resize, `H/J/K/L` shrink from that side, `+`/`=` grow, `-` shrink |
+| `ctrl+h` | Move | `h/j/k/l` swap, `n`/`tab` and `p` cycle focus |
+| `ctrl+o` | Session | `j/k` select a workspace, Enter focus it, `n` new workspace, `N` new worktree, `r` rename, `x` close, `g` navigator, `w` workspace picker, `[`/`]` agents, `d` detach |
+| `ctrl+g` | Locked | Every key except `ctrl+g` goes to the pane, the prefix included |
+
+Configure each mode's keys in `[keys.pane]`, `[keys.tab]`, `[keys.resize]`, `[keys.move]`, and `[keys.session]`, and the entry keys with `mode_pane`, `mode_tab`, `mode_resize`, `mode_move`, `mode_session`, and `mode_locked`. Set an entry key to `""` to turn that mode off. `ctrl+h` sends the same byte as Backspace in terminals that use `^H` for it; if Backspace opens move mode, set `mode_move = ""` or pick another key. `default_mode = "locked"` starts every client locked.
+
+Direct shortcuts work without any mode: `alt+h/j/k/l` focus, `alt+n` split, `alt+x` close, `alt+z` zoom, `alt+t` new tab, `alt+r` rename tab, `alt+i`/`alt+o` move the tab left/right, `alt+=`/`alt+-` grow/shrink, and `ctrl+q` detach. `prefix+shift+s` and `prefix+shift+u` stack and unstack the focused pane.
