@@ -121,6 +121,8 @@ impl ClientShellConfig {
             mobile_width_threshold: config.ui.mobile_width_threshold,
             tab_bar_position: config.ui.tab_bar_position,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
+            hint_bar: config.ui.hint_bar,
+            powerline: config.ui.tabs.powerline,
             spaces: config.ui.sidebar.spaces.clone(),
             agents: config.ui.sidebar.agents.clone(),
             agent_panel_sort: config.ui.agent_panel_sort,
@@ -323,6 +325,8 @@ impl ClientShellConfig {
                 self.mobile_width_threshold = ui.mobile_width_threshold;
                 self.tab_bar_position = ui.tab_bar_position;
                 self.hide_tab_bar_when_single_tab = ui.hide_tab_bar_when_single_tab;
+                self.hint_bar = ui.hint_bar;
+                self.powerline = ui.tabs.powerline;
                 self.spaces = ui.sidebar.spaces.clone();
                 self.agents = ui.sidebar.agents.clone();
                 self.agent_panel_sort = ui.agent_panel_sort;
@@ -372,6 +376,7 @@ impl ClientShellConfig {
                 tab_bar: Rect::default(),
                 mobile_header: Rect::new(0, 0, cols, header_height),
                 pane_surface: Rect::new(0, header_height, cols, rows.saturating_sub(header_height)),
+                hint_bar: Rect::default(),
             };
         }
 
@@ -412,12 +417,14 @@ impl ClientShellConfig {
                 Rect::new(main.x, 0, main.width, rows.saturating_sub(tab_height)),
             ),
         };
+        let (pane_surface, hint_bar) = super::hint_bar::reserve_row(self.hint_bar, pane_surface);
 
         ClientShellLayout {
             sidebar: Rect::new(0, 0, sidebar_width, rows),
             tab_bar,
             mobile_header: Rect::default(),
             pane_surface,
+            hint_bar,
         }
     }
 

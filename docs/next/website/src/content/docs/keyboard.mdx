@@ -147,3 +147,10 @@ This build also ships zellij-style sticky modes on top of the prefix. An entry k
 Configure each mode's keys in `[keys.pane]`, `[keys.tab]`, `[keys.resize]`, `[keys.move]`, and `[keys.session]`, and the entry keys with `mode_pane`, `mode_tab`, `mode_resize`, `mode_move`, `mode_session`, and `mode_locked`. Set an entry key to `""` to turn that mode off. `ctrl+h` sends the same byte as Backspace in terminals that use `^H` for it; if Backspace opens move mode, set `mode_move = ""` or pick another key. `default_mode = "locked"` starts every client locked.
 
 Direct shortcuts work without any mode: `alt+h/j/k/l` focus, `alt+n` split, `alt+x` close, `alt+z` zoom, `alt+t` new tab, `alt+r` rename tab, `alt+i`/`alt+o` move the tab left/right, `alt+=`/`alt+-` grow/shrink, and `ctrl+q` detach. `prefix+shift+s` and `prefix+shift+u` stack and unstack the focused pane.
+
+To see the current mode and its keys while you work, turn on the hint bar: a row below the panes in the style of zellij's status bar. It lists the mode-entry keys and alt shortcuts in normal mode, and each mode's own keys while that mode is active, taken from your live keymap. `"compact"` keeps the four most important hints. Its tile separators use Powerline glyphs; set `tabs.powerline = false` if your font lacks them.
+
+```toml
+[ui]
+hint_bar = "full"   # or "compact"; "off" is the default
+```

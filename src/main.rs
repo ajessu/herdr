@@ -345,6 +345,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Desktop tab row placement: "top" or "bottom".
 # tab_bar_position = "top"
 
+# Contextual hint bar below the panes: the current mode and its keys.
+# "full" shows every hint that fits, "compact" the four most important, "off" none.
+# hint_bar = "off"
+# tabs.powerline = true   # Powerline wedges between hint tiles (needs a Nerd Font)
+
 # Ordered status entries at the right edge of the desktop tab bar.
 # Supported types: zoom, hostname, datetime, text, and command.
 # Hostname, datetime, and command entries resolve on the Herdr server.

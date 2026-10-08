@@ -1398,6 +1398,23 @@
           ]
         },
         {
+          "key": "ui.hint_bar",
+          "type": "enum",
+          "default": "\"off\"",
+          "description": "Contextual hint bar below the panes showing the current mode and its keys: every hint that fits, the four most important, or none.",
+          "values": [
+            "full",
+            "compact",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.tabs.powerline",
+          "type": "boolean",
+          "default": "true",
+          "description": "Draw Powerline wedges between hint-bar tiles. Needs a Powerline or Nerd Font."
+        },
+        {
           "key": "ui.tab_bar_right",
           "type": "array",
           "default": "[]",

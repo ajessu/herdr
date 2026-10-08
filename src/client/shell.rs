@@ -19,6 +19,7 @@ mod endpoints;
 pub(super) use endpoints::*;
 mod global_menu;
 mod graphics;
+mod hint_bar; // Fork: contextual hint bar.
 mod input;
 mod input_source;
 mod link_hover;

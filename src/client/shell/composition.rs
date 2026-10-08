@@ -318,7 +318,15 @@ impl ClientShellState {
         let mobile_navigate_panel = !layout.mobile_header.is_empty()
             && self.mode == ClientShellMode::Navigate
             && self.endpoint_error.is_none();
-        let mode_bar = if mobile_navigate_panel || self.overlay.is_some() {
+        let mode_bar = if !layout.hint_bar.is_empty() {
+            // Fork: the hint row replaces the mode bar, so nothing covers the panes.
+            self.render_hint_row(
+                &mut buffer,
+                layout.hint_bar,
+                snapshot.update_available.is_some(),
+            );
+            None
+        } else if mobile_navigate_panel || self.overlay.is_some() {
             None
         } else {
             render::render_mode_bar(

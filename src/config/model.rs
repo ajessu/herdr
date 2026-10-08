@@ -4,6 +4,7 @@ use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
+    chrome::{HintBarStyleConfig, TabsConfig},
     modal_keys::{
         MoveModeKeysConfig, PaneModeKeysConfig, ResizeModeKeysConfig, SessionModeKeysConfig,
         TabModeKeysConfig,
@@ -1106,6 +1107,10 @@ pub struct UiConfig {
     pub hide_tab_bar_when_single_tab: bool,
     /// Desktop tab row placement. Default: top.
     pub tab_bar_position: TabBarPositionConfig,
+    /// Fork: contextual hint bar below the panes: "full", "compact", or "off". Default: off.
+    pub hint_bar: HintBarStyleConfig,
+    /// Fork: tab and hint-bar styling.
+    pub tabs: TabsConfig,
     /// Ordered entries shown at the right edge of the desktop tab row. Empty by default.
     pub tab_bar_right: Vec<TabBarRightEntryConfig>,
     /// Text inserted between visible right-side tab bar entries. Default: one space.
@@ -1375,6 +1380,8 @@ impl Default for UiConfig {
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             tab_bar_position: TabBarPositionConfig::Top,
+            hint_bar: HintBarStyleConfig::Off,
+            tabs: TabsConfig::default(),
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             window_title: super::window_title::default_window_title(),
