@@ -316,14 +316,14 @@ fn mode_fields<'a>(
         // decrease_<side> shrinks from that side, which moves the border the
         // opposite way.
         StickyMode::Resize => mode_fields!(keys.resize, defaults.resize, "resize";
-            increase_left => act(A::ResizePaneLeft), "resize left";
-            increase_down => act(A::ResizePaneDown), "resize down";
-            increase_up => act(A::ResizePaneUp), "resize up";
-            increase_right => act(A::ResizePaneRight), "resize right";
-            decrease_left => act(A::ResizePaneRight), "shrink from left";
-            decrease_down => act(A::ResizePaneUp), "shrink from below";
-            decrease_up => act(A::ResizePaneDown), "shrink from above";
-            decrease_right => act(A::ResizePaneLeft), "shrink from right";
+            increase_left => act(A::ResizePaneLeft), "increase left";
+            increase_down => act(A::ResizePaneDown), "increase down";
+            increase_up => act(A::ResizePaneUp), "increase up";
+            increase_right => act(A::ResizePaneRight), "increase right";
+            decrease_left => act(A::ResizePaneRight), "decrease left";
+            decrease_down => act(A::ResizePaneUp), "decrease down";
+            decrease_up => act(A::ResizePaneDown), "decrease up";
+            decrease_right => act(A::ResizePaneLeft), "decrease right";
             grow => act(A::ResizeGrow), "grow";
             shrink => act(A::ResizeShrink), "shrink";
         ),
@@ -336,8 +336,8 @@ fn mode_fields<'a>(
             cycle_previous => act(A::CyclePanePrevious), "previous pane";
         ),
         StickyMode::Session => mode_fields!(keys.session, defaults.session, "session";
-            workspace_up => ModalAction::SessionWorkspaceUp, "select workspace above";
-            workspace_down => ModalAction::SessionWorkspaceDown, "select workspace below";
+            workspace_up => ModalAction::SessionWorkspaceUp, "workspace up";
+            workspace_down => ModalAction::SessionWorkspaceDown, "workspace down";
             focus_left => act(A::FocusPaneLeft), "focus left";
             focus_right => act(A::FocusPaneRight), "focus right";
             cycle_next => act(A::CyclePaneNext), "next pane";
