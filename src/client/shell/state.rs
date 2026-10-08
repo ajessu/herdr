@@ -27,6 +27,7 @@ pub(crate) struct ClientShellConfig {
     /// Fork: tab bar style and which agent states get a tab status dot.
     pub(super) tab_style: crate::config::TabStyleConfig,
     pub(super) tab_status: crate::config::TabStatusModeConfig,
+    pub(super) sidebar_style: crate::config::SidebarStyleConfig,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
@@ -117,6 +118,8 @@ pub(super) struct ShellHitMap {
     pub(super) tab_scroll_right: Rect,
     /// Fork: tab ids the zellij-style overflow tiles jump to (left, right).
     pub(super) tab_overflow_targets: [Option<String>; 2],
+    /// Fork: zellij-style sidebar overflow badges and where they jump.
+    pub(super) sidebar_overflow: Vec<(Rect, super::sidebar_chrome::SidebarJump)>,
     pub(super) mobile_switch: Rect,
     pub(super) mobile_close: Rect,
     pub(super) mobile_targets: Vec<(Rect, ClientMobileTarget)>,

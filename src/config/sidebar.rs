@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::chrome::SidebarStyleConfig; // Fork: sidebar style.
 use crate::detect::Agent;
 
 const MAX_SIDEBAR_ROWS: usize = 16;
@@ -480,6 +481,8 @@ impl Default for SpacesSidebarConfig {
 pub struct SidebarConfig {
     pub agents: AgentsSidebarConfig,
     pub spaces: SpacesSidebarConfig,
+    /// Fork: "upstream" or "zellij". Default: upstream.
+    pub style: SidebarStyleConfig,
 }
 
 #[cfg(test)]

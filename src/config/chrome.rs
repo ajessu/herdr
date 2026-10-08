@@ -1,4 +1,4 @@
-//! Fork: settings for the fork's client chrome (hint bar, tab styling).
+//! Fork: settings for the fork's client chrome (hint bar, tab styling, sidebar).
 
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,18 @@ pub enum TabStatusModeConfig {
     Attention,
     /// Every known agent state.
     All,
+}
+
+/// How the desktop sidebar is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarStyleConfig {
+    /// Upstream's 4-column rail and plain lists.
+    #[default]
+    Upstream,
+    /// A 7-column rail with attention markers, `+N` overflow badges that count
+    /// waiting agents, and agent labels that dim once settled.
+    Zellij,
 }
 
 /// Tab and hint-bar styling (`[ui.tabs]`).
@@ -82,6 +94,16 @@ mod tests {
         assert_eq!(config.ui.show_tab_status, TabStatusModeConfig::All);
         let config: Config = toml::from_str("[ui]\nshow_tab_status = \"attention\"\n").unwrap();
         assert_eq!(config.ui.show_tab_status, TabStatusModeConfig::Attention);
+    }
+
+    #[test]
+    fn sidebar_style_defaults_to_upstream_and_parses() {
+        assert_eq!(
+            Config::default().ui.sidebar.style,
+            SidebarStyleConfig::Upstream
+        );
+        let config: Config = toml::from_str("[ui]\nsidebar.style = \"zellij\"\n").unwrap();
+        assert_eq!(config.ui.sidebar.style, SidebarStyleConfig::Zellij);
     }
 
     #[test]

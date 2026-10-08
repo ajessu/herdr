@@ -34,6 +34,7 @@ mod preferences;
 mod render;
 mod scroll;
 mod settings;
+mod sidebar_chrome; // Fork: zellij-style sidebar.
 mod state;
 mod surface_patch;
 mod tab_chrome; // Fork: zellij-style tab bar.
