@@ -21,6 +21,9 @@ pub(crate) struct ClientShellConfig {
     pub(super) mobile_width_threshold: u16,
     pub(super) tab_bar_position: TabBarPositionConfig,
     pub(super) hide_tab_bar_when_single_tab: bool,
+    /// Fork: contextual hint bar style and its Powerline wedges.
+    pub(super) hint_bar: crate::config::HintBarStyleConfig,
+    pub(super) powerline: bool,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
@@ -59,6 +62,8 @@ pub(super) struct ClientShellLayout {
     pub tab_bar: Rect,
     pub mobile_header: Rect,
     pub pane_surface: Rect,
+    /// Fork: the hint bar row; empty when the bar is off.
+    pub hint_bar: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

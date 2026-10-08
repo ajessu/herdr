@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
+mod chrome;
 mod io;
 mod keybinds;
 mod modal_keys;
@@ -39,6 +40,7 @@ pub use self::{
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
 };
 
+pub(crate) use self::chrome::HintBarStyleConfig; // Fork: hint bar.
 pub(crate) use self::keybinds::parse_key_combo;
 pub(crate) use self::keybinds::{DefaultMode, ModalAction}; // Fork: modal layer.
 pub(crate) use self::write::{update_file_at, write_edit, ConfigEdit};
