@@ -4,7 +4,7 @@ use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
-    chrome::{HintBarStyleConfig, TabsConfig},
+    chrome::{HintBarStyleConfig, TabStatusModeConfig, TabsConfig},
     modal_keys::{
         MoveModeKeysConfig, PaneModeKeysConfig, ResizeModeKeysConfig, SessionModeKeysConfig,
         TabModeKeysConfig,
@@ -1111,6 +1111,8 @@ pub struct UiConfig {
     pub hint_bar: HintBarStyleConfig,
     /// Fork: tab and hint-bar styling.
     pub tabs: TabsConfig,
+    /// Fork: status dots on zellij-style tabs: "off", "attention", or "all". Default: off.
+    pub show_tab_status: TabStatusModeConfig,
     /// Ordered entries shown at the right edge of the desktop tab row. Empty by default.
     pub tab_bar_right: Vec<TabBarRightEntryConfig>,
     /// Text inserted between visible right-side tab bar entries. Default: one space.
@@ -1382,6 +1384,7 @@ impl Default for UiConfig {
             tab_bar_position: TabBarPositionConfig::Top,
             hint_bar: HintBarStyleConfig::Off,
             tabs: TabsConfig::default(),
+            show_tab_status: TabStatusModeConfig::Off,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             window_title: super::window_title::default_window_title(),

@@ -45,6 +45,9 @@ impl ClientContextMenuOverlay {
                 item("New tab", Action::NewTab),
                 item("Rename", Action::Rename),
                 item("Close", Action::Close),
+                // Fork: appended so upstream's item indices stay put.
+                item("Move left", Action::MoveTabLeft),
+                item("Move right", Action::MoveTabRight),
             ],
             ClientContextMenuTarget::Pane {
                 source_pane_id,
@@ -359,6 +362,12 @@ impl ClientShellState {
             }
             ClientContextMenuAction::Close => {
                 self.request_tab_close(tab_id, outcome);
+            }
+            ClientContextMenuAction::MoveTabLeft | ClientContextMenuAction::MoveTabRight => {
+                let right = action == ClientContextMenuAction::MoveTabRight;
+                if let Some(method) = self.non_wrapping_tab_move(&tab_id, right) {
+                    self.push_endpoint_method(method, outcome);
+                }
             }
             _ => {}
         }

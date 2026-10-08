@@ -21,6 +21,28 @@ pub(crate) fn render_tab_bar(
         .iter()
         .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
         .collect::<Vec<_>>();
+    if config.tab_style == crate::config::TabStyleConfig::Zellij {
+        // Fork: zellij-style tabs; no scroll state, the window follows the active tab.
+        *tab_scroll = 0;
+        *reveal_focused_tab = false;
+        let content = tab_bar_content_area(snapshot, area);
+        super::super::tab_chrome::render_tabs(buffer, content, &tabs, config, hits);
+        if let Some(x) =
+            tab_drag_insert_index.and_then(|index| tab_drop_indicator_x(hits, &tabs, index))
+        {
+            let x = x.min(content.right().saturating_sub(1));
+            put_text(
+                buffer,
+                x,
+                area.y,
+                1,
+                "│",
+                Style::default().fg(palette.accent),
+            );
+        }
+        render_tab_bar_status(buffer, area, snapshot, palette);
+        return;
+    }
     let desired_widths = tabs
         .iter()
         .map(|tab| {

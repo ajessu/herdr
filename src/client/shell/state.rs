@@ -24,6 +24,9 @@ pub(crate) struct ClientShellConfig {
     /// Fork: contextual hint bar style and its Powerline wedges.
     pub(super) hint_bar: crate::config::HintBarStyleConfig,
     pub(super) powerline: bool,
+    /// Fork: tab bar style and which agent states get a tab status dot.
+    pub(super) tab_style: crate::config::TabStyleConfig,
+    pub(super) tab_status: crate::config::TabStatusModeConfig,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
@@ -112,6 +115,8 @@ pub(super) struct ShellHitMap {
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
     pub(super) tab_scroll_right: Rect,
+    /// Fork: tab ids the zellij-style overflow tiles jump to (left, right).
+    pub(super) tab_overflow_targets: [Option<String>; 2],
     pub(super) mobile_switch: Rect,
     pub(super) mobile_close: Rect,
     pub(super) mobile_targets: Vec<(Rect, ClientMobileTarget)>,
@@ -532,6 +537,9 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    // Fork: non-wrapping tab moves.
+    MoveTabLeft,
+    MoveTabRight,
 }
 
 #[derive(Debug)]
@@ -911,6 +919,8 @@ pub(crate) struct ClientShellState {
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
+    /// Fork: last tab click, for double-click-to-rename on zellij-style tabs.
+    pub(super) last_tab_click: Option<(String, std::time::Instant)>,
     pub(super) url_click_consumes_until_up: bool,
     pub(super) replaying_url_click: bool,
     pub(super) selection: Option<crate::selection::Selection<String>>,
@@ -1080,6 +1090,7 @@ impl ClientShellState {
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,
+            last_tab_click: None,
             url_click_consumes_until_up: false,
             replaying_url_click: false,
             selection: None,

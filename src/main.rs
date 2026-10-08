@@ -348,7 +348,13 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Contextual hint bar below the panes: the current mode and its keys.
 # "full" shows every hint that fits, "compact" the four most important, "off" none.
 # hint_bar = "off"
-# tabs.powerline = true   # Powerline wedges between hint tiles (needs a Nerd Font)
+# tabs.powerline = true   # Powerline wedges between hint tiles and zellij tabs (needs a Nerd Font)
+
+# Tab bar style: "upstream" (centered labels, scroll arrows) or "zellij" (tiles centered
+# on the active tab; hidden tabs collapse into +N tiles that count waiting agents).
+# tabs.style = "upstream"
+# Status dots on zellij-style tabs: "off", "attention" (blocked and unseen finished), or "all".
+# show_tab_status = "off"
 
 # Ordered status entries at the right edge of the desktop tab bar.
 # Supported types: zoom, hostname, datetime, text, and command.

@@ -123,6 +123,8 @@ impl ClientShellConfig {
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             hint_bar: config.ui.hint_bar,
             powerline: config.ui.tabs.powerline,
+            tab_style: config.ui.tabs.style,
+            tab_status: config.ui.show_tab_status,
             spaces: config.ui.sidebar.spaces.clone(),
             agents: config.ui.sidebar.agents.clone(),
             agent_panel_sort: config.ui.agent_panel_sort,
@@ -327,6 +329,8 @@ impl ClientShellConfig {
                 self.hide_tab_bar_when_single_tab = ui.hide_tab_bar_when_single_tab;
                 self.hint_bar = ui.hint_bar;
                 self.powerline = ui.tabs.powerline;
+                self.tab_style = ui.tabs.style;
+                self.tab_status = ui.show_tab_status;
                 self.spaces = ui.sidebar.spaces.clone();
                 self.agents = ui.sidebar.agents.clone();
                 self.agent_panel_sort = ui.agent_panel_sort;

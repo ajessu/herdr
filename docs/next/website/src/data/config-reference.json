@@ -1409,10 +1409,31 @@
           ]
         },
         {
+          "key": "ui.tabs.style",
+          "type": "enum",
+          "default": "\"upstream\"",
+          "description": "Tab bar style: centered labels with scroll arrows, or zellij-style tiles centered on the active tab with +N overflow tiles that count waiting agents.",
+          "values": [
+            "upstream",
+            "zellij"
+          ]
+        },
+        {
           "key": "ui.tabs.powerline",
           "type": "boolean",
           "default": "true",
-          "description": "Draw Powerline wedges between hint-bar tiles. Needs a Powerline or Nerd Font."
+          "description": "Draw Powerline wedges between zellij-style tabs and hint-bar tiles. Needs a Powerline or Nerd Font."
+        },
+        {
+          "key": "ui.show_tab_status",
+          "type": "enum",
+          "default": "\"off\"",
+          "description": "Status dots on zellij-style tabs: none, blocked and unseen finished agents, or every known state.",
+          "values": [
+            "off",
+            "attention",
+            "all"
+          ]
         },
         {
           "key": "ui.tab_bar_right",

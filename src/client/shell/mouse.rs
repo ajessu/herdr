@@ -1344,6 +1344,7 @@ impl ClientShellState {
                 return;
             }
             if let Some(press) = self.tab_press.take() {
+                self.note_tab_click(&press.tab_id); // Fork: double-click renames.
                 self.push_endpoint_method(
                     crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
                         tab_id: press.tab_id,
@@ -2024,6 +2025,9 @@ impl ClientShellState {
                     );
                     return;
                 }
+                if self.tab_overflow_jump(point, outcome) {
+                    return; // Fork: zellij-style overflow tiles.
+                }
                 if super::contains(self.hits.tab_scroll_left, point) {
                     self.tab_scroll = self.tab_scroll.saturating_sub(1);
                     outcome.repaint = true;
@@ -2250,6 +2254,9 @@ impl ClientShellState {
                 }
             }
             MouseEventKind::Down(MouseButton::Middle) => {
+                if self.tab_middle_click(point, outcome) {
+                    return; // Fork: middle-click closes a zellij-style tab.
+                }
                 if let Some(hit) = self
                     .hits
                     .panes

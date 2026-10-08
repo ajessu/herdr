@@ -288,9 +288,13 @@ impl ClientShellState {
                 self.record_binding(KeybindMatch::Action(split), outcome);
             }
             KeybindAction::MoveTabLeft | KeybindAction::MoveTabRight => {
-                if let Some(method) =
-                    self.non_wrapping_tab_move(action == KeybindAction::MoveTabRight)
-                {
+                let focused_tab = self
+                    .snapshot
+                    .as_deref()
+                    .and_then(|snapshot| snapshot.focused_tab_id.clone());
+                if let Some(method) = focused_tab.and_then(|tab_id| {
+                    self.non_wrapping_tab_move(&tab_id, action == KeybindAction::MoveTabRight)
+                }) {
                     self.push_endpoint_method(method, outcome);
                 }
             }
@@ -376,14 +380,22 @@ impl ClientShellState {
     }
 
     /// Like upstream's MoveTabPrevious/MoveTabNext, but stops at the ends.
-    fn non_wrapping_tab_move(&self, right: bool) -> Option<crate::api::schema::Method> {
+    pub(super) fn non_wrapping_tab_move(
+        &self,
+        tab_id: &str,
+        right: bool,
+    ) -> Option<crate::api::schema::Method> {
         let snapshot = self.snapshot.as_deref()?;
-        let workspace_id = snapshot.focused_workspace_id.as_deref()?;
-        let tab_id = snapshot.focused_tab_id.clone()?;
+        let workspace_id = &snapshot
+            .tabs
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)?
+            .workspace_id;
+        let tab_id = tab_id.to_owned();
         let tabs: Vec<_> = snapshot
             .tabs
             .iter()
-            .filter(|tab| tab.workspace_id == workspace_id)
+            .filter(|tab| &tab.workspace_id == workspace_id)
             .collect();
         let source = tabs.iter().position(|tab| tab.tab_id == tab_id)?;
         let insert_index = if right {
