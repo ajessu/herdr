@@ -311,6 +311,13 @@ The active palette is applied in this order: built-in theme, `[theme.custom]`, t
 
 The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
+Set `sidebar.style = "zellij"` under `[ui]` for a zellij-style sidebar. The collapsed rail widens to 7 columns and marks workspaces and agents that need attention (blocked, working, or finished while you were elsewhere) with an accent dot. Only agent rows that need attention respond to clicks there. When a list does not fit, the hidden items collapse into a `+N` badge that also counts hidden blocked (`◉`), working (`◐`), and finished (`●`) agents. Click it to jump to the most urgent one. The expanded spaces and agents lists show the same badges while items are scrolled out of view. In the agents panel, workspace and tab labels stay bright while an agent is pending and dim once it settles. The default style is `"upstream"`.
+
+```toml
+[ui]
+sidebar.style = "zellij"
+```
+
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.

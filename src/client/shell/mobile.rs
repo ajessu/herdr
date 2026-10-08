@@ -681,6 +681,9 @@ fn mobile_items(
                         }
                     }),
             );
+            if super::sidebar_chrome::zellij(config) {
+                detail.pop(); // Fork: the status icon already shows the state.
+            }
             detail.push(agent_label.to_owned());
             if endpoint.stale() {
                 detail.push(mobile_endpoint_state(endpoint.status).to_owned());
@@ -700,6 +703,11 @@ fn mobile_items(
             } else {
                 Modifier::empty()
             };
+            let pending = super::sidebar_chrome::mobile_agent_patch(
+                agent.agent_status,
+                endpoint.stale(),
+                config,
+            );
             items.push(MobileItem {
                 lines: vec![
                     Line::from(vec![
@@ -724,7 +732,8 @@ fn mobile_items(
                             Style::default()
                                 .fg(foreground)
                                 .bg(background)
-                                .add_modifier(Modifier::BOLD | dim),
+                                .add_modifier(Modifier::BOLD | dim)
+                                .patch(pending),
                         ),
                     ]),
                     Line::from(Span::styled(
@@ -735,7 +744,8 @@ fn mobile_items(
                         Style::default()
                             .fg(palette.overlay0)
                             .bg(background)
-                            .add_modifier(dim),
+                            .add_modifier(dim)
+                            .patch(pending),
                     )),
                 ],
                 background,
