@@ -52,6 +52,16 @@ pub(crate) fn render_collapsed_sidebar(
     selected_workspace_id: Option<&str>,
     hits: &mut ShellHitMap,
 ) {
+    if super::super::sidebar_chrome::zellij(config) {
+        return super::super::sidebar_chrome::render_rail(
+            buffer,
+            area,
+            snapshot,
+            config,
+            selected_workspace_id,
+            hits,
+        );
+    }
     let palette = &config.palette;
     let selection_background = workspace_selection_background(palette);
     let active_background = workspace_active_background(palette, selected_workspace_id.is_some());
@@ -358,21 +368,43 @@ pub(crate) fn render_sidebar(
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.workspace_scrollbar = track;
-        super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
+        super::scroll::render_list_scrollbar(
+            buffer,
+            track,
+            metrics,
+            palette,
+            super::super::sidebar_chrome::scrollbar_glyphs(config),
+        );
+    }
+    if super::super::sidebar_chrome::zellij(config) {
+        super::super::sidebar_chrome::workspace_list_badges(
+            buffer,
+            snapshot,
+            &entries,
+            *state.workspace_scroll,
+            state.collapsed_groups,
+            config,
+            hits,
+        );
     }
 
     if let Some(row) = state.workspace_drop_indicator_row.filter(|row| {
         *row >= workspace_area.y.saturating_add(1)
             && *row < workspace_area.bottom().saturating_sub(1)
     }) {
-        put_text(
-            buffer,
-            body.x,
-            row,
-            body.width,
-            &"─".repeat(body.width as usize),
-            Style::default().fg(palette.accent),
-        );
+        if super::super::sidebar_chrome::zellij(config) {
+            let rect = Rect::new(body.x, row, content_width, 1);
+            super::super::sidebar_chrome::render_drop_row(buffer, rect, palette);
+        } else {
+            put_text(
+                buffer,
+                body.x,
+                row,
+                body.width,
+                &"─".repeat(body.width as usize),
+                Style::default().fg(palette.accent),
+            );
+        }
     }
 
     let footer_y = workspace_area.bottom().saturating_sub(1);

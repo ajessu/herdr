@@ -2028,6 +2028,9 @@ impl ClientShellState {
                 if self.tab_overflow_jump(point, outcome) {
                     return; // Fork: zellij-style overflow tiles.
                 }
+                if self.sidebar_overflow_jump(point, outcome) {
+                    return; // Fork: zellij-style sidebar badges.
+                }
                 if super::contains(self.hits.tab_scroll_left, point) {
                     self.tab_scroll = self.tab_scroll.saturating_sub(1);
                     outcome.repaint = true;

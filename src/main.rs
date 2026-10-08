@@ -277,6 +277,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Collapsed sidebar presentation: "compact" keeps the narrow status rail, "hidden" uses zero width.
 # sidebar_collapsed_mode = "compact"
 
+# Sidebar style: "upstream" or "zellij" (7-column rail with attention markers, +N overflow
+# badges that count waiting agents, and agent labels that dim once settled).
+# sidebar.style = "upstream"
+
 # Terminal width at or below which Herdr uses the mobile single-column layout.
 # Increase this for foldables, tablets, or wide phone terminals.
 # mobile_width_threshold = 64

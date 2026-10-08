@@ -68,7 +68,7 @@ pub(super) fn render_agent_panel(
     }
 
     let rows = agent_rows(snapshot, config, None);
-    render_agent_list(
+    let start = render_agent_list(
         buffer,
         area,
         &rows,
@@ -85,6 +85,9 @@ pub(super) fn render_agent_panel(
             render_agent_row(buffer, rect, row, config);
         },
     );
+    if super::sidebar_chrome::zellij(config) {
+        super::sidebar_chrome::agent_list_badges(buffer, &rows, start, config, hits);
+    }
 }
 
 pub(super) fn render_agent_panel_header(
@@ -161,7 +164,7 @@ pub(super) fn render_agent_list<T>(
     hits: &mut ShellHitMap,
     row_lines: impl Fn(&T) -> usize,
     mut render_row: impl FnMut(&mut Buffer, Rect, &T, &mut ShellHitMap),
-) {
+) -> usize {
     let body = Rect::new(
         area.x,
         area.y.saturating_add(3),
@@ -183,7 +186,7 @@ pub(super) fn render_agent_list<T>(
                     .add_modifier(Modifier::DIM),
             );
         }
-        return;
+        return 0;
     }
 
     let row_heights = rows
@@ -230,8 +233,15 @@ pub(super) fn render_agent_list<T>(
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.agent_scrollbar = track;
-        super::scroll::render_list_scrollbar(buffer, track, metrics, &config.palette);
+        super::scroll::render_list_scrollbar(
+            buffer,
+            track,
+            metrics,
+            &config.palette,
+            super::sidebar_chrome::scrollbar_glyphs(config),
+        );
     }
+    *agent_scroll
 }
 
 pub(super) fn agent_rows(
@@ -345,6 +355,13 @@ pub(super) fn render_agent_row(
         status_icon(row.status, config.status_indicators),
         Style::default().fg(status_color(row.status, palette)),
     );
+    // Fork: zellij style keeps workspace and tab labels bright while pending.
+    let (name_style, tab_style) = if super::sidebar_chrome::zellij(config) {
+        let pending = super::sidebar_chrome::pending_style(row.status, palette);
+        (pending, pending)
+    } else {
+        (name_style, secondary)
+    };
     let rows = if row.rows.is_empty() {
         vec![vec![crate::ui::ResolvedToken {
             kind: crate::ui::ResolvedTokenKind::StateIcon,
@@ -356,11 +373,12 @@ pub(super) fn render_agent_row(
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
-        spans.extend(crate::ui::resolved_token_spans(
+        spans.extend(crate::ui::resolved_token_spans_with_tab_style(
             tokens,
             icon,
             status_style,
             name_style,
+            tab_style,
             secondary,
             secondary,
             palette,

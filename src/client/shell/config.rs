@@ -125,6 +125,7 @@ impl ClientShellConfig {
             powerline: config.ui.tabs.powerline,
             tab_style: config.ui.tabs.style,
             tab_status: config.ui.show_tab_status,
+            sidebar_style: config.ui.sidebar.style,
             spaces: config.ui.sidebar.spaces.clone(),
             agents: config.ui.sidebar.agents.clone(),
             agent_panel_sort: config.ui.agent_panel_sort,
@@ -331,6 +332,7 @@ impl ClientShellConfig {
                 self.powerline = ui.tabs.powerline;
                 self.tab_style = ui.tabs.style;
                 self.tab_status = ui.show_tab_status;
+                self.sidebar_style = ui.sidebar.style;
                 self.spaces = ui.sidebar.spaces.clone();
                 self.agents = ui.sidebar.agents.clone();
                 self.agent_panel_sort = ui.agent_panel_sort;
@@ -386,7 +388,9 @@ impl ClientShellConfig {
 
         let sidebar_width = if sidebar_collapsed {
             match self.sidebar_collapsed_mode {
-                SidebarCollapsedModeConfig::Compact => 4,
+                SidebarCollapsedModeConfig::Compact => {
+                    super::sidebar_chrome::compact_rail_width(self.sidebar_style)
+                }
                 SidebarCollapsedModeConfig::Hidden => 0,
             }
         } else {

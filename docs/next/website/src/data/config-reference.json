@@ -1511,6 +1511,16 @@
           "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim, rules } style tables. Text-valued built-ins and $name metadata tokens accept up to 16 ordered rules using equals, contains, starts_with, gt, or lt; the first match overrides specified styles. Text conditions optionally accept ignore_case for ASCII matching; numeric conditions require full finite numbers. state_icon and git_status accept fixed styles only. At most 16 rows and 16 tokens per row."
         },
         {
+          "key": "ui.sidebar.style",
+          "type": "enum",
+          "default": "\"upstream\"",
+          "description": "Sidebar style: upstream's 4-column rail and plain lists, or a 7-column rail with attention markers, +N overflow badges that count waiting agents and jump to them, and agent labels that dim once settled.",
+          "values": [
+            "upstream",
+            "zellij"
+          ]
+        },
+        {
           "key": "ui.accent",
           "type": "color",
           "default": "\"cyan\"",

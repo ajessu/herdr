@@ -261,5 +261,6 @@ mod mobile;
 mod modal; // Fork: modal layer.
 mod mouse_selection;
 mod popup_focus_projection;
+mod sidebar_chrome; // Fork: zellij-style sidebar.
 mod startup_overlays;
 mod tab_chrome; // Fork: zellij-style tab bar.

@@ -113,6 +113,32 @@ pub(crate) fn resolved_token_spans(
     palette: &Palette,
     max_width: usize,
 ) -> Vec<Span<'static>> {
+    resolved_token_spans_with_tab_style(
+        resolved,
+        state_icon,
+        state_text_style,
+        workspace_style,
+        secondary_style,
+        secondary_style,
+        custom_style,
+        palette,
+        max_width,
+    )
+}
+
+/// Fork: `resolved_token_spans` with a separate style for Tab tokens (the
+/// zellij sidebar styles them like the workspace label).
+pub(crate) fn resolved_token_spans_with_tab_style(
+    resolved: &[ResolvedToken],
+    state_icon: (&str, Style),
+    state_text_style: Style,
+    workspace_style: Style,
+    tab_style: Style,
+    secondary_style: Style,
+    custom_style: Style,
+    palette: &Palette,
+    max_width: usize,
+) -> Vec<Span<'static>> {
     let fixed_widths = resolved
         .iter()
         .map(|token| match &token.kind {
@@ -235,8 +261,11 @@ pub(crate) fn resolved_token_spans(
                 truncate_end(text, budgets[index]),
                 apply_token_style(workspace_style, token.style),
             )),
+            ResolvedTokenKind::Tab(text) => spans.push(Span::styled(
+                truncate_end(text, budgets[index]),
+                apply_token_style(tab_style, token.style),
+            )),
             ResolvedTokenKind::Machine(text)
-            | ResolvedTokenKind::Tab(text)
             | ResolvedTokenKind::Pane(text)
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::Branch(text) => spans.push(Span::styled(
