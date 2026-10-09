@@ -130,9 +130,6 @@ This is a hotfix release for v0.9.2. See the v0.9.2 notes for the full feature r
 - Custom themes can now define separate light and dark color overrides when automatic theme switching is enabled. (#2324, thanks @aneym)
 - `ui.pane_borders = "always"` can now frame a single pane when outer borders are enabled. `"auto"` keeps split-only borders, `"off"` hides them, and existing boolean values keep working. (#3234, thanks @rsmdt)
 
-### Breaking Changes
-- `experimental.allow_nested` now defaults to `true`. Herdr no longer blocks nested launches by default. A same-server recursion check prevents the most dangerous case (attaching to your own parent server, which would create a recursive rendering loop). Set `allow_nested = false` in your config to restore the old blocking behavior.
-
 ### Changed
 - Client updates can now leave compatible servers and their running agents untouched. Missing server features disable only the affected action instead of preventing connection. Servers older than endpoint generation 1 need a one-time upgrade. Replacing a remote server asks before stopping its pane processes, with No as the default answer; experimental handoff remains opt-in. (#3509)
 - The terminal UI now runs in each client, reducing redraw work in busy multi-client sessions and keeping themes, menus, copy mode, and other presentation settings local to the viewing machine. (#3487)
