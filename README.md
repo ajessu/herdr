@@ -24,6 +24,51 @@
 
 ---
 
+## this fork
+
+This is [ajessu/herdr](https://github.com/ajessu/herdr), a personal fork of
+[herdrdev/herdr](https://github.com/herdrdev/herdr) kept in sync with upstream releases
+(see [`UPSTREAM.md`](./UPSTREAM.md) for the sync process). On top of everything upstream
+ships, this fork adds the items below. The chrome features are off by default; turn them on
+under `[ui]`:
+
+```toml
+[ui]
+hint_bar = "full"
+tabs.style = "zellij"
+sidebar.style = "zellij"
+show_tab_status = "all"   # or "attention"
+```
+
+- **modal keybindings**: zellij-style sticky modes on top of upstream's flat `[keys]`
+  (`mode_pane`/`mode_tab`/`mode_resize`/`mode_move`/`mode_session` entry keys with
+  per-mode `[keys.pane]`, `[keys.tab]`, ... tables, plus a `mode_locked` pass-through
+  mode), and direct `alt+` shortcuts (focus, split, close, zoom, new/rename tab,
+  non-wrapping tab moves, grow/shrink) alongside the prefix layer.
+- **stacked panes**: group panes into a stack within a split (`Node::Stack`), with
+  `pane.stack`/`pane.unstack` API methods, keybinds, resize, and persistence.
+- **contextual hint bar** (`ui.hint_bar`): a zellij-style row below the panes showing the
+  active mode's keys from the live keymap, with an Alt-shortcut section.
+- **zellij-style tab bar** (`ui.tabs.style`): Powerline tiles centered on the active tab,
+  `+N` overflow tiles that count hidden blocked/working/finished agents and jump to the
+  most urgent one, per-tab status dots (`ui.show_tab_status`), middle-click close,
+  double-click rename, and Move left/right in the tab context menu.
+- **zellij-style sidebar** (`ui.sidebar.style`): a 7-column collapsed rail with attention
+  markers and attention-gated agent clicks, `+N` overflow badges on the rail and the
+  expanded lists, agent labels that stay bright while pending and dim once settled, and
+  heavier scrollbars.
+- **nested-launch and remote hygiene**: `experimental.allow_nested` defaults to `true`
+  with a same-server recursion guard (rather than blocking all nesting), and
+  remote/tunnel subprocesses have every `HERDR_*` runtime env var scrubbed, not just the
+  socket path. Set `allow_nested = false` to restore upstream's blocking behavior.
+
+Two former fork features now live in the private
+[ajessu/herdr-plugins](https://github.com/ajessu/herdr-plugins) repo instead of core:
+the Claude Code statusLine model reporter (`claude-statusline` plugin) and recipes for
+break-pane-to-tab and labeled, status-filtered agent lists built from the stock CLI.
+
+---
+
 https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 
 **the runtime your coding agents live on.**
