@@ -323,6 +323,22 @@ fails: agent hooks, the statusLine wrapper, and plugin commands.
   one obsolete. The dropped anti-clobber guard was never a README bullet.
 - **Rollout notes**: build with `ZIG=~/.zvm/0.16.0/zig`. No new `config.toml` keys are
   needed. Hand off from the fork `v0.9.0` server; keep `herdr.fork-0.9.0` for back-out.
+- **Rollout state (2026-10-09)**:
+  - **Done:** `main`/`update` force-pushed to the rebased tip. The handoff from fork
+    `v0.9.0` to fork `v0.9.3` was rehearsed on a throwaway server (pane ids and `sleep`
+    PIDs survived). `~/.local/bin/herdr` is now `v0.9.3`; the old binary is
+    `~/.local/bin/herdr.fork-0.9.0`.
+  - **Sessions:** `gz` (38 panes) and `p` (50) were live-handed off, and the pane-id lists
+    were identical before and after. `g` was a dead socket. `herdr config check` passed
+    with the fork keys unchanged, both `claude-statusline` wrappers were refreshed, and
+    agents were detected in both sessions. The shared checkout was moved to the new
+    `origin/main`. It was clean, and the Claude session in it was idle.
+  - **Pending:** nothing.
+- **Handoff gotcha**: run from inside a herdr pane, `live-handoff` prints the server log
+  path of the session in `HERDR_SESSION` (the caller's), not the session in
+  `HERDR_SOCKET_PATH`. The handoff itself targets the right server, and the new server gets
+  the right `HERDR_SESSION`; check with `herdr status` per socket rather than trusting the
+  printed path.
 
 ### 2026-10-07/08 — upstream sync to v0.9.0 (rebuild, plugins, gated chrome)
 
