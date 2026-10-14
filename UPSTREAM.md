@@ -264,6 +264,70 @@ fails: agent hooks, the statusLine wrapper, and plugin commands.
 
 <!-- Append one entry per session, most recent first. -->
 
+### 2026-10-13 — upstream sync to v0.9.4 (routine rebase)
+
+- **Target**: `v0.9.4` (73 upstream commits past `v0.9.3`), branch `sync/v0.9.4` in the
+  `../waves/herdr-update` worktree, rebased with `git rebase --onto v0.9.4 v0.9.3`.
+  The old fork tip stays on `sync/v0.9.3` (`5caa8080`). The local upstream clone had to
+  be fetched first: it did not have the `v0.9.4` tag yet.
+- **Every fork commit replayed; none dropped or rebuilt.** Still 9 feature commits plus
+  the docs commits. No upstream feature replaces a fork feature. These upstream changes
+  needed adapting:
+  - **New panes start at their laid-out size (#4873).** Layout apply now sizes every pane
+    from `final_tile_layout` before spawning it, and splits use
+    `TileLayout::panes_after_split`. Both learned about stacks:
+    - `final_tile_layout` builds `Node::Stack`, with the same rules as the apply path:
+      one member collapses to a pane and `expanded` is clamped.
+    - The Stack arm passes each member its size.
+    - `panes_after_split` predicts a stack member's split as the whole stack splitting,
+      matching `split_found`.
+
+    The fork's `estimate_pane_size` tweak went away with upstream's function. New tests:
+    `panes_after_split_predicts_splitting_a_stack_member` (fails without the fix) and
+    `layout_apply_starts_stack_members_at_their_final_size`.
+  - **Remote client env (#4536).** Upstream moved the client env setup into
+    `configure_remote_client_environment`, which also sets
+    `HERDR_REMOTE_PREFERENCES_IDENTITY`. `build_client_command` now scrubs first and then
+    calls it. The new test-only `HERDR_TEST_PREFERENCES_CHILD` was added to the
+    `env.rs` drift-test exemptions.
+  - **Last-pane close confirmation (#5173).** The modal `x` reaches upstream's
+    `request_pane_close` through `record_binding`, so it inherits the confirmation with
+    no code change. The modal test now uses two tabs for the direct close, and a new test
+    covers the confirmation.
+  - **New upstream input tests assume upstream's keymap.** Two of them failed only
+    because of the fork's default keys:
+    - `raw_backspace_follows_the_host_tty_erase_character`: 0x08 with erase=DEL is
+      `ctrl+h`, the fork's Move-mode key. The test now unbinds `mode_move`.
+    - `keyboard_transparency_conformance` (80 > 60 failures): the harness treated only
+      a mode change or an overlay as herdr-owned. Three fork hooks fix that:
+      - locked mode (`ctrl+g`) counts as owned;
+      - any endpoint request other than `pane.focus` counts as owned (the fork's
+        `alt+` shortcuts);
+      - the snapshot focuses a middle tab, so `alt+i`/`alt+o` emit `tab.move` instead
+        of a silent no-op at the edge.
+
+      Before these hooks, entering locked mode on `ctrl+g` also hid the `alt+`
+      shortcuts that came later in the run. The hooks except the locked-mode line were
+      applied to pristine `v0.9.4`, and its report stayed byte-identical. The fork's
+      failure list now equals pristine's exactly.
+  - Mechanical: `input_conformance` sits next to `hint_bar` in the client test module
+    list, and `InputLease` joins the fork's `modal` re-exports in `src/input/mod.rs`.
+- **Validation**:
+  - Passed: `cargo fmt --check`, clippy with `-D warnings`, `just maintenance-test`,
+    `ui-hot-path-architecture-test`, `integration-assets-test`, `docs-contract-test` and
+    `config_reference_check.py`, all with `ZIG` set.
+  - Full nextest: 4283 of 4283 passed (1 leaky), 14 skipped. Unlike the `v0.9.3` gate,
+    the sandbox-flaky integration tests passed this time.
+  - Not run: `just windows-lint`, because the Windows SDK is still not set up.
+  - **The `bun` steps need `~/.bun/bin` on `PATH`.** The agent shell doesn't have it,
+    so those steps exit 127 ("bun: not found"). That is not a test failure.
+  - Live PTY checks of the chrome features were not repeated: no fork chrome code
+    changed in this sync.
+- **README cross-check (step 8)**: done. Every bullet is present in the tree, and no
+  `v0.9.4` change makes one obsolete.
+- **Rollout notes**: build with `ZIG=~/.zvm/0.16.0/zig`. No new `config.toml` keys.
+  Hand off from the fork `v0.9.3` server and keep its binary for back-out.
+
 ### 2026-10-09 — upstream sync to v0.9.3 (routine rebase)
 
 - **Target**: `v0.9.3` (229 upstream commits past `v0.9.0`), branch `sync/v0.9.3` in the
