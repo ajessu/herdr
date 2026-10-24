@@ -420,6 +420,28 @@ where
     Ok(rows_by_agent)
 }
 
+/// Fork: `divider_token = "$name"` uses the custom row token syntax; the
+/// name is stored without its `$`.
+fn deserialize_divider_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| parse_sidebar_token::<String>(value, &[]))
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+fn serialize_divider_token<S>(name: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match name {
+        Some(name) => serializer.serialize_str(&format!("${name}")),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AgentsSidebarConfig {
@@ -428,6 +450,31 @@ pub struct AgentsSidebarConfig {
     #[serde(default, deserialize_with = "deserialize_rows_by_agent")]
     pub rows_by_agent: BTreeMap<String, AgentSidebarRows>,
     pub row_gap: u16,
+    /// Fork: custom token whose presence splits the agents list with a rule.
+    #[serde(
+        deserialize_with = "deserialize_divider_token",
+        serialize_with = "serialize_divider_token",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub divider_token: Option<String>,
+    /// Fork: text written into the divider rule, e.g. "pinned ↑".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub divider_label: Option<String>,
+    /// Fork: the label's colour; unset uses the theme accent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub divider_label_fg: Option<SidebarTokenColor>,
+    /// Fork: rows whose `highlight_token` equals `highlight_equals` (or is
+    /// just set, without it) get `highlight_bg` behind them.
+    #[serde(
+        deserialize_with = "deserialize_divider_token",
+        serialize_with = "serialize_divider_token",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub highlight_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highlight_equals: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highlight_bg: Option<SidebarTokenColor>,
 }
 
 impl AgentsSidebarConfig {
@@ -452,6 +499,12 @@ impl Default for AgentsSidebarConfig {
             ],
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            divider_token: None,
+            divider_label: None,
+            divider_label_fg: None,
+            highlight_token: None,
+            highlight_equals: None,
+            highlight_bg: None,
         }
     }
 }
@@ -684,6 +737,50 @@ rows = [[{ token = "$status", rules = [{ contains = "error", bold = true }] }]]
         for token in ["summary", "$", "$bad.name"] {
             let input = format!("[ui.sidebar.agents]\\nrows = [[\"{token}\"]]\\n");
             assert!(toml::from_str::<crate::config::Config>(&input).is_err());
+        }
+    }
+
+    #[test]
+    fn divider_token_is_optional_custom_token_and_round_trips() {
+        let config: crate::config::Config =
+            toml::from_str("[ui.sidebar.agents]\nrow_gap = 1\n").expect("no divider");
+        assert_eq!(config.ui.sidebar.agents.divider_token, None);
+        assert!(!toml::to_string(&config.ui.sidebar)
+            .unwrap()
+            .contains("divider_token"));
+
+        let config: crate::config::Config =
+            toml::from_str("[ui.sidebar.agents]\ndivider_token = \"$agent_mark\"\n")
+                .expect("divider token");
+        assert_eq!(
+            config.ui.sidebar.agents.divider_token.as_deref(),
+            Some("agent_mark")
+        );
+        let encoded = toml::to_string(&config.ui.sidebar).unwrap();
+        assert!(
+            encoded.contains("divider_token = \"$agent_mark\""),
+            "{encoded}"
+        );
+        assert_eq!(
+            toml::from_str::<SidebarConfig>(&encoded).unwrap(),
+            config.ui.sidebar
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_divider_tokens() {
+        for value in [
+            "\"agent_mark\"",
+            "\"$\"",
+            "\"$bad.name\"",
+            "\"state_icon\"",
+            "1",
+        ] {
+            let input = format!("[ui.sidebar.agents]\ndivider_token = {value}\n");
+            assert!(
+                toml::from_str::<crate::config::Config>(&input).is_err(),
+                "accepted {value}"
+            );
         }
     }
 

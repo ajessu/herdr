@@ -442,6 +442,58 @@ fn agent_navigation_reveals_offscreen_targets() {
 }
 
 #[test]
+fn aggregate_agent_divider_aligns_rows_and_reveal() {
+    use crate::input::KeybindAction;
+
+    let (mut state, remote) = state_with_scrollable_agents();
+    state.config.agents.divider_token = Some("agent_mark".into());
+    let mut local = state.endpoints[0].snapshot.clone().unwrap();
+    for agent in local.agents.iter_mut().take(3) {
+        agent.tokens = vec![("agent_mark".into(), "1".into())];
+    }
+    state.set_endpoint_snapshot(&ClientEndpointId::Local, local);
+    state.agent_scroll = 0;
+    let frame = state.compose(100, 28).unwrap();
+    let rows = frame_rows(&frame);
+    let body = state.hits.agent_body;
+    let rects = state
+        .hits
+        .endpoint_agents
+        .iter()
+        .map(|(rect, _, _)| Rect::new(rect.x, rect.y - body.y, rect.width, rect.height))
+        .collect::<Vec<_>>();
+    let rule = rects[2].bottom();
+    assert_eq!(
+        rects[3].y,
+        rule + 1,
+        "one rule line after the third (last marked) row"
+    );
+    let content = body.width - u16::from(!state.hits.agent_scrollbar.is_empty());
+    let line = |y: u16| {
+        rows[(body.y + y) as usize]
+            .chars()
+            .skip(body.x as usize)
+            .take(content as usize)
+            .collect::<String>()
+    };
+    assert_eq!(line(rule), "─".repeat(content as usize));
+    assert_eq!(rects[1].bottom(), rects[2].y, "no gap between marked rows");
+
+    let mut outcome = ClientShellInput::default();
+    assert!(state.handle_endpoint_navigation(KeybindAction::PreviousAgent, &mut outcome));
+    assert!(state.activate_endpoint_projection(&remote));
+    state.compose(100, 28).unwrap();
+    assert!(
+        state
+            .hits
+            .endpoint_agents
+            .iter()
+            .any(|(_, endpoint, pane)| endpoint == &remote && pane == "pane_8"),
+        "reveal must account for the divider line"
+    );
+}
+
+#[test]
 fn agent_navigation_reveals_target_using_destination_sort() {
     use crate::api::schema::{
         AgentViewBuiltinSortField, AgentViewSort, AgentViewSortField, AgentViewSortOrder,

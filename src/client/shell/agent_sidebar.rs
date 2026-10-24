@@ -15,6 +15,10 @@ pub(super) struct AgentRow {
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    /// Fork: the row carries a non-empty `ui.sidebar.agents.divider_token`.
+    pub(super) divider_mark: bool,
+    /// Fork: background from `ui.sidebar.agents.highlight_*`.
+    pub(super) highlight: Option<ratatui::style::Color>,
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -80,6 +84,7 @@ pub(super) fn render_agent_panel(
         agent_scroll,
         hits,
         |row| row.rows.len(),
+        |row| row.divider_mark,
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
             render_agent_row(buffer, rect, row, config);
@@ -163,6 +168,7 @@ pub(super) fn render_agent_list<T>(
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
     row_lines: impl Fn(&T) -> usize,
+    divider_mark: impl Fn(&T) -> bool,
     mut render_row: impl FnMut(&mut Buffer, Rect, &T, &mut ShellHitMap),
 ) -> usize {
     let body = Rect::new(
@@ -193,19 +199,11 @@ pub(super) fn render_agent_list<T>(
         .iter()
         .map(|row| row_lines(row).max(1).min(u16::MAX as usize) as u16)
         .collect::<Vec<_>>();
-    let gaps = rows
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            if index + 1 < rows.len() {
-                config.agents.row_gap
-            } else {
-                0
-            }
-        })
-        .collect::<Vec<_>>();
+    let marks = rows.iter().map(divider_mark).collect::<Vec<_>>();
+    let gaps = agent_list_gaps(config.agents.row_gap, &marks);
+    let gap_lines = gaps.iter().map(|(lines, _)| *lines).collect::<Vec<_>>();
     let metrics =
-        super::scroll::list_scroll_metrics(&row_heights, &gaps, body.height, *agent_scroll);
+        super::scroll::list_scroll_metrics(&row_heights, &gap_lines, body.height, *agent_scroll);
     hits.agent_max_scroll = metrics.max_offset_from_bottom;
     hits.agent_scroll_metrics = Some(metrics);
     *agent_scroll = metrics
@@ -221,13 +219,39 @@ pub(super) fn render_agent_list<T>(
         }
         let rect = Rect::new(body.x, y, content_width, height);
         render_row(buffer, rect, row, hits);
-        y = y
-            .saturating_add(height)
-            .saturating_add(if index + 1 < rows.len() {
-                config.agents.row_gap
-            } else {
-                0
-            });
+        let (gap, divider) = gaps[index];
+        y = y.saturating_add(height);
+        // Fork: the divider rule sits on the gap's middle line.
+        let rule_y = y.saturating_add(gap.saturating_sub(1) / 2);
+        if divider && rule_y < body.bottom() {
+            put_text(
+                buffer,
+                body.x,
+                rule_y,
+                content_width,
+                &"─".repeat(content_width as usize),
+                Style::default().fg(config.palette.surface_dim),
+            );
+            if let Some(label) = config
+                .agents
+                .divider_label
+                .as_deref()
+                .filter(|l| !l.is_empty())
+            {
+                put_text(
+                    buffer,
+                    body.x.saturating_add(2),
+                    rule_y,
+                    content_width.saturating_sub(2),
+                    &format!(" {label} "),
+                    Style::default().fg(config
+                        .agents
+                        .divider_label_fg
+                        .map_or(config.palette.accent, |fg| fg.ratatui())),
+                );
+            }
+        }
+        y = y.saturating_add(gap);
     }
 
     if show_scrollbar {
@@ -242,6 +266,21 @@ pub(super) fn render_agent_list<T>(
         );
     }
     *agent_scroll
+}
+
+/// Lines after each agent row and whether they carry the divider rule. A
+/// divider goes between neighbours whose `divider_mark` differs and widens a
+/// zero `row_gap` to one line; the last row has no gap.
+pub(super) fn agent_list_gaps(row_gap: u16, marks: &[bool]) -> Vec<(u16, bool)> {
+    marks
+        .iter()
+        .enumerate()
+        .map(|(index, mark)| match marks.get(index + 1) {
+            None => (0, false),
+            Some(next) if next != mark => (row_gap.max(1), true),
+            Some(_) => (row_gap, false),
+        })
+        .collect()
 }
 
 pub(super) fn agent_rows(
@@ -294,6 +333,22 @@ pub(super) fn agent_row(
         .cloned()
         .collect::<HashMap<_, _>>();
     let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
+    let divider_mark = config
+        .agents
+        .divider_token
+        .as_deref()
+        .and_then(|name| tokens.get(name))
+        .is_some_and(|value| !value.is_empty());
+    let highlight = match (&config.agents.highlight_token, config.agents.highlight_bg) {
+        (Some(name), Some(bg)) => tokens
+            .get(name)
+            .filter(|value| match &config.agents.highlight_equals {
+                Some(equals) => *value == equals,
+                None => !value.is_empty(),
+            })
+            .map(|_| bg.ratatui()),
+        _ => None,
+    };
     let state_text = labels
         .get(status_text(agent.agent_status))
         .map(String::as_str)
@@ -325,6 +380,8 @@ pub(super) fn agent_row(
         status: agent.agent_status,
         focused: agent.focused,
         rows,
+        divider_mark,
+        highlight,
     })
 }
 
@@ -335,10 +392,10 @@ pub(super) fn render_agent_row(
     config: &ClientShellConfig,
 ) {
     let palette = &config.palette;
-    let row_style = if row.focused {
-        Style::default().bg(palette.active_row_bg)
-    } else {
-        Style::default()
+    let row_style = match (row.focused, row.highlight) {
+        (true, _) => Style::default().bg(palette.active_row_bg),
+        (false, Some(bg)) => Style::default().bg(bg),
+        (false, None) => Style::default(),
     };
     let name_style = if row.focused {
         Style::default()

@@ -9,6 +9,8 @@ pub(super) fn render_collapsed(
     config: &ClientShellConfig,
     hits: &mut ShellHitMap,
 ) {
+    // The collapsed column is one line per agent with no row gaps, so it has
+    // no room for the agents-panel divider and leaves it out.
     let rows = agent_rows(endpoints, active_endpoint_id, config);
     for (index, row) in rows.into_iter().take(area.height as usize).enumerate() {
         let rect = Rect::new(area.x, area.y + index as u16, area.width, 1);
@@ -71,6 +73,7 @@ pub(super) fn render_expanded(
         agent_scroll,
         hits,
         |row| row.agent.rows.len(),
+        |row| row.agent.divider_mark,
         |buffer, rect, row, hits| {
             super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
             if row.stale {
@@ -108,10 +111,14 @@ impl ClientShellState {
             .iter()
             .map(|row| row.agent.rows.len().max(1).min(u16::MAX as usize) as u16)
             .collect::<Vec<_>>();
-        let mut gaps = vec![self.config.agents.row_gap; rows.len()];
-        if let Some(last) = gaps.last_mut() {
-            *last = 0;
-        }
+        let marks = rows
+            .iter()
+            .map(|row| row.agent.divider_mark)
+            .collect::<Vec<_>>();
+        let gaps = super::agent_sidebar::agent_list_gaps(self.config.agents.row_gap, &marks)
+            .into_iter()
+            .map(|(lines, _)| lines)
+            .collect::<Vec<_>>();
         self.agent_scroll = super::scroll::list_scroll_start_to_reveal(
             &heights,
             &gaps,

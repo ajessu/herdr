@@ -315,6 +315,8 @@ pub(super) fn render_rail(
         detail_area.width,
         detail_area.height.saturating_sub(1),
     );
+    // The rail packs one line per agent; it deliberately omits the expanded
+    // panel's `divider_token` rule so its anchored window stays row-for-line.
     let agents = super::agent_sidebar::ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
         .filter_map(|pane_id| {

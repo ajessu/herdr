@@ -231,7 +231,8 @@ def collect_entries(model: Model, struct_name: str = ROOT_STRUCT, prefix: str = 
     for struct_field in model.structs[struct_name]:
         dotted = f"{prefix}{struct_field.name}"
         inner, is_vec = strip_wrappers(struct_field.rust_type)
-        if inner in model.structs:
+        # A struct with no pub fields (a colour, say) is one opaque value, not a table.
+        if model.structs.get(inner):
             if dotted in SKIPPED_SUBTREES:
                 continue
             if is_vec:

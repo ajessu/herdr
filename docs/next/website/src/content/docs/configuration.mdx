@@ -451,6 +451,17 @@ Rules work with text-valued built-ins and custom `$name` tokens in Agent rows, `
 
 `row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
 
+`divider_token` names a custom `$name` pane metadata token that splits the Agent list into two groups. Wherever one entry has a non-empty value for that token and the next one does not (or the reverse), the panel draws a dim horizontal rule between them. Pair it with a plugin that sorts the marked agents first through `agent.view.set`:
+
+```toml
+[ui.sidebar.agents]
+divider_token = "$agent_mark"
+divider_label = "pinned ↑"   # optional text written into the rule
+divider_label_fg = "#cba6f7" # optional; the label uses the theme accent otherwise
+```
+
+With `row_gap = 0` the rule adds one line between the two entries; with `row_gap` of `1` or more it sits inside the existing gap. Nothing is drawn when the setting is unset, or when every entry or no entry carries the token. The value must be a valid `$name` token. The token does not need to appear in `rows`.
+
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 
 ```toml
