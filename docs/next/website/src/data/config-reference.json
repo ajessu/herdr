@@ -1487,6 +1487,42 @@
           ]
         },
         {
+          "key": "ui.sidebar.agents.highlight_bg",
+          "type": "string",
+          "default": "unset",
+          "description": "Hex background for agent rows matched by highlight_token, for example \"#24382b\". The focused row keeps its own background."
+        },
+        {
+          "key": "ui.sidebar.agents.highlight_equals",
+          "type": "string",
+          "default": "unset",
+          "description": "Value highlight_token must equal for a row to be highlighted. Unset, any non-empty value matches."
+        },
+        {
+          "key": "ui.sidebar.agents.highlight_token",
+          "type": "string",
+          "default": "unset",
+          "description": "Custom $name pane metadata token whose value marks an Agent row for highlight_bg."
+        },
+        {
+          "key": "ui.sidebar.agents.divider_label",
+          "type": "string",
+          "default": "unset",
+          "description": "Text written into the divider_token rule, for example \"pinned \u2191\". The rest of the line stays a dim rule."
+        },
+        {
+          "key": "ui.sidebar.agents.divider_label_fg",
+          "type": "string",
+          "default": "theme accent",
+          "description": "Hex colour for divider_label, for example \"#cba6f7\". Unset, the label uses the theme accent; the rule stays dim."
+        },
+        {
+          "key": "ui.sidebar.agents.divider_token",
+          "type": "string",
+          "default": "unset",
+          "description": "Custom $name pane metadata token that splits the expanded Agent list: a dim rule is drawn between neighbouring entries where one has a non-empty value and the other does not. It uses a row_gap line when row_gap is at least 1, otherwise it adds one line."
+        },
+        {
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",

@@ -1682,3 +1682,291 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
     assert!(state.visible_notification.is_none());
     assert_eq!(state.pending_notifications.len(), 1);
 }
+
+fn divider_agents(marks: &[Option<&str>]) -> ClientShellSnapshot {
+    let mut projected = snapshot();
+    let template = projected.panes[0].clone();
+    projected.panes.clear();
+    projected.agents.clear();
+    for (index, mark) in marks.iter().enumerate() {
+        let pane_id = format!("pane_{}", index + 1);
+        let mut pane = template.clone();
+        pane.pane_id = pane_id.clone();
+        pane.focused = index == 0;
+        projected.panes.push(pane);
+        projected.agents.push(ClientShellAgent {
+            pane_id,
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some(format!("agent {}", index + 1)),
+            display_agent: None,
+            agent: Some("pi".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: AgentStatus::Idle,
+            state_change_seq: index as u64,
+            state_labels: Vec::new(),
+            tokens: mark
+                .map(|value| vec![("agent_mark".into(), value.into())])
+                .unwrap_or_default(),
+            focused: index == 0,
+        });
+    }
+    projected
+}
+
+fn divider_state(
+    marks: &[Option<&str>],
+    row_gap: u16,
+    divider_token: Option<&str>,
+) -> ClientShellState {
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Spaces;
+    config.ui.sidebar.agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+    config.ui.sidebar.agents.row_gap = row_gap;
+    config.ui.sidebar.agents.divider_token = divider_token.map(str::to_owned);
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(divider_agents(marks)));
+    state.set_pane_surface(surface());
+    state
+}
+
+/// Agent-body lines (relative to the body top) that are a full divider rule,
+/// plus each hit row's relative y and pane id.
+fn divider_layout(state: &mut ClientShellState, height: u16) -> (Vec<u16>, Vec<(u16, String)>) {
+    let frame = state.compose(106, height).expect("agent divider frame");
+    let rows = frame_rows(&frame);
+    let body = state.hits.agent_body;
+    let width = if state.hits.agent_scrollbar.is_empty() {
+        body.width
+    } else {
+        body.width - 1
+    };
+    let rules = (body.y..body.bottom())
+        .filter(|y| {
+            rows[*y as usize]
+                .chars()
+                .skip(body.x as usize)
+                .take(width as usize)
+                .all(|ch| ch == '─')
+        })
+        .map(|y| y - body.y)
+        .collect();
+    let hits = state
+        .hits
+        .agents
+        .iter()
+        .map(|(rect, pane_id)| (rect.y - body.y, pane_id.clone()))
+        .collect();
+    (rules, hits)
+}
+
+fn hit_rows(rows: &[(u16, &str)]) -> Vec<(u16, String)> {
+    rows.iter().map(|(y, id)| (*y, (*id).to_owned())).collect()
+}
+
+#[test]
+fn agent_divider_splits_marked_and_unmarked_rows() {
+    let marks = [Some("1"), Some("yes"), None, Some("")];
+
+    let mut packed = divider_state(&marks, 0, Some("agent_mark"));
+    assert_eq!(
+        divider_layout(&mut packed, 30),
+        (
+            vec![2],
+            hit_rows(&[(0, "pane_1"), (1, "pane_2"), (3, "pane_3"), (4, "pane_4")])
+        ),
+        "row_gap 0 adds one rule line between the groups; empty values are unmarked"
+    );
+
+    let mut spaced = divider_state(&marks, 1, Some("agent_mark"));
+    assert_eq!(
+        divider_layout(&mut spaced, 30),
+        (
+            vec![3],
+            hit_rows(&[(0, "pane_1"), (2, "pane_2"), (4, "pane_3"), (6, "pane_4")])
+        ),
+        "row_gap 1 draws the rule inside the existing gap"
+    );
+
+    let mut wide = divider_state(&marks, 3, Some("agent_mark"));
+    let (rules, hits) = divider_layout(&mut wide, 40);
+    assert_eq!(rules, vec![6], "the rule sits on the gap's middle line");
+    assert_eq!(hits[2], (8, "pane_3".to_owned()));
+
+    let contiguous = hit_rows(&[(0, "pane_1"), (1, "pane_2"), (2, "pane_3"), (3, "pane_4")]);
+    for (marks, token) in [
+        ([Some("1"), Some("1"), None, None], None),
+        ([Some("1"); 4], Some("agent_mark")),
+        ([None; 4], Some("agent_mark")),
+        ([None, None, Some("1"), Some("1")], Some("other_mark")),
+    ] {
+        let mut state = divider_state(&marks, 0, token);
+        assert_eq!(
+            divider_layout(&mut state, 30),
+            (Vec::new(), contiguous.clone()),
+            "{marks:?} with {token:?}"
+        );
+    }
+
+    let mut unmarked_first = divider_state(&[None, Some("1")], 0, Some("agent_mark"));
+    assert_eq!(
+        divider_layout(&mut unmarked_first, 30),
+        (vec![1], hit_rows(&[(0, "pane_1"), (2, "pane_2")])),
+        "either transition direction draws the rule"
+    );
+}
+
+#[test]
+fn agent_divider_label_is_written_into_the_rule() {
+    let mut state = divider_state(&[Some("1"), None], 0, Some("agent_mark"));
+    state.config.agents.divider_label = Some("pinned ↑".into());
+    let frame = state.compose(106, 30).expect("agent divider frame");
+    let rows = frame_rows(&frame);
+    let body = state.hits.agent_body;
+    let rule: String = rows[(body.y + 1) as usize]
+        .chars()
+        .skip(body.x as usize)
+        .take(body.width as usize)
+        .collect();
+    assert!(rule.starts_with("── pinned ↑ ──"), "{rule:?}");
+    assert!(rule.trim_end().ends_with('─'), "{rule:?}");
+    assert_eq!(
+        hit_rows(&[(0, "pane_1"), (2, "pane_2")]),
+        state
+            .hits
+            .agents
+            .iter()
+            .map(|(rect, pane_id)| (rect.y - body.y, pane_id.clone()))
+            .collect::<Vec<_>>(),
+        "the label doesn't move rows or hits"
+    );
+
+    // The label is an accent, the rule around it stays dim.
+    let label_cell = |frame: &crate::protocol::FrameData| {
+        let y = usize::from(body.y + 1);
+        let x = usize::from(body.x) + rule.chars().position(|ch| ch == 'p').expect("label");
+        frame.cells[y * usize::from(frame.width) + x].fg
+    };
+    assert_eq!(
+        label_cell(&frame),
+        crate::protocol::color_to_u32(state.config.palette.accent)
+    );
+    assert_eq!(
+        frame.cells[usize::from(body.y + 1) * usize::from(frame.width) + usize::from(body.x)].fg,
+        crate::protocol::color_to_u32(state.config.palette.surface_dim)
+    );
+    let parsed: crate::config::AgentsSidebarConfig =
+        toml::from_str("divider_label_fg = \"#cba6f7\"").expect("label colour");
+    state.config.agents.divider_label_fg = parsed.divider_label_fg;
+    let recoloured = state.compose(106, 30).expect("recoloured divider frame");
+    assert_eq!(
+        label_cell(&recoloured),
+        crate::protocol::color_to_u32(ratatui::style::Color::Rgb(0xcb, 0xa6, 0xf7))
+    );
+}
+
+#[test]
+fn agent_rows_matching_the_highlight_token_get_its_background() {
+    let mut state = divider_state(&[Some("live"), Some("1d"), None], 0, None);
+    let parsed: crate::config::AgentsSidebarConfig = toml::from_str(
+        "highlight_token = \"$agent_mark\"\nhighlight_equals = \"live\"\nhighlight_bg = \"#24382b\"",
+    )
+    .expect("highlight config");
+    state.config.agents.highlight_token = parsed.highlight_token;
+    state.config.agents.highlight_equals = parsed.highlight_equals;
+    state.config.agents.highlight_bg = parsed.highlight_bg;
+    let frame = state.compose(106, 30).expect("highlight frame");
+    let body = state.hits.agent_body;
+    let bg_at = |row: u16| {
+        frame.cells[usize::from(body.y + row) * usize::from(frame.width) + usize::from(body.x + 4)]
+            .bg
+    };
+    let green = crate::protocol::color_to_u32(ratatui::style::Color::Rgb(0x24, 0x38, 0x2b));
+    // pane_1 is focused, so it keeps the focused row background.
+    assert_ne!(bg_at(0), green);
+    state.set_snapshot(Box::new({
+        let mut snapshot = divider_agents(&[Some("live"), Some("1d"), None]);
+        for agent in &mut snapshot.agents {
+            agent.focused = false;
+        }
+        for pane in &mut snapshot.panes {
+            pane.focused = false;
+        }
+        snapshot
+    }));
+    let frame = state.compose(106, 30).expect("unfocused highlight frame");
+    let bg_at = |row: u16| {
+        frame.cells[usize::from(body.y + row) * usize::from(frame.width) + usize::from(body.x + 4)]
+            .bg
+    };
+    assert_eq!(
+        bg_at(0),
+        green,
+        "a row whose token equals the value is highlighted"
+    );
+    assert_ne!(bg_at(1), green, "another value isn't");
+    assert_ne!(bg_at(2), green, "no token isn't");
+}
+
+#[test]
+fn agent_divider_keeps_scrolling_and_clicks_aligned() {
+    let marks = [Some("1"), Some("1"), Some("1"), Some("1"), Some("1"), None];
+    let mut state = divider_state(&marks, 0, Some("agent_mark"));
+    let (rules, hits) = divider_layout(&mut state, 12);
+    let body = state.hits.agent_body;
+    assert_eq!(body.height, 3, "test assumes a three-line agent body");
+    assert_eq!((rules, hits.len()), (Vec::new(), 3));
+
+    // pane_5, the rule and pane_6 fill the body at the bottom, so the rule
+    // costs one extra scroll step (4 rather than 3 without the divider).
+    assert_eq!(state.hits.agent_max_scroll, 4);
+    let scroll = |state: &mut ClientShellState, kind| {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: body.x,
+            row: body.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    };
+    for _ in 0..marks.len() {
+        scroll(&mut state, MouseEventKind::ScrollDown);
+    }
+    assert_eq!(
+        divider_layout(&mut state, 12),
+        (vec![1], hit_rows(&[(0, "pane_5"), (2, "pane_6")]))
+    );
+
+    let click = |state: &mut ClientShellState, y: u16| {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: body.x + 1,
+            row: body.y + y,
+            modifiers: KeyModifiers::empty(),
+        })])
+    };
+    let focused = |input: &ClientShellInput| {
+        input.actions.iter().find_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                crate::api::schema::Method::PaneFocus(target) => Some(target.pane_id.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+    };
+    assert_eq!(focused(&click(&mut state, 2)), Some("pane_6".into()));
+    assert_eq!(
+        focused(&click(&mut state, 1)),
+        None,
+        "the rule is not a row"
+    );
+    assert_eq!(focused(&click(&mut state, 0)), Some("pane_5".into()));
+
+    scroll(&mut state, MouseEventKind::ScrollUp);
+    assert_eq!(
+        divider_layout(&mut state, 12),
+        (vec![2], hit_rows(&[(0, "pane_4"), (1, "pane_5")]))
+    );
+    assert_eq!(focused(&click(&mut state, 1)), Some("pane_5".into()));
+}

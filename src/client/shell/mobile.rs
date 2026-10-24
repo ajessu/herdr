@@ -610,6 +610,8 @@ fn mobile_items(
             });
         }
     }
+    // Mobile rows ignore the sidebar row/gap config, including the
+    // agents-panel `divider_token` rule.
     let agents = super::aggregate_navigation::aggregate_agent_rows(
         endpoints,
         active_endpoint_id,

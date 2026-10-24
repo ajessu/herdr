@@ -1024,6 +1024,34 @@ agent_panel_sort = "priority"
     }
 
     #[test]
+    fn load_live_config_reports_malformed_sidebar_divider_token() {
+        let loaded = load_live_config_from_str(
+            r#"
+[ui.sidebar.agents]
+divider_token = "$agent_mark"
+"#,
+        )
+        .unwrap();
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(
+            loaded.config.ui.sidebar.agents.divider_token.as_deref(),
+            Some("agent_mark")
+        );
+
+        let loaded = load_live_config_from_str(
+            r#"
+[ui.sidebar.agents]
+divider_token = "agent_mark"
+"#,
+        )
+        .unwrap();
+        assert_eq!(loaded.diagnostics.len(), 1, "{:?}", loaded.diagnostics);
+        assert!(loaded.diagnostics[0].contains("invalid ui config"));
+        assert!(loaded.diagnostics[0].contains("custom tokens must start with `$`"));
+        assert_eq!(loaded.invalid_sections, vec!["ui"]);
+    }
+
+    #[test]
     fn load_live_config_discards_ignored_keys_from_an_invalid_section() {
         let loaded = load_live_config_from_str(
             r#"
