@@ -129,14 +129,15 @@ impl ClientShellState {
     }
 }
 
-struct EndpointAgentRow {
-    endpoint_id: ClientEndpointId,
+pub(super) struct EndpointAgentRow {
+    pub(super) endpoint_id: ClientEndpointId,
     machine_label: String,
-    stale: bool,
-    agent: super::agent_sidebar::AgentRow,
+    pub(super) stale: bool,
+    pub(super) status: ClientEndpointStatus,
+    pub(super) agent: super::agent_sidebar::AgentRow,
 }
 
-fn agent_rows(
+pub(super) fn agent_rows(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
@@ -177,6 +178,7 @@ fn agent_rows(
             endpoint_id: row.endpoint.endpoint_id.clone(),
             machine_label: row.endpoint.label.to_owned(),
             stale: row.endpoint.stale(),
+            status: row.endpoint.status,
             agent,
         })
     })

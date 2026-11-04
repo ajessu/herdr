@@ -80,18 +80,40 @@ pub(super) fn pending_style(status: AgentStatus, palette: &Palette) -> Style {
     }
 }
 
-/// The mobile agent item's style patch: the pending style under the zellij
-/// sidebar style (except for stale machines), else nothing.
-pub(super) fn mobile_agent_patch(
-    status: AgentStatus,
-    stale: bool,
-    config: &ClientShellConfig,
-) -> Style {
-    if zellij(config) && !stale {
-        pending_style(status, &config.palette)
-    } else {
-        Style::default()
-    }
+/// The `divider_token` rule, `width` cells of `─` with the optional
+/// `divider_label` written in from the third cell.
+pub(super) fn divider_rule_line(config: &ClientShellConfig, width: u16) -> Line<'static> {
+    let width = usize::from(width);
+    let rule = Style::default().fg(config.palette.surface_dim);
+    let Some(label) = config
+        .agents
+        .divider_label
+        .as_deref()
+        .filter(|label| !label.is_empty())
+    else {
+        return Line::from(Span::styled("─".repeat(width), rule));
+    };
+    let lead = width.min(2);
+    let mut used = 0;
+    let label = format!(" {label} ")
+        .chars()
+        .take_while(|ch| {
+            used += unicode_width::UnicodeWidthChar::width(*ch).unwrap_or(0);
+            used <= width - lead
+        })
+        .collect::<String>();
+    let tail = width.saturating_sub(lead + usize::from(super::render::display_width(&label)));
+    Line::from(vec![
+        Span::styled("─".repeat(lead), rule),
+        Span::styled(
+            label,
+            Style::default().fg(config
+                .agents
+                .divider_label_fg
+                .map_or(config.palette.accent, |fg| fg.ratatui())),
+        ),
+        Span::styled("─".repeat(tail), rule),
+    ])
 }
 
 /// `(track, thumb)` glyphs for the sidebar list scrollbars.

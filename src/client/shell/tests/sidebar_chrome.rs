@@ -504,3 +504,25 @@ fn workspace_drag_underlines_the_drop_row_without_hiding_it() {
     assert!(text.contains("space-"), "the row keeps its text: {text}");
     assert!(!text.contains('─'));
 }
+
+#[test]
+fn divider_label_is_clipped_to_the_rule_width_without_an_ellipsis() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.agents.divider_label = Some("pinned ↑".into());
+    let text = |config: &ClientShellConfig, width: u16| {
+        crate::client::shell::sidebar_chrome::divider_rule_line(config, width)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    assert_eq!(text(&config, 8), "── pinne");
+    assert_eq!(text(&config, 14), "── pinned ↑ ──");
+    assert_eq!(text(&config, 1), "─");
+    config.agents.divider_label = Some("固定".into());
+    assert_eq!(
+        text(&config, 6),
+        "── 固─",
+        "wide labels are clipped by cell width"
+    );
+}

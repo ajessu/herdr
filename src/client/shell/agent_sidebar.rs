@@ -224,32 +224,11 @@ pub(super) fn render_agent_list<T>(
         // Fork: the divider rule sits on the gap's middle line.
         let rule_y = y.saturating_add(gap.saturating_sub(1) / 2);
         if divider && rule_y < body.bottom() {
-            put_text(
-                buffer,
-                body.x,
-                rule_y,
+            Paragraph::new(super::sidebar_chrome::divider_rule_line(
+                config,
                 content_width,
-                &"─".repeat(content_width as usize),
-                Style::default().fg(config.palette.surface_dim),
-            );
-            if let Some(label) = config
-                .agents
-                .divider_label
-                .as_deref()
-                .filter(|l| !l.is_empty())
-            {
-                put_text(
-                    buffer,
-                    body.x.saturating_add(2),
-                    rule_y,
-                    content_width.saturating_sub(2),
-                    &format!(" {label} "),
-                    Style::default().fg(config
-                        .agents
-                        .divider_label_fg
-                        .map_or(config.palette.accent, |fg| fg.ratatui())),
-                );
-            }
+            ))
+            .render(Rect::new(body.x, rule_y, content_width, 1), buffer);
         }
         y = y.saturating_add(gap);
     }
@@ -391,12 +370,41 @@ pub(super) fn render_agent_row(
     row: &AgentRow,
     config: &ClientShellConfig,
 ) {
+    let row_style = agent_row_background(row, config.palette.active_row_bg)
+        .map_or_else(Style::default, |bg| Style::default().bg(bg));
+    for (index, line) in agent_row_lines(row, config, rect.width)
+        .into_iter()
+        .take(rect.height as usize)
+        .enumerate()
+    {
+        Paragraph::new(line).style(row_style).render(
+            Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
+            buffer,
+        );
+    }
+}
+
+/// Fork: the row's background: `focused` for the focused agent, else the
+/// `highlight_*` colour, else none.
+pub(super) fn agent_row_background(
+    row: &AgentRow,
+    focused: ratatui::style::Color,
+) -> Option<ratatui::style::Color> {
+    if row.focused {
+        Some(focused)
+    } else {
+        row.highlight
+    }
+}
+
+/// Fork: one `Line` per configured row, fitted to `width`, without the
+/// background, shared by the agents panel and the phone switcher.
+pub(super) fn agent_row_lines(
+    row: &AgentRow,
+    config: &ClientShellConfig,
+    width: u16,
+) -> Vec<Line<'static>> {
     let palette = &config.palette;
-    let row_style = match (row.focused, row.highlight) {
-        (true, _) => Style::default().bg(palette.active_row_bg),
-        (false, Some(bg)) => Style::default().bg(bg),
-        (false, None) => Style::default(),
-    };
     let name_style = if row.focused {
         Style::default()
             .fg(palette.text)
@@ -419,33 +427,34 @@ pub(super) fn render_agent_row(
     } else {
         (name_style, secondary)
     };
+    let state_icon_only = [vec![crate::ui::ResolvedToken {
+        kind: crate::ui::ResolvedTokenKind::StateIcon,
+        style: Default::default(),
+    }]];
     let rows = if row.rows.is_empty() {
-        vec![vec![crate::ui::ResolvedToken {
-            kind: crate::ui::ResolvedTokenKind::StateIcon,
-            style: Default::default(),
-        }]]
+        &state_icon_only[..]
     } else {
-        row.rows.clone()
+        &row.rows[..]
     };
-    for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
-        let indent = if index == 0 { 1 } else { 3 };
-        let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
-        spans.extend(crate::ui::resolved_token_spans_with_tab_style(
-            tokens,
-            icon,
-            status_style,
-            name_style,
-            tab_style,
-            secondary,
-            secondary,
-            palette,
-            rect.width.saturating_sub(indent as u16) as usize,
-        ));
-        Paragraph::new(Line::from(spans)).style(row_style).render(
-            Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
-            buffer,
-        );
-    }
+    rows.iter()
+        .enumerate()
+        .map(|(index, tokens)| {
+            let indent = if index == 0 { 1 } else { 3 };
+            let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
+            spans.extend(crate::ui::resolved_token_spans_with_tab_style(
+                tokens,
+                icon,
+                status_style,
+                name_style,
+                tab_style,
+                secondary,
+                secondary,
+                palette,
+                width.saturating_sub(indent as u16) as usize,
+            ));
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {

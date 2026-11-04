@@ -11,10 +11,10 @@ use super::*;
 
 const MOBILE_BUTTON_WIDTH: u16 = 10;
 
-struct MobileItem {
-    lines: Vec<Line<'static>>,
-    background: Color,
-    target: Option<ClientMobileTarget>,
+pub(super) struct MobileItem {
+    pub(super) lines: Vec<Line<'static>>,
+    pub(super) background: Color,
+    pub(super) target: Option<ClientMobileTarget>,
 }
 
 impl MobileItem {
@@ -202,7 +202,7 @@ fn render_header_button(
     }
 }
 
-fn mobile_endpoint_state(status: ClientEndpointStatus) -> &'static str {
+pub(super) fn mobile_endpoint_state(status: ClientEndpointStatus) -> &'static str {
     match status {
         ClientEndpointStatus::Connecting => "connecting",
         ClientEndpointStatus::Online => "online",
@@ -610,20 +610,26 @@ fn mobile_items(
             });
         }
     }
-    // Mobile rows ignore the sidebar row/gap config, including the
-    // agents-panel `divider_token` rule.
-    let agents = super::aggregate_navigation::aggregate_agent_rows(
-        endpoints,
-        active_endpoint_id,
-        config.agent_panel_sort,
-    );
+    // Fork: zellij-style rows come from the sidebar row engine.
+    let (agents, engine_agents) = if super::sidebar_chrome::zellij(config) {
+        let engine_agents =
+            super::mobile_rows::agent_items(endpoints, active_endpoint_id, config, content_width);
+        (Vec::new(), engine_agents)
+    } else {
+        let agents = super::aggregate_navigation::aggregate_agent_rows(
+            endpoints,
+            active_endpoint_id,
+            config.agent_panel_sort,
+        );
+        (agents, Vec::new())
+    };
     let agent_view_label = snapshot.agent_view_label.as_deref();
-    if !agents.is_empty() || agent_view_label.is_some() {
+    if !agents.is_empty() || !engine_agents.is_empty() || agent_view_label.is_some() {
         let title = agent_view_label
             .map(|label| format!("agents · {label}"))
             .unwrap_or_else(|| "agents".to_owned());
         items.push(MobileItem::section(title, palette));
-        if agents.is_empty() {
+        if agents.is_empty() && engine_agents.is_empty() {
             items.push(MobileItem {
                 lines: vec![Line::from(Span::styled(
                     "  no matching agents",
@@ -636,6 +642,7 @@ fn mobile_items(
                 target: None,
             });
         }
+        items.extend(engine_agents);
         for row in agents {
             let endpoint = row.endpoint;
             let agent = row.agent;
@@ -683,9 +690,6 @@ fn mobile_items(
                         }
                     }),
             );
-            if super::sidebar_chrome::zellij(config) {
-                detail.pop(); // Fork: the status icon already shows the state.
-            }
             detail.push(agent_label.to_owned());
             if endpoint.stale() {
                 detail.push(mobile_endpoint_state(endpoint.status).to_owned());
@@ -705,11 +709,6 @@ fn mobile_items(
             } else {
                 Modifier::empty()
             };
-            let pending = super::sidebar_chrome::mobile_agent_patch(
-                agent.agent_status,
-                endpoint.stale(),
-                config,
-            );
             items.push(MobileItem {
                 lines: vec![
                     Line::from(vec![
@@ -734,8 +733,7 @@ fn mobile_items(
                             Style::default()
                                 .fg(foreground)
                                 .bg(background)
-                                .add_modifier(Modifier::BOLD | dim)
-                                .patch(pending),
+                                .add_modifier(Modifier::BOLD | dim),
                         ),
                     ]),
                     Line::from(Span::styled(
@@ -746,8 +744,7 @@ fn mobile_items(
                         Style::default()
                             .fg(palette.overlay0)
                             .bg(background)
-                            .add_modifier(dim)
-                            .patch(pending),
+                            .add_modifier(dim),
                     )),
                 ],
                 background,
@@ -790,6 +787,20 @@ fn mobile_items(
             } else {
                 palette.panel_bg
             };
+            // Fork: zellij-style rows come from the sidebar row engine.
+            if super::sidebar_chrome::zellij(config) {
+                super::mobile_rows::push_workspace_item(
+                    &mut items,
+                    endpoint,
+                    &entry,
+                    workspace,
+                    endpoint.endpoint_id == active_endpoint_id && workspace.focused,
+                    background,
+                    config,
+                    content_width,
+                );
+                continue;
+            }
             let connector = if entry.indented {
                 if entry.last_child {
                     "└─ "

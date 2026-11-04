@@ -58,6 +58,8 @@ show_tab_status = "all"   # or "attention"
   expanded lists, agent labels that stay bright while pending and dim once settled, and
   heavier scrollbars. `ui.sidebar.agents.divider_token = "$name"` draws a dim rule in
   the agents panel between entries that carry that pane token and entries that don't.
+  The phone switcher draws its agent and space rows with the same `[ui.sidebar.agents]`
+  and `[ui.sidebar.spaces]` rows, divider, highlight and `row_gap`.
 - **nested-launch and remote hygiene**: `experimental.allow_nested` defaults to `true`
   with a same-server recursion guard (rather than blocking all nesting), and
   remote/tunnel subprocesses have every `HERDR_*` runtime env var scrubbed, not just the

@@ -195,6 +195,11 @@ fails: agent hooks, the statusLine wrapper, and plugin commands.
   later upstream config surface, prefer expressing it as a `config.toml` default/override
   over carrying forward the fork's own hardcoded implementation — smaller diff against
   upstream, and the next sync doesn't have to reconcile two competing mechanisms.
+- **Phone switcher rows under the zellij sidebar style bypass upstream's row code.**
+  `mobile_items` in `src/client/shell/mobile.rs` hands agent and space items to the
+  fork's `src/client/shell/mobile_rows.rs` when `ui.sidebar.style = "zellij"`, so
+  anything upstream adds to those phone rows only shows with the upstream style. On each
+  sync, diff upstream's `mobile_items` agent and space bodies against `mobile_rows.rs`.
 - **A CST/AST-based settings.json editor is genuinely upstream's, not the fork's**
   (`d742e515 fix: preserve claude settings formatting (#2089)`, `src/integration/
   claude_settings.rs`). Any future settings.json-editing fork feature (e.g. more

@@ -260,6 +260,7 @@ mod input_domain;
 mod keybindings_settings;
 mod link_hover;
 mod mobile;
+mod mobile_rows; // Fork: phone switcher rows through the sidebar row engine.
 mod modal; // Fork: modal layer.
 mod mouse_selection;
 mod popup_focus_projection;

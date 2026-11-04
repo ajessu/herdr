@@ -24,6 +24,7 @@ mod input;
 mod input_source;
 mod link_hover;
 mod mobile;
+mod mobile_rows; // Fork: sidebar row engine in the phone switcher.
 mod modal; // Fork: modal layer.
 mod mouse;
 mod notification_policy;
