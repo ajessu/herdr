@@ -198,8 +198,11 @@ fails: agent hooks, the statusLine wrapper, and plugin commands.
 - **Phone switcher rows under the zellij sidebar style bypass upstream's row code.**
   `mobile_items` in `src/client/shell/mobile.rs` hands agent and space items to the
   fork's `src/client/shell/mobile_rows.rs` when `ui.sidebar.style = "zellij"`, so
-  anything upstream adds to those phone rows only shows with the upstream style. On each
-  sync, diff upstream's `mobile_items` agent and space bodies against `mobile_rows.rs`.
+  anything upstream adds to those phone rows only shows with the upstream style. The
+  same gate replaces upstream's "tabs" section with tabs nested under each space on the
+  active machine. On each sync, diff upstream's `mobile_items` agent, space and tabs
+  bodies against `mobile_rows.rs`. Under the same gate `render_header_status` draws the
+  focused tab's dot, so re-check it if upstream reshapes the tab text.
 - **A CST/AST-based settings.json editor is genuinely upstream's, not the fork's**
   (`d742e515 fix: preserve claude settings formatting (#2089)`, `src/integration/
   claude_settings.rs`). Any future settings.json-editing fork feature (e.g. more

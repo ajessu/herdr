@@ -99,7 +99,13 @@ fn render_header_status(
         );
         return;
     };
-    let tab_status = compact_tab_status(snapshot, workspace);
+    // Fork: under zellij the focused tab's status dot leads the tab text.
+    let (tab_status, tab_dot) = super::mobile_rows::header_tab_text(
+        compact_tab_status(snapshot, workspace),
+        snapshot,
+        workspace,
+        config,
+    );
     let tab_width = display_width(&tab_status).saturating_add(1).min(area.width);
     let name_width = area.width.saturating_sub(tab_width);
     put_text(
@@ -133,6 +139,15 @@ fn render_header_status(
         tab_width.saturating_sub(1),
         &tab_status,
         Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+    );
+    // Fork: recolors the dot at the start of the tab text drawn above.
+    super::mobile_rows::paint_header_tab_dot(
+        buffer,
+        area.right().saturating_sub(tab_width).saturating_add(1),
+        area.y,
+        tab_width.saturating_sub(1),
+        tab_dot,
+        palette.panel_bg,
     );
     if area.height > 1 {
         render_agent_summary(
@@ -763,6 +778,9 @@ fn mobile_items(
         palette,
     ));
     for endpoint in super::aggregate_navigation::cached_endpoint_snapshots(endpoints) {
+        // Fork: spaces whose worktree children follow them, for the nested tabs.
+        let worktree_parents =
+            super::mobile_rows::worktree_parents(endpoint, active_endpoint_id, config);
         for entry in super::render::workspace_entries(endpoint.snapshot, &HashSet::new()) {
             let Some(workspace) = endpoint.snapshot.workspaces.get(entry.index) else {
                 continue;
@@ -787,14 +805,15 @@ fn mobile_items(
             } else {
                 palette.panel_bg
             };
-            // Fork: zellij-style rows come from the sidebar row engine.
+            // Fork: zellij-style rows come from the sidebar row engine, with tabs nested.
             if super::sidebar_chrome::zellij(config) {
-                super::mobile_rows::push_workspace_item(
+                super::mobile_rows::push_space_items(
                     &mut items,
                     endpoint,
+                    active_endpoint_id,
                     &entry,
                     workspace,
-                    endpoint.endpoint_id == active_endpoint_id && workspace.focused,
+                    worktree_parents.contains(&entry.index),
                     background,
                     config,
                     content_width,
@@ -902,7 +921,12 @@ fn mobile_items(
         }
     }
 
-    if let Some(workspace_id) = snapshot.focused_workspace_id.as_deref() {
+    // Fork: zellij-style tabs nest under their space instead.
+    if let Some(workspace_id) = snapshot
+        .focused_workspace_id
+        .as_deref()
+        .filter(|_| !super::sidebar_chrome::zellij(config))
+    {
         items.push(MobileItem::section("tabs", palette));
         items.push(MobileItem::action(
             "  + new tab",

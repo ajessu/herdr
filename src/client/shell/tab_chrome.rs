@@ -35,7 +35,7 @@ enum SeparatorStyle {
 }
 
 /// Strip control and bidi-override characters from a user-writable tab name.
-fn sanitize_display_name(s: &str) -> Cow<'_, str> {
+pub(super) fn sanitize_display_name(s: &str) -> Cow<'_, str> {
     if s.chars().any(|c| c.is_control() || is_bidi_override(c)) {
         Cow::Owned(
             s.chars()
@@ -55,9 +55,9 @@ fn is_bidi_override(c: char) -> bool {
 }
 
 #[derive(Debug, Clone)]
-struct TabStatusDot {
-    glyph: &'static str,
-    style: Style,
+pub(super) struct TabStatusDot {
+    pub(super) glyph: &'static str,
+    pub(super) style: Style,
 }
 
 /// One tab's label model.
@@ -118,7 +118,7 @@ impl TabChrome {
     }
 }
 
-fn tab_status_dot(
+pub(super) fn tab_status_dot(
     status: AgentStatus,
     mode: TabStatusModeConfig,
     config: &ClientShellConfig,

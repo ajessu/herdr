@@ -283,7 +283,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # sidebar_collapsed_mode = "compact"
 
 # Sidebar style: "upstream" or "zellij" (7-column rail with attention markers, +N overflow
-# badges that count waiting agents, and agent labels that dim once settled).
+# badges that count waiting agents, and agent labels that dim once settled). The zellij
+# style also nests tabs under each space on the active machine in the phone switcher.
 # sidebar.style = "upstream"
 
 # Terminal width at or below which Herdr uses the mobile single-column layout.
@@ -362,7 +363,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Tab bar style: "upstream" (centered labels, scroll arrows) or "zellij" (tiles centered
 # on the active tab; hidden tabs collapse into +N tiles that count waiting agents).
 # tabs.style = "upstream"
-# Status dots on zellij-style tabs: "off", "attention" (blocked and unseen finished), or "all".
+# Status dots on zellij-style tabs and, with sidebar.style = "zellij", on the phone's nested
+# tabs and header: "off", "attention" (blocked and unseen finished), or "all".
 # show_tab_status = "off"
 
 # Ordered status entries at the right edge of the desktop tab bar.

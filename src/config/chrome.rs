@@ -39,7 +39,7 @@ pub enum TabStatusModeConfig {
     All,
 }
 
-/// How the desktop sidebar is drawn.
+/// How the desktop sidebar and the phone switcher's rows are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SidebarStyleConfig {
@@ -47,7 +47,8 @@ pub enum SidebarStyleConfig {
     #[default]
     Upstream,
     /// A 7-column rail with attention markers, `+N` overflow badges that count
-    /// waiting agents, and agent labels that dim once settled.
+    /// waiting agents, and agent labels that dim once settled. The phone switcher
+    /// uses the same rows and nests tabs under each space on the active machine.
     Zellij,
 }
 

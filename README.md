@@ -59,7 +59,10 @@ show_tab_status = "all"   # or "attention"
   heavier scrollbars. `ui.sidebar.agents.divider_token = "$name"` draws a dim rule in
   the agents panel between entries that carry that pane token and entries that don't.
   The phone switcher draws its agent and space rows with the same `[ui.sidebar.agents]`
-  and `[ui.sidebar.spaces]` rows, divider, highlight and `row_gap`.
+  and `[ui.sidebar.spaces]` rows, divider, highlight and `row_gap`. Each space on the
+  active machine lists its tabs beneath it, with `ui.show_tab_status` dots, in place of
+  the separate tabs section, and `+ new tab` sits under the current space. The phone
+  header shows the focused tab's dot under the same setting.
 - **nested-launch and remote hygiene**: `experimental.allow_nested` defaults to `true`
   with a same-server recursion guard (rather than blocking all nesting), and
   remote/tunnel subprocesses have every `HERDR_*` runtime env var scrubbed, not just the

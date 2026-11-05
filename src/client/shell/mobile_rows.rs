@@ -1,9 +1,11 @@
 //! Fork: under `ui.sidebar.style = "zellij"` the phone switcher's agent and
 //! space items come from the desktop sidebar row engine, so `[ui.sidebar.agents]`
 //! and `[ui.sidebar.spaces]` rows, the divider, the highlight and `row_gap`
-//! apply on the phone too.
+//! apply on the phone too. Each space on the active machine lists its tabs
+//! beneath it.
 
 use ratatui::{
+    buffer::Buffer,
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
@@ -58,14 +60,69 @@ pub(super) fn agent_items(
     items
 }
 
+/// Indices of the active machine's spaces directly followed by a worktree child.
+/// Empty elsewhere, since only spaces with nested tabs draw that line.
+pub(super) fn worktree_parents(
+    endpoint: super::aggregate_navigation::CachedEndpointSnapshot<'_>,
+    active_endpoint_id: &ClientEndpointId,
+    config: &ClientShellConfig,
+) -> HashSet<usize> {
+    if endpoint.endpoint_id != active_endpoint_id || !super::sidebar_chrome::zellij(config) {
+        return HashSet::new();
+    }
+    super::render::workspace_entries(endpoint.snapshot, &HashSet::new())
+        .windows(2)
+        .filter(|pair| !pair[0].indented && pair[1].indented)
+        .map(|pair| pair[0].index)
+        .collect()
+}
+
+/// Pushes one space item and, on the active machine, the rows nested under it.
+pub(super) fn push_space_items(
+    items: &mut Vec<MobileItem>,
+    endpoint: super::aggregate_navigation::CachedEndpointSnapshot<'_>,
+    active_endpoint_id: &ClientEndpointId,
+    entry: &WorkspaceEntry,
+    workspace: &ClientShellWorkspace,
+    has_worktree_children: bool,
+    background: Color,
+    config: &ClientShellConfig,
+    width: u16,
+) {
+    let active = endpoint.endpoint_id == active_endpoint_id;
+    push_workspace_item(
+        items,
+        endpoint,
+        entry,
+        workspace,
+        active && workspace.focused,
+        has_worktree_children,
+        background,
+        config,
+        width,
+    );
+    if active {
+        push_tab_items(
+            items,
+            endpoint,
+            entry,
+            &workspace.workspace_id,
+            has_worktree_children,
+            config,
+            width,
+        );
+    }
+}
+
 /// Pushes one space item, preceded by a `row_gap` item when it is a top-level
 /// entry that follows another space, as on desktop.
-pub(super) fn push_workspace_item(
+fn push_workspace_item(
     items: &mut Vec<MobileItem>,
     endpoint: super::aggregate_navigation::CachedEndpointSnapshot<'_>,
     entry: &WorkspaceEntry,
     workspace: &ClientShellWorkspace,
     focused: bool,
+    draws_worktree_line: bool,
     background: Color,
     config: &ClientShellConfig,
     width: u16,
@@ -73,7 +130,11 @@ pub(super) fn push_workspace_item(
     let palette = &config.palette;
     let follows_space = matches!(
         items.last().and_then(|item| item.target.as_ref()),
-        Some(ClientMobileTarget::Workspace { .. })
+        Some(
+            ClientMobileTarget::Workspace { .. }
+                | ClientMobileTarget::Tab { .. }
+                | ClientMobileTarget::NewTab
+        )
     );
     if follows_space && !entry.indented && config.spaces.row_gap > 0 {
         items.push(gap_item(
@@ -116,11 +177,11 @@ pub(super) fn push_workspace_item(
         .map(|(index, tokens)| {
             let connector = match (entry.indented, index == 0, entry.last_child) {
                 (false, true, _) => "  ",
+                (false, false, _) if draws_worktree_line => "  │ ",
                 (false, false, _) => "    ",
                 (true, true, false) => "  ├─ ",
                 (true, true, true) => "  └─ ",
-                (true, false, false) => "  │    ",
-                (true, false, true) => "       ",
+                (true, false, last_child) => worktree_continuation(last_child),
             };
             let room = usize::from(width.saturating_sub(super::render::display_width(connector)));
             // Without a workspace token the machine label leads the row: the
@@ -177,6 +238,164 @@ pub(super) fn push_workspace_item(
     });
 }
 
+/// Pushes a space's nested rows: its tabs in snapshot order, led by "+ new tab"
+/// under the current space, which is where that action creates the tab. The
+/// focused tab's branch points at it.
+fn push_tab_items(
+    items: &mut Vec<MobileItem>,
+    endpoint: super::aggregate_navigation::CachedEndpointSnapshot<'_>,
+    entry: &WorkspaceEntry,
+    workspace_id: &str,
+    has_worktree_children: bool,
+    config: &ClientShellConfig,
+    width: u16,
+) {
+    let palette = &config.palette;
+    let indent = match (entry.indented, has_worktree_children) {
+        (false, true) => "  │ ",
+        (false, false) => "    ",
+        (true, _) => worktree_continuation(entry.last_child),
+    };
+    let tabs = endpoint
+        .snapshot
+        .tabs
+        .iter()
+        .filter(|tab| tab.workspace_id == workspace_id)
+        .collect::<Vec<_>>();
+    let current_space = endpoint.snapshot.focused_workspace_id.as_deref() == Some(workspace_id);
+    let rows = tabs.len() + usize::from(current_space);
+    let prefix = |row: usize, focused: bool| {
+        let branch = match (row + 1 == rows, focused) {
+            (false, false) => "├─ ",
+            (false, true) => "├▸ ",
+            (true, false) => "└─ ",
+            (true, true) => "└▸ ",
+        };
+        let color = if focused {
+            palette.accent
+        } else {
+            palette.overlay0
+        };
+        vec![
+            Span::styled(indent, Style::default().fg(palette.overlay0)),
+            Span::styled(branch, Style::default().fg(color)),
+        ]
+    };
+    let item = |spans: Vec<Span<'static>>, background, target| {
+        let mut lines = vec![Line::from(spans)];
+        if endpoint.stale() {
+            dim_lines(&mut lines, config);
+        }
+        MobileItem {
+            lines,
+            background,
+            target: Some(target),
+        }
+    };
+    if current_space {
+        let mut spans = prefix(0, false);
+        spans.push(Span::styled(
+            "+ new tab",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        items.push(item(spans, palette.panel_bg, ClientMobileTarget::NewTab));
+    }
+    let prefix_width = usize::from(super::render::display_width(indent)) + 3;
+    for (index, tab) in tabs.iter().enumerate() {
+        let mut spans = prefix(index + usize::from(current_space), tab.focused);
+        let mut room = usize::from(width).saturating_sub(prefix_width);
+        if let Some(dot) =
+            super::tab_chrome::tab_status_dot(tab.agent_status, config.tab_status, config)
+        {
+            room = room.saturating_sub(usize::from(super::render::display_width(dot.glyph)) + 1);
+            spans.push(Span::styled(dot.glyph, dot.style));
+            spans.push(Span::raw(" "));
+        }
+        let name = super::tab_chrome::sanitize_display_name(&tab.label);
+        let label = if tab.custom_label {
+            format!("{} · {name}", index + 1)
+        } else {
+            format!("tab {name}")
+        };
+        let (background, label_style) = if tab.focused {
+            (
+                palette.surface_dim,
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (palette.panel_bg, Style::default().fg(palette.subtext0))
+        };
+        spans.push(Span::styled(
+            crate::ui::truncate_end(&label, room),
+            label_style,
+        ));
+        items.push(item(
+            spans,
+            background,
+            ClientMobileTarget::Tab {
+                endpoint_id: endpoint.endpoint_id.clone(),
+                tab_id: tab.tab_id.clone(),
+            },
+        ));
+    }
+}
+
+/// The header's tab text under the zellij style, led by the space's active tab's
+/// dot per `ui.show_tab_status`, and that dot for `paint_header_tab_dot`.
+pub(super) fn header_tab_text(
+    text: String,
+    snapshot: &ClientShellSnapshot,
+    workspace: &ClientShellWorkspace,
+    config: &ClientShellConfig,
+) -> (String, Option<super::tab_chrome::TabStatusDot>) {
+    let dot = super::sidebar_chrome::zellij(config)
+        .then(|| {
+            // The same tab the text names: the active one, else the space's first.
+            let mut tabs = snapshot
+                .tabs
+                .iter()
+                .filter(|tab| tab.workspace_id == workspace.workspace_id);
+            tabs.clone()
+                .find(|tab| tab.tab_id == workspace.active_tab_id)
+                .or_else(|| tabs.next())
+        })
+        .flatten()
+        .and_then(|tab| {
+            super::tab_chrome::tab_status_dot(tab.agent_status, config.tab_status, config)
+        });
+    match dot {
+        Some(dot) => (format!("{} {text}", dot.glyph), Some(dot)),
+        None => (text, None),
+    }
+}
+
+/// Recolors the dot `header_tab_text` wrote at the start of the tab text.
+pub(super) fn paint_header_tab_dot(
+    buffer: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    dot: Option<super::tab_chrome::TabStatusDot>,
+    background: Color,
+) {
+    if let Some(dot) = dot {
+        super::render::put_text(buffer, x, y, width, dot.glyph, dot.style.bg(background));
+    }
+}
+
+/// What continues the worktree column on rows below a worktree child's first.
+fn worktree_continuation(last_child: bool) -> &'static str {
+    if last_child {
+        "       "
+    } else {
+        "  │    "
+    }
+}
+
 fn gap_item(lines: Vec<Line<'static>>, config: &ClientShellConfig) -> MobileItem {
     MobileItem {
         lines,
@@ -189,18 +408,25 @@ fn stale_suffix(status: ClientEndpointStatus) -> String {
     format!(" · {}", mobile_endpoint_state(status))
 }
 
+fn stale_style(config: &ClientShellConfig) -> Style {
+    Style::default()
+        .fg(config.palette.overlay0)
+        .add_modifier(Modifier::DIM)
+}
+
+fn dim_lines(lines: &mut [Line<'static>], config: &ClientShellConfig) {
+    for line in lines.iter_mut() {
+        for span in &mut line.spans {
+            span.style = span.style.patch(stale_style(config));
+        }
+    }
+}
+
 /// Dims a stale machine's item, as the desktop agents panel does, and appends
 /// the machine's state to its last line. Callers fit the rows to leave room.
 fn mark_stale(lines: &mut [Line<'static>], suffix: String, config: &ClientShellConfig) {
-    let dim = Style::default()
-        .fg(config.palette.overlay0)
-        .add_modifier(Modifier::DIM);
-    for line in lines.iter_mut() {
-        for span in &mut line.spans {
-            span.style = span.style.patch(dim);
-        }
-    }
+    dim_lines(lines, config);
     if let Some(last) = lines.last_mut() {
-        last.spans.push(Span::styled(suffix, dim));
+        last.spans.push(Span::styled(suffix, stale_style(config)));
     }
 }

@@ -1111,7 +1111,8 @@ pub struct UiConfig {
     pub hint_bar: HintBarStyleConfig,
     /// Fork: tab and hint-bar styling.
     pub tabs: TabsConfig,
-    /// Fork: status dots on zellij-style tabs: "off", "attention", or "all". Default: off.
+    /// Fork: status dots on zellij-style tabs and, with `sidebar.style = "zellij"`, on the
+    /// phone's nested tabs and header: "off", "attention", or "all". Default: off.
     pub show_tab_status: TabStatusModeConfig,
     /// Ordered entries shown at the right edge of the desktop tab row. Empty by default.
     pub tab_bar_right: Vec<TabBarRightEntryConfig>,
