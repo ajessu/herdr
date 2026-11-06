@@ -470,6 +470,15 @@ divider_label_fg = "#cba6f7" # optional; the label uses the theme accent otherwi
 
 With `row_gap = 0` the rule adds one line between the two entries; with `row_gap` of `1` or more it sits inside the existing gap. Nothing is drawn when the setting is unset, or when every entry or no entry carries the token. The value must be a valid `$name` token. The token does not need to appear in `rows`.
 
+`token_separator` sets the string between tokens in Agent rows, replacing the default ` · `. `active_tab = "status"` makes the tab name of a working, blocked or finished-unseen agent bold, in the colour of its status icon:
+
+```toml
+[ui.sidebar.agents]
+token_separator = " "
+active_tab = "status"
+rows = [["state_icon", "tab", { token = "workspace", bold = false }, "agent"]]
+```
+
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 
 ```toml

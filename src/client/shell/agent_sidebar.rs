@@ -431,6 +431,22 @@ pub(super) fn agent_row_lines(
         kind: crate::ui::ResolvedTokenKind::StateIcon,
         style: Default::default(),
     }]];
+    // Fork: `active_tab = "status"` colours a pending row's tab like its icon.
+    let tab_style = match config.agents.active_tab {
+        Some(crate::config::AgentActiveTabStyle::Status)
+            if super::sidebar_chrome::needs_attention(row.status) =>
+        {
+            tab_style
+                .fg(status_color(row.status, palette))
+                .add_modifier(Modifier::BOLD)
+        }
+        _ => tab_style,
+    };
+    let token_separator = config
+        .agents
+        .token_separator
+        .as_deref()
+        .unwrap_or(crate::ui::DEFAULT_TOKEN_SEPARATOR);
     let rows = if row.rows.is_empty() {
         &state_icon_only[..]
     } else {
@@ -449,6 +465,7 @@ pub(super) fn agent_row_lines(
                 tab_style,
                 secondary,
                 secondary,
+                token_separator,
                 palette,
                 width.saturating_sub(indent as u16) as usize,
             ));

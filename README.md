@@ -63,6 +63,9 @@ show_tab_status = "all"   # or "attention"
   expanded lists, agent labels that stay bright while pending and dim once settled, and
   heavier scrollbars. `ui.sidebar.agents.divider_token = "$name"` draws a dim rule in
   the agents panel between entries that carry that pane token and entries that don't.
+  `ui.sidebar.agents.token_separator` sets the string between row tokens, and
+  `ui.sidebar.agents.active_tab = "status"` colours an active agent's tab name like its
+  status icon.
   The phone switcher draws its agent and space rows with the same `[ui.sidebar.agents]`
   and `[ui.sidebar.spaces]` rows, divider, highlight and `row_gap`. Each space on the
   active machine lists its tabs beneath it, with `ui.show_tab_status` dots, in place of

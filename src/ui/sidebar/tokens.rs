@@ -177,13 +177,20 @@ pub(crate) fn space_rows(
         .collect()
 }
 
-pub(crate) fn separator(previous: &ResolvedToken, current: &ResolvedToken) -> &'static str {
+/// What joins two row tokens unless `ui.sidebar.agents.token_separator` says otherwise.
+pub(crate) const DEFAULT_TOKEN_SEPARATOR: &str = " · ";
+
+pub(crate) fn separator<'a>(
+    previous: &ResolvedToken,
+    current: &ResolvedToken,
+    token_separator: &'a str,
+) -> &'a str {
     if matches!(previous.kind, ResolvedTokenKind::StateIcon)
         || matches!(current.kind, ResolvedTokenKind::GitStatus { .. })
     {
         " "
     } else {
-        " · "
+        token_separator
     }
 }
 
@@ -296,6 +303,48 @@ rows = [[{ token = "workspace", rules = [{ equals = "long-workspace-name", fg = 
                 .sub_modifier
                 .contains(Modifier::BOLD | Modifier::DIM));
         }
+    }
+
+    #[test]
+    fn token_separator_joins_tokens_and_counts_towards_the_fit() {
+        let tokens = [
+            ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+            ResolvedToken::unstyled(ResolvedTokenKind::Workspace("abcd".into())),
+            ResolvedToken::unstyled(ResolvedTokenKind::Tab("efgh".into())),
+            ResolvedToken::unstyled(ResolvedTokenKind::GitStatus {
+                ahead: 1,
+                behind: 0,
+            }),
+        ];
+        let text = |token_separator: &str, width: usize| {
+            let style = ratatui::style::Style::default();
+            super::super::resolved_token_spans_with_tab_style(
+                &tokens,
+                ("*", style),
+                style,
+                style,
+                style,
+                style,
+                style,
+                token_separator,
+                &super::super::Palette::catppuccin(),
+                width,
+            )
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect::<String>()
+        };
+
+        assert_eq!(text(DEFAULT_TOKEN_SEPARATOR, 40), "* abcd · efgh ↑1");
+        // The gaps after the icon and before git status aren't the separator.
+        assert_eq!(text(" ", 40), "* abcd efgh ↑1");
+        assert_eq!(text("/", 40), "* abcd/efgh ↑1");
+
+        // Exactly wide enough once the separator is one cell: nothing truncates.
+        assert_eq!(text(" ", 14), "* abcd efgh ↑1");
+        let squeezed = text(DEFAULT_TOKEN_SEPARATOR, 14);
+        assert!(!squeezed.contains("abcd · efgh"), "{squeezed:?}");
+        assert!(super::super::display_width(&squeezed) <= 14);
     }
 
     #[test]

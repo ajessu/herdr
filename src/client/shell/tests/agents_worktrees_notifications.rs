@@ -1970,3 +1970,119 @@ fn agent_divider_keeps_scrolling_and_clicks_aligned() {
     );
     assert_eq!(focused(&click(&mut state, 1)), Some("pane_5".into()));
 }
+
+/// An expanded zellij-style agents panel with one row per status, from `agents_toml`.
+fn styled_agents_state(statuses: &[AgentStatus], agents_toml: &str) -> ClientShellState {
+    let marks = vec![None; statuses.len()];
+    let mut projected = divider_agents(&marks);
+    projected.tabs[0].label = "mytab".into();
+    projected.tabs[0].custom_label = true;
+    // The client only shows "done" after watching the agent stop working.
+    let mut working = projected.clone();
+    for (agent, status) in working.agents.iter_mut().zip(statuses) {
+        agent.agent_status = match status {
+            AgentStatus::Done => AgentStatus::Working,
+            status => *status,
+        };
+    }
+    projected.revision += 1;
+    for (agent, status) in projected.agents.iter_mut().zip(statuses) {
+        agent.state_change_seq += 1;
+        agent.agent_status = match status {
+            AgentStatus::Done => AgentStatus::Idle,
+            status => *status,
+        };
+    }
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Spaces;
+    config.ui.sidebar.style = crate::config::SidebarStyleConfig::Zellij;
+    config.ui.sidebar.agents = toml::from_str(agents_toml).expect("agents config");
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(working));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state
+}
+
+/// The foreground and boldness of `label`'s first cell on agent row `row`.
+fn label_style(state: &mut ClientShellState, row: u16, label: &str) -> (u32, bool) {
+    let frame = state.compose(106, 30).expect("agents frame");
+    let body = state.hits.agent_body;
+    let y = usize::from(body.y + row);
+    let line = &frame_rows(&frame)[y];
+    let byte = line
+        .find(label)
+        .unwrap_or_else(|| panic!("{label:?} in {line:?}"));
+    let x = line[..byte].chars().count();
+    let cell = &frame.cells[y * usize::from(frame.width) + x];
+    let bold = cell.modifier & ratatui::style::Modifier::BOLD.bits() != 0;
+    (cell.fg, bold)
+}
+
+#[test]
+fn active_tab_status_colours_only_active_tab_names() {
+    use crate::protocol::color_to_u32;
+    let statuses = [
+        AgentStatus::Working,
+        AgentStatus::Blocked,
+        AgentStatus::Done,
+        AgentStatus::Idle,
+    ];
+    let rows = r#"rows = [["state_icon", "tab", { token = "workspace", bold = false }]]"#;
+    let mut state = styled_agents_state(&statuses, &format!("active_tab = \"status\"\n{rows}"));
+    let palette = state.config.palette.clone();
+
+    for (row, color) in [palette.yellow, palette.red, palette.teal]
+        .into_iter()
+        .enumerate()
+    {
+        let row = row as u16;
+        assert_eq!(
+            label_style(&mut state, row, "mytab"),
+            (color_to_u32(color), true),
+            "active tab name on row {row}"
+        );
+        assert_eq!(
+            label_style(&mut state, row, "client-shell"),
+            (color_to_u32(palette.text), false),
+            "the space stays bright, without bold, on row {row}"
+        );
+    }
+    for label in ["mytab", "client-shell"] {
+        assert_eq!(
+            label_style(&mut state, 3, label),
+            (color_to_u32(palette.overlay0), false),
+            "idle {label} stays dim"
+        );
+    }
+
+    // Without the key the active tab keeps the plain bold, bright label.
+    let mut state = styled_agents_state(&statuses, rows);
+    assert_eq!(
+        label_style(&mut state, 0, "mytab"),
+        (color_to_u32(palette.text), true)
+    );
+}
+
+#[test]
+fn token_separator_only_changes_agent_rows_that_set_it() {
+    let row_text = |state: &mut ClientShellState| {
+        let frame = state.compose(106, 30).expect("agents frame");
+        let body = state.hits.agent_body;
+        frame_rows(&frame)[usize::from(body.y)]
+            .chars()
+            .skip(usize::from(body.x))
+            .take(usize::from(body.width))
+            .collect::<String>()
+    };
+    let rows = r#"rows = [["state_icon", "tab", "workspace"]]"#;
+    let statuses = [AgentStatus::Idle];
+
+    let mut unset = styled_agents_state(&statuses, rows);
+    let text = row_text(&mut unset);
+    assert!(text.contains("○ mytab · client-shell"), "{text:?}");
+
+    let mut spaced = styled_agents_state(&statuses, &format!("token_separator = \" \"\n{rows}"));
+    let text = row_text(&mut spaced);
+    assert!(text.contains("○ mytab client-shell"), "{text:?}");
+}

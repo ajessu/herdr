@@ -1535,6 +1535,21 @@
           "description": "Custom $name pane metadata token that splits the expanded Agent list: a dim rule is drawn between neighbouring entries where one has a non-empty value and the other does not. It uses a row_gap line when row_gap is at least 1, otherwise it adds one line."
         },
         {
+          "key": "ui.sidebar.agents.active_tab",
+          "type": "string",
+          "default": "unset",
+          "description": "How working, blocked and finished-unseen Agent rows mark their tab name. \"status\" makes it bold, in the colour of the row's status icon. Unset, the tab name keeps the sidebar style's colours.",
+          "values": [
+            "status"
+          ]
+        },
+        {
+          "key": "ui.sidebar.agents.token_separator",
+          "type": "string",
+          "default": "\" \u00b7 \"",
+          "description": "String between tokens in expanded Agent rows, for example \" \". The gaps after the state icon and before git status stay one space."
+        },
+        {
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",

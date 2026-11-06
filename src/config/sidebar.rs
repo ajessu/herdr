@@ -445,6 +445,14 @@ where
     }
 }
 
+/// Fork: `ui.sidebar.agents.active_tab` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentActiveTabStyle {
+    /// Bold, in the colour of the row's status icon.
+    Status,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AgentsSidebarConfig {
@@ -478,6 +486,12 @@ pub struct AgentsSidebarConfig {
     pub highlight_equals: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub highlight_bg: Option<SidebarTokenColor>,
+    /// Fork: the string between row tokens; unset uses " · ".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_separator: Option<String>,
+    /// Fork: how a working, blocked or finished-unseen row marks its tab name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_tab: Option<AgentActiveTabStyle>,
 }
 
 impl AgentsSidebarConfig {
@@ -508,6 +522,8 @@ impl Default for AgentsSidebarConfig {
             highlight_token: None,
             highlight_equals: None,
             highlight_bg: None,
+            token_separator: None,
+            active_tab: None,
         }
     }
 }
@@ -562,6 +578,8 @@ mod tests {
         );
         assert!(config.agents.rows_by_agent.is_empty());
         assert_eq!(config.agents.row_gap, 0);
+        assert_eq!(config.agents.token_separator, None);
+        assert_eq!(config.agents.active_tab, None);
         assert_eq!(
             config.spaces.rows,
             vec![
@@ -828,5 +846,19 @@ rows = [[{ token = "$status", rules = [{ contains = "error", bold = true }] }]]
                 "accepted key {key:?}"
             );
         }
+    }
+
+    #[test]
+    fn agents_token_separator_and_active_tab_parse_and_stay_out_when_unset() {
+        let parsed: AgentsSidebarConfig =
+            toml::from_str("token_separator = \" \"\nactive_tab = \"status\"").unwrap();
+        assert_eq!(parsed.token_separator.as_deref(), Some(" "));
+        assert_eq!(parsed.active_tab, Some(AgentActiveTabStyle::Status));
+
+        assert!(toml::from_str::<AgentsSidebarConfig>("active_tab = \"loud\"").is_err());
+
+        let encoded = toml::to_string(&AgentsSidebarConfig::default()).unwrap();
+        assert!(!encoded.contains("token_separator"), "{encoded}");
+        assert!(!encoded.contains("active_tab"), "{encoded}");
     }
 }

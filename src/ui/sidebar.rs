@@ -8,7 +8,7 @@ use ratatui::{
 
 pub(crate) use self::tokens::{
     agent_rows as sidebar_agent_rows, space_rows as sidebar_space_rows, AgentTokenContext,
-    ResolvedToken, ResolvedTokenKind, SpaceTokenContext,
+    ResolvedToken, ResolvedTokenKind, SpaceTokenContext, DEFAULT_TOKEN_SEPARATOR,
 };
 use super::text::{display_width, truncate_end};
 use crate::app::state::Palette;
@@ -121,13 +121,15 @@ pub(crate) fn resolved_token_spans(
         secondary_style,
         secondary_style,
         custom_style,
+        tokens::DEFAULT_TOKEN_SEPARATOR,
         palette,
         max_width,
     )
 }
 
 /// Fork: `resolved_token_spans` with a separate style for Tab tokens (the
-/// zellij sidebar styles them like the workspace label).
+/// zellij sidebar styles them like the workspace label) and a configurable
+/// string between tokens.
 pub(crate) fn resolved_token_spans_with_tab_style(
     resolved: &[ResolvedToken],
     state_icon: (&str, Style),
@@ -136,6 +138,7 @@ pub(crate) fn resolved_token_spans_with_tab_style(
     tab_style: Style,
     secondary_style: Style,
     custom_style: Style,
+    token_separator: &str,
     palette: &Palette,
     max_width: usize,
 ) -> Vec<Span<'static>> {
@@ -178,7 +181,13 @@ pub(crate) fn resolved_token_spans_with_tab_style(
             .sum::<usize>();
         let separators = indices
             .windows(2)
-            .map(|pair| display_width(tokens::separator(&resolved[pair[0]], &resolved[pair[1]])))
+            .map(|pair| {
+                display_width(tokens::separator(
+                    &resolved[pair[0]],
+                    &resolved[pair[1]],
+                    token_separator,
+                ))
+            })
             .sum::<usize>();
         content + separators
     };
@@ -206,7 +215,13 @@ pub(crate) fn resolved_token_spans_with_tab_style(
         .collect::<Vec<_>>();
     let separator_width = visible_indices
         .windows(2)
-        .map(|pair| display_width(tokens::separator(&resolved[pair[0]], &resolved[pair[1]])))
+        .map(|pair| {
+            display_width(tokens::separator(
+                &resolved[pair[0]],
+                &resolved[pair[1]],
+                token_separator,
+            ))
+        })
         .sum::<usize>();
     let fixed_width = visible_indices
         .iter()
@@ -244,7 +259,7 @@ pub(crate) fn resolved_token_spans_with_tab_style(
         if position > 0 {
             let previous = &resolved[visible_indices[position - 1]];
             spans.push(Span::styled(
-                tokens::separator(previous, token),
+                tokens::separator(previous, token, token_separator).to_owned(),
                 Style::default().fg(palette.overlay0),
             ));
         }
