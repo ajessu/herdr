@@ -140,7 +140,7 @@ fn badge_line(side: OverflowSide, palette: &Palette) -> Line<'static> {
     Line::from(overflow::badge_spans(side, palette))
 }
 
-fn list_window(start: usize, drawn: usize, total: usize) -> ListWindow {
+pub(super) fn list_window(start: usize, drawn: usize, total: usize) -> ListWindow {
     ListWindow {
         first: start,
         count: drawn,

@@ -2,15 +2,18 @@
 //! space items come from the desktop sidebar row engine, so `[ui.sidebar.agents]`
 //! and `[ui.sidebar.spaces]` rows, the divider, the highlight and `row_gap`
 //! apply on the phone too. Each space on the active machine lists its tabs
-//! beneath it.
+//! beneath it, and `+N` badges count the agents and spaces scrolled out of view.
 
+use crate::api::schema::AgentStatus;
 use ratatui::{
     buffer::Buffer,
     style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Paragraph, Widget},
 };
 
 use super::mobile::{mobile_endpoint_state, MobileItem};
+use super::overflow::{self, OverflowSide};
 use super::*;
 
 /// Agent items in the aggregate agents order, each followed by its gap item
@@ -384,6 +387,203 @@ pub(super) fn paint_header_tab_dot(
 ) {
     if let Some(dot) = dot {
         super::render::put_text(buffer, x, y, width, dot.glyph, dot.style.bg(background));
+    }
+}
+
+/// Splits the last row off an overflowing switcher's list viewport, for the badges
+/// of what is scrolled below. The row stays reserved at every scroll position, so
+/// the rows above never shift. It is empty when no row is reserved.
+pub(super) fn split_badge_row(
+    viewport: Rect,
+    total_rows: usize,
+    config: &ClientShellConfig,
+) -> (Rect, Rect) {
+    if !super::sidebar_chrome::zellij(config)
+        || viewport.height < 2
+        || viewport.width < 2
+        || total_rows <= usize::from(viewport.height)
+    {
+        return (viewport, Rect::default());
+    }
+    let height = viewport.height - 1;
+    (
+        Rect { height, ..viewport },
+        Rect {
+            y: viewport.y + height,
+            height: 1,
+            ..viewport
+        },
+    )
+}
+
+/// One agent or space in the switcher's scrolled document.
+struct ListedItem<'a> {
+    rows: std::ops::Range<usize>,
+    status: Option<AgentStatus>,
+    target: &'a ClientMobileTarget,
+}
+
+/// A list's hidden items on each edge of the visible document rows. An item with
+/// a line still visible is not hidden.
+fn hidden_sides(
+    list: &[ListedItem<'_>],
+    visible: &std::ops::Range<usize>,
+) -> (OverflowSide, OverflowSide) {
+    let first = list
+        .iter()
+        .take_while(|item| item.rows.end <= visible.start)
+        .count();
+    let drawn = list[first..]
+        .iter()
+        .take_while(|item| item.rows.start < visible.end)
+        .count();
+    let window = super::sidebar_chrome::list_window(first, drawn, list.len());
+    let status_of = |index: usize| list.get(index).and_then(|item| item.status);
+    (
+        overflow::side_above(window, status_of),
+        overflow::side_below(window, list.len(), status_of),
+    )
+}
+
+/// The snapshot of an online machine. Any other machine's cached statuses are not
+/// live and a tap may not reach it, so its items get no badge.
+fn online_snapshot<'a>(
+    endpoints: &'a [ClientShellEndpoint],
+    endpoint_id: &ClientEndpointId,
+) -> Option<&'a ClientShellSnapshot> {
+    endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        .filter(|endpoint| endpoint.status == ClientEndpointStatus::Online)
+        .and_then(|endpoint| endpoint.snapshot.as_deref())
+}
+
+/// The desktop `+N` badges for the switcher's two lists. Both share one scrolled
+/// document, so a badge names its list. Those for items above sit on the rule
+/// over the list, unless the active machine's connection banner has that row, and
+/// those for items below on `badge_row`, so no row's tap area is covered. A tap
+/// acts on the hidden item's own target, as tapping its row does.
+pub(super) fn render_switcher_badges(
+    buffer: &mut Buffer,
+    rule_row: Rect,
+    badge_row: Rect,
+    items: &[MobileItem],
+    visible: std::ops::Range<usize>,
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    palette: &Palette,
+    hits: &mut ShellHitMap,
+) {
+    if badge_row.is_empty() {
+        return;
+    }
+    super::render::put_text(
+        buffer,
+        badge_row.x,
+        badge_row.y,
+        badge_row.width,
+        &"─".repeat(usize::from(badge_row.width)),
+        Style::default()
+            .fg(palette.surface_dim)
+            .bg(palette.panel_bg),
+    );
+    let (mut agents, mut spaces) = (Vec::new(), Vec::new());
+    let mut row = 0usize;
+    for item in items {
+        let rows = row..row + item.lines.len();
+        row = rows.end;
+        match item.target.as_ref() {
+            Some(
+                target @ ClientMobileTarget::Agent {
+                    endpoint_id,
+                    pane_id,
+                },
+            ) => {
+                if let Some(snapshot) = online_snapshot(endpoints, endpoint_id) {
+                    let agent = snapshot.agents.iter().find(|a| &a.pane_id == pane_id);
+                    agents.push(ListedItem {
+                        rows,
+                        status: agent.map(|agent| agent.agent_status),
+                        target,
+                    });
+                }
+            }
+            Some(
+                target @ ClientMobileTarget::Workspace {
+                    endpoint_id,
+                    workspace_id,
+                },
+            ) => {
+                if let Some(snapshot) = online_snapshot(endpoints, endpoint_id) {
+                    let space = snapshot
+                        .workspaces
+                        .iter()
+                        .find(|ws| &ws.workspace_id == workspace_id);
+                    spaces.push(ListedItem {
+                        rows,
+                        status: space.map(|space| space.agent_status),
+                        target,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    let active_online = endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == active_endpoint_id)
+        .is_none_or(|endpoint| endpoint.status == ClientEndpointStatus::Online);
+    let rule_row = if active_online {
+        rule_row
+    } else {
+        Rect::default()
+    };
+    let (agents_above, agents_below) = hidden_sides(&agents, &visible);
+    let (spaces_above, spaces_below) = hidden_sides(&spaces, &visible);
+    for (row, sides) in [
+        (
+            rule_row,
+            [
+                (&spaces, "spaces", spaces_above),
+                (&agents, "agents", agents_above),
+            ],
+        ),
+        (
+            badge_row,
+            [
+                (&spaces, "spaces", spaces_below),
+                (&agents, "agents", agents_below),
+            ],
+        ),
+    ] {
+        if row.is_empty() {
+            continue;
+        }
+        let mut right = row.right();
+        for (list, label, side) in sides {
+            if side.is_empty() {
+                continue;
+            }
+            let mut spans = vec![Span::styled(
+                format!(" {label} "),
+                Style::default().fg(palette.overlay0),
+            )];
+            spans.extend(overflow::badge_spans(side, palette));
+            let line = Line::from(spans);
+            let room = right - row.x;
+            // A clipped badge still shows its list and how many are hidden.
+            let minimum = format!(" {label} +{}", overflow::count_label(side.hidden));
+            if room < super::render::display_width(&minimum) {
+                continue;
+            }
+            let width = u16::try_from(line.width()).unwrap_or(u16::MAX).min(room);
+            let rect = Rect::new(right - width, row.y, width, 1);
+            Paragraph::new(line).render(rect, buffer);
+            if let Some(item) = overflow::resolve_jump(side).and_then(|index| list.get(index)) {
+                hits.mobile_targets.push((rect, item.target.clone()));
+            }
+            right = rect.x;
+        }
     }
 }
 

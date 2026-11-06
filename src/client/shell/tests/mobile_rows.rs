@@ -784,7 +784,9 @@ fn zellij_phone_reveal_scrolls_past_nested_tabs_to_the_selected_space() {
     state.reveal_mobile_workspace = true;
     state.compose(60, 8).expect("short phone switcher");
     assert!(state.mobile_switcher_scroll > 0);
-    workspace_rect(&state, "ws_other");
+    // Not just a badge's target: the row itself is in the list, above the reserved row.
+    let row = workspace_rect(&state, "ws_other");
+    assert!(row.y > 2 && row.bottom() <= 7, "{row:?}");
 }
 
 #[test]
@@ -957,4 +959,680 @@ fn upstream_style_keeps_the_tabs_section_and_flat_spaces() {
         ),
         "only the current space's tabs are listed"
     );
+}
+
+const BADGE_CONFIG: &str = r#"
+[ui]
+agent_panel_sort = "spaces"
+
+[ui.sidebar]
+style = "zellij"
+
+[ui.sidebar.agents]
+rows = [["state_icon", "agent"]]
+
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"]]
+"#;
+
+const BADGE_CONFIG_TWO_ROW_AGENTS: &str = r#"
+[ui]
+agent_panel_sort = "spaces"
+
+[ui.sidebar]
+style = "zellij"
+
+[ui.sidebar.agents]
+rows = [["state_icon"], ["agent"]]
+"#;
+
+/// The rule between the switcher's header and its list.
+const BADGE_RULE_ROW: u16 = 2;
+
+/// Agents `pane_1..` with `statuses` and spaces `ws_1..` with `space_statuses`.
+/// The agents live in a leading `ws_agents` space, so the client's status rollup
+/// lands there and leaves the numbered spaces' statuses alone.
+fn badge_snapshot(statuses: &[AgentStatus], space_statuses: &[AgentStatus]) -> ClientShellSnapshot {
+    let mut projected = snapshot();
+    let pane = projected.panes[0].clone();
+    projected.panes.clear();
+    projected.agents.clear();
+    for (index, status) in statuses.iter().enumerate() {
+        let number = index + 1;
+        let mut agent = phone_agent(number, "pi", &[], false);
+        agent.agent_status = *status;
+        agent.workspace_id = "ws_agents".into();
+        agent.tab_id = "tab_agents".into();
+        projected.agents.push(agent);
+        let mut pane = pane.clone();
+        pane.pane_id = format!("pane_{number}");
+        pane.focused = false;
+        projected.panes.push(pane);
+    }
+    let space = projected.workspaces[0].clone();
+    projected.workspaces.clear();
+    for (index, status) in space_statuses.iter().enumerate() {
+        let number = index + 1;
+        let mut space = space.clone();
+        space.workspace_id = format!("ws_{number}");
+        space.number = number;
+        space.label = format!("space-{number}");
+        space.focused = false;
+        space.agent_status = *status;
+        projected.workspaces.push(space);
+    }
+    if !statuses.is_empty() {
+        let mut home = space;
+        home.workspace_id = "ws_agents".into();
+        home.label = "agents-home".into();
+        home.focused = false;
+        projected.workspaces.insert(0, home);
+    }
+    projected.focused_workspace_id = None;
+    projected.tabs.clear();
+    projected
+}
+
+/// A switcher where `Done` agents went from working to finished while the client
+/// watched, so they project as finished-unseen instead of idle.
+fn badge_switcher(config: &str, projected: ClientShellSnapshot) -> ClientShellState {
+    let mut working = projected.clone();
+    for agent in &mut working.agents {
+        if agent.agent_status == AgentStatus::Done {
+            agent.agent_status = AgentStatus::Working;
+        }
+    }
+    let mut state = phone_switcher(config, working);
+    let mut finished = projected;
+    for agent in &mut finished.agents {
+        if agent.agent_status == AgentStatus::Done {
+            agent.state_change_seq += 1_000;
+        }
+    }
+    state.set_snapshot(Box::new(finished));
+    state
+}
+
+/// The badge hits on one row: only a badge can target an item from a rule row.
+fn badges_on(state: &ClientShellState, row: u16) -> Vec<(Rect, ClientMobileTarget)> {
+    state
+        .hits
+        .mobile_targets
+        .iter()
+        .filter(|(rect, _)| rect.y == row)
+        .cloned()
+        .collect()
+}
+
+fn row_after(frame: &FrameData, row: u16, marker: &str) -> Option<String> {
+    frame_rows(frame)[usize::from(row)]
+        .split_once(marker)
+        .map(|(_, rest)| format!("{marker}{rest}").trim_end().to_owned())
+}
+
+#[test]
+fn zellij_phone_top_badge_counts_items_wholly_above_the_viewport() {
+    use AgentStatus::{Blocked, Done, Idle, Working};
+    let mut state = badge_switcher(
+        BADGE_CONFIG,
+        badge_snapshot(&[Blocked, Working, Done, Idle, Idle, Idle, Idle], &[Idle]),
+    );
+    // One section row, then one row per agent: scroll 4 hides agents 1 to 3.
+    state.mobile_switcher_scroll = 4;
+    let frame = state.compose(60, 12).expect("phone switcher");
+    assert_eq!(
+        row_after(&frame, BADGE_RULE_ROW, "agents").as_deref(),
+        Some("agents +3 ◉¹ ◐¹ ●¹")
+    );
+    assert!(row_after(&frame, BADGE_RULE_ROW, "spaces").is_none());
+}
+
+#[test]
+fn zellij_phone_bottom_badge_sits_on_a_reserved_rule_row() {
+    use AgentStatus::{Blocked, Idle, Working};
+    let mut state = badge_switcher(
+        BADGE_CONFIG,
+        badge_snapshot(&[Idle; 9], &[Blocked, Working, Idle]),
+    );
+    let frame = state.compose(60, 12).expect("phone switcher");
+    // Rows 3..11 show the section row and agents 1 to 7; row 11 is reserved.
+    let reserved = &frame_rows(&frame)[11];
+    assert!(reserved.starts_with('─'), "{reserved:?}");
+    assert_eq!(
+        row_after(&frame, 11, "agents").as_deref(),
+        Some("agents +2 spaces +4 ◉¹ ◐¹")
+    );
+    assert_eq!(agent_rect(&state, "pane_7").y, 10);
+
+    // Section, 9 agents, section, new workspace, 4 spaces, section, then the menu.
+    let menu = crate::client::shell::global_menu::global_menu_items(
+        state.snapshot.as_deref().expect("snapshot"),
+    )
+    .len();
+    assert_eq!(state.hits.mobile_max_scroll, 17 + menu - 8);
+    state.mobile_switcher_scroll = usize::MAX;
+    let frame = state.compose(60, 12).expect("scrolled to the end");
+    let rows = frame_rows(&frame);
+    assert!(rows[11].starts_with('─'), "{:?}", rows[11]);
+    assert_eq!(rows[11], "─".repeat(60), "nothing is below");
+    let last_menu = state
+        .hits
+        .mobile_targets
+        .iter()
+        .filter(|(_, target)| matches!(target, ClientMobileTarget::Menu(_)))
+        .map(|(rect, _)| rect.bottom())
+        .max();
+    assert_eq!(last_menu, Some(11), "the last row sits just above the rule");
+}
+
+#[test]
+fn zellij_phone_badge_counts_an_item_only_when_no_line_is_visible() {
+    use AgentStatus::{Blocked, Idle};
+    let mut state = badge_switcher(
+        BADGE_CONFIG_TWO_ROW_AGENTS,
+        badge_snapshot(&[Blocked, Idle, Idle, Idle, Idle, Idle, Idle], &[Idle]),
+    );
+    // The section row is row 0, so pane_1 spans rows 1 and 2.
+    state.mobile_switcher_scroll = 2;
+    let frame = state.compose(60, 12).expect("half of pane_1 visible");
+    assert!(row_after(&frame, BADGE_RULE_ROW, "agents").is_none());
+    assert_eq!(agent_rect(&state, "pane_1").height, 1);
+
+    state.mobile_switcher_scroll = 3;
+    let frame = state.compose(60, 12).expect("pane_1 scrolled off");
+    assert_eq!(
+        row_after(&frame, BADGE_RULE_ROW, "agents").as_deref(),
+        Some("agents +1 ◉¹")
+    );
+}
+
+#[test]
+fn zellij_phone_two_badges_share_an_edge_at_60_columns() {
+    use AgentStatus::{Blocked, Done, Working};
+    let mut state = badge_switcher(
+        BADGE_CONFIG,
+        badge_snapshot(&[Blocked; 20], &[Done, Working, Blocked]),
+    );
+    let frame = state.compose(60, 12).expect("phone switcher");
+    assert_eq!(
+        row_after(&frame, 11, "agents").as_deref(),
+        Some("agents +9+ ◉⁹⁺ spaces +4 ◉² ◐¹ ●¹")
+    );
+    let badges = badges_on(&state, 11);
+    assert_eq!(badges.len(), 2);
+    let spaces = badges
+        .iter()
+        .find(|(_, target)| matches!(target, ClientMobileTarget::Workspace { .. }))
+        .expect("spaces badge")
+        .0;
+    let agents = badges
+        .iter()
+        .find(|(_, target)| matches!(target, ClientMobileTarget::Agent { .. }))
+        .expect("agents badge")
+        .0;
+    assert_eq!(spaces.right(), 60, "spaces is right-aligned");
+    assert_eq!(agents.right(), spaces.x, "agents sits to its left");
+    assert_eq!(
+        usize::from(spaces.width),
+        " spaces +4 ◉² ◐¹ ●¹".chars().count(),
+        "only the badge's own cells are a target"
+    );
+}
+
+#[test]
+fn zellij_phone_narrow_badges_clip_or_drop() {
+    use AgentStatus::{Blocked, Done, Working};
+    let mut state = badge_switcher(
+        BADGE_CONFIG,
+        badge_snapshot(&[Blocked; 20], &[Done, Working, Blocked]),
+    );
+    // Spaces takes 19 columns; agents needs 11 for its label and count.
+    state.compose(29, 12).expect("no room for the count");
+    let badges = badges_on(&state, 11);
+    assert_eq!(badges.len(), 1, "agents needs its count: {badges:?}");
+    assert!(matches!(badges[0].1, ClientMobileTarget::Workspace { .. }));
+
+    state.compose(32, 12).expect("clipped");
+    let badges = badges_on(&state, 11);
+    assert_eq!(badges.len(), 2);
+    let (spaces, agents) = (badges[0].0, badges[1].0);
+    assert!(matches!(badges[1].1, ClientMobileTarget::Agent { .. }));
+    assert_eq!(spaces.right(), 32);
+    assert_eq!(
+        (agents.x, agents.right()),
+        (0, spaces.x),
+        "agents takes what spaces leaves"
+    );
+
+    state.compose(9, 12).expect("too narrow");
+    assert!(badges_on(&state, 11).is_empty());
+}
+
+#[test]
+fn zellij_phone_agents_badge_tap_focuses_the_most_urgent_hidden_agent() {
+    use AgentStatus::{Blocked, Done, Idle, Working};
+    let hidden_below = |statuses: [AgentStatus; 4], expected: &str| {
+        let mut all = vec![Idle; 7];
+        all.extend(statuses);
+        let mut state = badge_switcher(BADGE_CONFIG, badge_snapshot(&all, &[Idle]));
+        state.compose(60, 12).expect("phone switcher");
+        let (rect, _) = badges_on(&state, 11)
+            .into_iter()
+            .find(|(_, target)| matches!(target, ClientMobileTarget::Agent { .. }))
+            .expect("agents badge");
+        let picked = state.handle_raw_events(vec![tap(rect)]);
+        assert!(
+            picked.actions.iter().any(|action| matches!(
+                action,
+                ClientShellAction::Endpoint { request, .. }
+                    if matches!(
+                        &request.method,
+                        crate::api::schema::Method::PaneFocus(params) if params.pane_id == expected
+                    )
+            )),
+            "{statuses:?}: {:?}",
+            picked.actions
+        );
+        assert_eq!(state.mode, ClientShellMode::Terminal);
+    };
+    hidden_below([Idle, Done, Working, Blocked], "pane_11");
+    hidden_below([Idle, Done, Working, Idle], "pane_10");
+    hidden_below([Idle, Done, Idle, Idle], "pane_9");
+    hidden_below([Idle, Idle, Idle, Idle], "pane_8");
+}
+
+#[test]
+fn zellij_phone_spaces_badge_tap_acts_like_that_row_across_machines() {
+    use AgentStatus::{Blocked, Idle};
+    let mut remote = badge_snapshot(&[], &[Blocked]);
+    remote.workspaces[0].workspace_id = "ws_remote".into();
+    let (mut state, endpoint_id) = two_machine_badges(
+        badge_snapshot(&[Idle; 9], &[Idle]),
+        remote,
+        ClientEndpointStatus::Online,
+    );
+
+    let frame = state.compose(60, 12).expect("phone switcher");
+    assert!(row_after(&frame, 11, "spaces").is_some_and(|badge| badge.ends_with("+3 ◉¹")));
+    let (rect, _) = badges_on(&state, 11)
+        .into_iter()
+        .find(|(_, target)| matches!(target, ClientMobileTarget::Workspace { .. }))
+        .expect("spaces badge");
+    let picked = state.handle_raw_events(vec![tap(rect)]);
+    assert!(picked.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::ActivateEndpoint {
+            endpoint_id: picked,
+            target: Some(ClientEndpointFocusTarget::Workspace(workspace_id)),
+        } if picked == &endpoint_id && workspace_id == "ws_remote"
+    )));
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+}
+
+#[test]
+fn zellij_phone_no_badge_or_reserved_row_when_nothing_overflows() {
+    use AgentStatus::Blocked;
+    let mut state = badge_switcher(BADGE_CONFIG, badge_snapshot(&[Blocked; 2], &[Blocked]));
+    let frame = state.compose(60, 40).expect("phone switcher");
+    let rows = frame_rows(&frame);
+    assert_eq!(state.hits.mobile_max_scroll, 0);
+    assert!(!rows[39].contains('─'), "{:?}", rows[39]);
+    assert!(badges_on(&state, BADGE_RULE_ROW).is_empty());
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.contains("agents +") || row.contains("spaces +")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn zellij_phone_overflow_past_the_lists_keeps_the_rule_without_a_badge() {
+    use AgentStatus::Blocked;
+    let mut state = badge_switcher(BADGE_CONFIG, badge_snapshot(&[Blocked], &[Blocked]));
+    // Agents and spaces are all visible; only the menu runs past the rule.
+    let frame = state.compose(60, 11).expect("phone switcher");
+    assert!(state.hits.mobile_max_scroll > 0);
+    let rows = frame_rows(&frame);
+    assert_eq!(rows[10].trim_end(), "─".repeat(60), "{rows:#?}");
+    workspace_rect(&state, "ws_1");
+    assert!(badges_on(&state, 10).is_empty());
+}
+
+#[test]
+fn upstream_style_has_no_badges_and_no_reserved_row() {
+    use AgentStatus::Blocked;
+    let config = "[ui]\nagent_panel_sort = \"spaces\"\n";
+    let mut state = phone_switcher(config, badge_snapshot(&[Blocked; 12], &[Blocked; 4]));
+    let frame = state.compose(60, 12).expect("phone switcher");
+    let rows = frame_rows(&frame);
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.contains("agents +") || row.contains("spaces +")),
+        "{rows:#?}"
+    );
+    assert!(!rows[11].contains('─'), "{:?}", rows[11]);
+    assert!(state
+        .hits
+        .mobile_targets
+        .iter()
+        .any(|(rect, _)| rect.bottom() == 12));
+}
+
+#[test]
+fn zellij_phone_badges_never_overlap_a_tap_area_at_any_scroll() {
+    use AgentStatus::{Blocked, Done, Idle, Working};
+    let two_row_agents = badge_switcher(
+        BADGE_CONFIG_TWO_ROW_AGENTS,
+        badge_snapshot(
+            &[
+                Blocked, Working, Done, Idle, Idle, Idle, Blocked, Working, Done,
+            ],
+            &[Blocked, Working, Done, Idle, Idle, Idle, Blocked],
+        ),
+    );
+    let nested_tabs = phone_switcher(
+        &format!("{}row_gap = 1\n", tabs_config("all")),
+        phone_tabs_snapshot(),
+    );
+    for mut state in [two_row_agents, nested_tabs] {
+        state.compose(60, 14).expect("phone switcher");
+        let max_scroll = state.hits.mobile_max_scroll;
+        assert!(max_scroll > 0);
+        for scroll in 0..=max_scroll {
+            state.mobile_switcher_scroll = scroll;
+            state.compose(60, 14).expect("phone switcher");
+            let hits = &state.hits.mobile_targets;
+            for (index, (rect, _)) in hits.iter().enumerate() {
+                for (other, _) in &hits[index + 1..] {
+                    assert!(
+                        rect.intersection(*other).is_empty(),
+                        "scroll {scroll}: {rect:?} overlaps {other:?}"
+                    );
+                }
+                let list_row = rect.y > BADGE_RULE_ROW && rect.bottom() <= 13;
+                // A list row is 59 columns wide; only a badge is narrower on these rows.
+                let badge = rect.height == 1
+                    && rect.width < 59
+                    && (rect.y == BADGE_RULE_ROW || rect.y == 13);
+                assert!(list_row || badge, "scroll {scroll}: {rect:?}");
+            }
+        }
+    }
+}
+
+/// The `+N` a `list` badge shows on `row`, if it has one.
+fn hidden_on(frame: &FrameData, row: u16, list: &str) -> usize {
+    row_after(frame, row, &format!("{list} +"))
+        .and_then(|badge| {
+            badge
+                .trim_start_matches(&format!("{list} +"))
+                .split(' ')
+                .next()
+                .and_then(|count| count.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+#[test]
+fn zellij_phone_spaces_badges_ignore_nested_tabs_and_gaps() {
+    let config = format!("{}row_gap = 1\n", tabs_config("all"));
+    let mut state = phone_switcher(&config, phone_tabs_snapshot());
+    state.compose(60, 10).expect("phone switcher");
+    for scroll in 0..=state.hits.mobile_max_scroll {
+        state.mobile_switcher_scroll = scroll;
+        let frame = state.compose(60, 10).expect("phone switcher");
+        let list_rows = (BADGE_RULE_ROW + 1)..9;
+        let drawn = state
+            .hits
+            .mobile_targets
+            .iter()
+            .filter(|(rect, target)| {
+                list_rows.contains(&rect.y)
+                    && matches!(target, ClientMobileTarget::Workspace { .. })
+            })
+            .count();
+        assert_eq!(
+            hidden_on(&frame, BADGE_RULE_ROW, "spaces") + drawn + hidden_on(&frame, 9, "spaces"),
+            3,
+            "scroll {scroll}: {:#?}",
+            frame_rows(&frame)
+        );
+    }
+}
+
+#[test]
+fn zellij_phone_top_badges_share_the_rule_and_tap_to_the_nearest_urgent_item() {
+    use AgentStatus::{Blocked, Idle};
+    let mut state = badge_switcher(
+        BADGE_CONFIG,
+        badge_snapshot(
+            &[Idle, Blocked, Idle, Blocked, Idle],
+            &[Blocked, Idle, Idle],
+        ),
+    );
+    // Past the 5 agents and ws_agents, ws_1 and ws_2: the first row is ws_3.
+    state.mobile_switcher_scroll = 1 + 5 + 2 + 3;
+    let frame = state.compose(60, 8).expect("phone switcher");
+    assert_eq!(
+        row_after(&frame, BADGE_RULE_ROW, "agents").as_deref(),
+        Some("agents +5 ◉² spaces +3 ◉²")
+    );
+    let badges = badges_on(&state, BADGE_RULE_ROW);
+    assert_eq!(badges.len(), 2);
+    assert_eq!(badges[0].0.right(), 60);
+    assert_eq!(badges[1].0.right(), badges[0].0.x);
+    let spaces = state.handle_raw_events(vec![tap(badges[0].0)]);
+    assert!(spaces.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(
+                &request.method,
+                crate::api::schema::Method::WorkspaceFocus(params)
+                    if params.workspace_id == "ws_1"
+            )
+    )));
+
+    state.mode = ClientShellMode::Navigate;
+    state.compose(60, 8).expect("phone switcher");
+    let (rect, _) = badges_on(&state, BADGE_RULE_ROW)[1].clone();
+    let agents = state.handle_raw_events(vec![tap(rect)]);
+    assert!(agents.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(
+                &request.method,
+                crate::api::schema::Method::PaneFocus(params) if params.pane_id == "pane_4"
+            )
+    )));
+}
+
+/// A switcher with `local` locally and `remote` on an SSH machine in `status`.
+fn two_machine_badges(
+    local: ClientShellSnapshot,
+    mut remote: ClientShellSnapshot,
+    status: ClientEndpointStatus,
+) -> (ClientShellState, ClientEndpointId) {
+    let mut state = badge_switcher(BADGE_CONFIG, local);
+    let profile = crate::client::endpoint::SavedSshEndpoint {
+        id: crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        label: "build".into(),
+        target: "build".into(),
+        session: "agents".into(),
+        enabled: true,
+    };
+    let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    remote.boot_id = "remote-boot".into();
+    state.set_endpoint_status(&endpoint_id, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
+    state.set_endpoint_status(&endpoint_id, status);
+    (state, endpoint_id)
+}
+
+#[test]
+fn zellij_phone_badges_skip_a_machine_that_is_not_online() {
+    use AgentStatus::{Blocked, Idle, Working};
+    let mut local = vec![Idle; 7];
+    local.extend([Idle, Working]);
+    let (mut state, _) = two_machine_badges(
+        badge_snapshot(&local, &[Idle]),
+        badge_snapshot(&[Blocked, Blocked], &[Blocked]),
+        ClientEndpointStatus::Reconnecting,
+    );
+    let frame = state.compose(60, 14).expect("phone switcher");
+    let (rect, target) = badges_on(&state, 13)
+        .into_iter()
+        .find(|(_, target)| matches!(target, ClientMobileTarget::Agent { .. }))
+        .expect("agents badge");
+    assert!(
+        row_after(&frame, 13, "agents").is_some_and(|badge| badge.starts_with("agents +5 ◐¹")),
+        "{:?}",
+        frame_rows(&frame)[13]
+    );
+    assert!(matches!(
+        target,
+        ClientMobileTarget::Agent { endpoint_id: ClientEndpointId::Local, pane_id } if pane_id == "pane_9"
+    ));
+    let picked = state.handle_raw_events(vec![tap(rect)]);
+    assert!(!picked.actions.is_empty());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+}
+
+#[test]
+fn zellij_phone_offline_machine_adds_nothing_to_the_badges() {
+    use AgentStatus::{Blocked, Idle};
+    let (mut state, _) = two_machine_badges(
+        badge_snapshot(&[Idle], &[Idle]),
+        badge_snapshot(&[Blocked; 12], &[]),
+        ClientEndpointStatus::Reconnecting,
+    );
+    let frame = state.compose(60, 12).expect("phone switcher");
+    assert!(
+        row_after(&frame, 11, "agents").is_none(),
+        "{:#?}",
+        frame_rows(&frame)
+    );
+    assert_eq!(hidden_on(&frame, 11, "spaces"), 2, "the local spaces only");
+    assert!(frame_rows(&frame)[11].starts_with('─'));
+}
+
+#[test]
+fn zellij_phone_badges_skip_every_machine_that_is_not_online() {
+    use AgentStatus::{Blocked, Working};
+    let (mut state, endpoint_id) = two_machine_badges(
+        badge_snapshot(&[Blocked; 12], &[Blocked]),
+        badge_snapshot(&[Working; 12], &[Working]),
+        ClientEndpointStatus::Online,
+    );
+    state.mark_endpoint_disconnected(&ClientEndpointId::Local);
+    let frame = state.compose(60, 14).expect("local down");
+    let badges = badges_on(&state, 13);
+    assert!(!badges.is_empty(), "the online machine keeps its badges");
+    assert!(
+        badges.iter().all(|(_, target)| matches!(
+            target,
+            ClientMobileTarget::Agent { endpoint_id: id, .. }
+                | ClientMobileTarget::Workspace { endpoint_id: id, .. } if id == &endpoint_id
+        )),
+        "{badges:?}"
+    );
+    assert!(
+        !frame_rows(&frame)[13].contains('◉'),
+        "{:?}",
+        frame_rows(&frame)[13]
+    );
+
+    let (mut state, endpoint_id) = two_machine_badges(
+        badge_snapshot(&[Blocked; 2], &[Blocked]),
+        badge_snapshot(&[Working; 12], &[Working]),
+        ClientEndpointStatus::Online,
+    );
+    state.active_endpoint_id = endpoint_id.clone();
+    state.set_endpoint_status(&endpoint_id, ClientEndpointStatus::Reconnecting);
+    state.compose(60, 14).expect("active remote down");
+    assert!(state.hits.mobile_max_scroll > 0);
+    let badges = badges_on(&state, 13);
+    assert!(!badges.is_empty(), "the online machine keeps its badges");
+    assert!(badges.iter().all(|(_, target)| !matches!(
+        target,
+        ClientMobileTarget::Agent { endpoint_id: id, .. }
+            | ClientMobileTarget::Workspace { endpoint_id: id, .. } if id == &endpoint_id
+    )));
+}
+
+#[test]
+fn zellij_phone_error_bar_drops_the_badge_targets_it_covers() {
+    use AgentStatus::Idle;
+    let mut state = badge_switcher(BADGE_CONFIG, badge_snapshot(&[Idle; 9], &[Idle]));
+    state.compose(60, 12).expect("phone switcher");
+    assert!(!badges_on(&state, 11).is_empty());
+
+    state.set_endpoint_error("boom");
+    let frame = state.compose(60, 12).expect("error bar");
+    assert!(frame_rows(&frame)[11].contains("boom"));
+    assert!(badges_on(&state, 11).is_empty());
+}
+
+#[test]
+fn upstream_style_keeps_the_target_under_the_error_bar() {
+    let config = "[ui]\nagent_panel_sort = \"spaces\"\n";
+    let mut state = phone_switcher(config, badge_snapshot(&[AgentStatus::Idle; 12], &[]));
+    state.set_endpoint_error("boom");
+    state.compose(60, 12).expect("error bar");
+    assert!(state
+        .hits
+        .mobile_targets
+        .iter()
+        .any(|(rect, _)| rect.bottom() == 12));
+}
+
+#[test]
+fn zellij_phone_notice_takes_the_tap_before_the_badge_under_it() {
+    use AgentStatus::Idle;
+    let mut state = badge_switcher(BADGE_CONFIG, badge_snapshot(&[Idle; 9], &[Idle]));
+    state.compose(60, 12).expect("phone switcher");
+    state.receive_endpoint_unavailable("build is not ready".to_owned());
+    state.compose(60, 12).expect("notice up");
+    let (rect, _) = badges_on(&state, 11)[0].clone();
+    let dismissed = state.handle_raw_events(vec![tap(rect)]);
+    assert!(state.visible_endpoint_notice.is_none());
+    assert!(dismissed.actions.is_empty(), "{:?}", dismissed.actions);
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+}
+
+#[test]
+fn zellij_phone_one_row_list_draws_no_badges() {
+    use AgentStatus::Blocked;
+    let mut state = badge_switcher(BADGE_CONFIG, badge_snapshot(&[Blocked; 9], &[Blocked]));
+    state.mobile_switcher_scroll = 3;
+    state.compose(60, 4).expect("one list row");
+    assert!(badges_on(&state, BADGE_RULE_ROW).is_empty());
+    state.compose(60, 5).expect("two list rows");
+    assert!(!badges_on(&state, BADGE_RULE_ROW).is_empty());
+}
+
+#[test]
+fn zellij_phone_connection_banner_keeps_the_rule_row_free_of_taps() {
+    use AgentStatus::Idle;
+    let mut state = badge_switcher(BADGE_CONFIG, badge_snapshot(&[Idle; 9], &[Idle]));
+    state.mobile_switcher_scroll = 4;
+    state.compose(60, 12).expect("phone switcher");
+    assert!(!badges_on(&state, BADGE_RULE_ROW).is_empty());
+
+    state.mark_endpoint_disconnected(&ClientEndpointId::Local);
+    let frame = state.compose(60, 12).expect("banner up");
+    assert!(frame_rows(&frame)[usize::from(BADGE_RULE_ROW)].contains("reconnecting"));
+    assert!(badges_on(&state, BADGE_RULE_ROW).is_empty());
+}
+
+#[test]
+fn zellij_phone_one_column_reserves_no_badge_row() {
+    let mut state = phone_switcher(BADGE_CONFIG, badge_snapshot(&[AgentStatus::Idle; 9], &[]));
+    state.compose(1, 12).expect("one column");
+    let one_column = state.hits.mobile_max_scroll;
+    assert!(badges_on(&state, 11).is_empty());
+    state.compose(2, 12).expect("two columns");
+    assert_eq!(state.hits.mobile_max_scroll, one_column + 1);
 }

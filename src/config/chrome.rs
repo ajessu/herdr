@@ -48,7 +48,8 @@ pub enum SidebarStyleConfig {
     Upstream,
     /// A 7-column rail with attention markers, `+N` overflow badges that count
     /// waiting agents, and agent labels that dim once settled. The phone switcher
-    /// uses the same rows and nests tabs under each space on the active machine.
+    /// uses the same rows and badges, and nests tabs under each space on the active
+    /// machine.
     Zellij,
 }
 

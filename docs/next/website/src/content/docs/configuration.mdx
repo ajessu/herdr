@@ -503,7 +503,7 @@ Use `herdr workspace report-metadata` in the same way for custom Space tokens. U
 
 Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
-Sidebar row settings affect the expanded desktop sidebar and, with `ui.sidebar.style = "zellij"`, the phone switcher. In that style the switcher also lists each space's tabs beneath it on the active machine, and `show_tab_status` adds dots to those rows and to the phone header's tab text. The collapsed sidebar and the other sidebar styles on mobile keep their compact layouts.
+Sidebar row settings affect the expanded desktop sidebar and, with `ui.sidebar.style = "zellij"`, the phone switcher. In that style the switcher also lists each space's tabs beneath it on the active machine, and `show_tab_status` adds dots to those rows and to the phone header's tab text. When the switcher does not fit, `+N` badges on the rule above and below the list count the agents and spaces scrolled out of view, leaving out machines that are not connected. Tap one to focus the most urgent item, or the nearest if none needs attention. While the active machine is not online, its connection status replaces the badges above the list. The collapsed sidebar and the other sidebar styles on mobile keep their compact layouts.
 
 ## Notifications
 

@@ -651,6 +651,12 @@ impl ClientShellState {
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         if let Some(bar) = mode_bar {
             occlusion.cover(bar);
+            // Fork: the error bar covers the phone switcher's last row, so nothing there is tappable.
+            if super::sidebar_chrome::zellij(&self.config) {
+                self.hits
+                    .mobile_targets
+                    .retain(|(rect, _)| !rect.intersects(bar));
+            }
         }
         if let Some(overlay) = self.overlay.as_ref() {
             let mut composed = frame.to_ratatui_buffer()?;

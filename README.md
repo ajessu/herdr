@@ -64,8 +64,10 @@ show_tab_status = "all"   # or "attention"
   The phone switcher draws its agent and space rows with the same `[ui.sidebar.agents]`
   and `[ui.sidebar.spaces]` rows, divider, highlight and `row_gap`. Each space on the
   active machine lists its tabs beneath it, with `ui.show_tab_status` dots, in place of
-  the separate tabs section, and `+ new tab` sits under the current space. The phone
-  header shows the focused tab's dot under the same setting.
+  the separate tabs section, and `+ new tab` sits under the current space. `+N` badges
+  at the switcher's edges count the agents and spaces scrolled out of view on connected
+  machines, and tapping one focuses the most urgent or else the nearest. The phone header
+  shows the focused tab's dot under `ui.show_tab_status`.
 - **nested-launch and remote hygiene**: `experimental.allow_nested` defaults to `true`
   with a same-server recursion guard (rather than blocking all nesting), and
   remote/tunnel subprocesses have every `HERDR_*` runtime env var scrubbed, not just the

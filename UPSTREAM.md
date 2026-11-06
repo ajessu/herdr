@@ -203,6 +203,14 @@ fails: agent hooks, the statusLine wrapper, and plugin commands.
   active machine. On each sync, diff upstream's `mobile_items` agent, space and tabs
   bodies against `mobile_rows.rs`. Under the same gate `render_header_status` draws the
   focused tab's dot, so re-check it if upstream reshapes the tab text.
+- **The phone switcher's badges take the rule row and its last row.** Under the same
+  gate, `render_mobile_switcher` calls `split_badge_row` right after counting the rows
+  and `render_switcher_badges` before its item loop, both in `mobile_rows.rs`. They rely
+  on the rule row holding no tap target, and leave it to the connection banner while the
+  active machine is offline. The last row is also painted by `restore_mode_bar`, whose
+  error bar drops the targets it covers in `compose`, and by the notice banner, one row
+  higher while the active machine is offline, whose tap is handled first. On each sync, re-check both calls and anything upstream draws on
+  those two rows.
 - **The phone header's second row doubles as the hint row.** `hint_row` in
   `src/client/shell/hint_bar.rs` picks it per frame, because `layout()` must not depend
   on the mode, and takes its width from `header_status_area`, split out of upstream's

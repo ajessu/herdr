@@ -284,7 +284,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Sidebar style: "upstream" or "zellij" (7-column rail with attention markers, +N overflow
 # badges that count waiting agents, and agent labels that dim once settled). The zellij
-# style also nests tabs under each space on the active machine in the phone switcher.
+# style also nests tabs under each space on the active machine in the phone switcher,
+# which gets +N badges for the agents and spaces scrolled out of view.
 # sidebar.style = "upstream"
 
 # Terminal width at or below which Herdr uses the mobile single-column layout.

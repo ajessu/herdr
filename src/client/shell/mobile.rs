@@ -468,6 +468,8 @@ pub(super) fn render_mobile_switcher(
         viewport.width.saturating_sub(1),
     );
     let total_rows = items.iter().map(|item| item.lines.len()).sum::<usize>();
+    // Fork: under the zellij style an overflowing list leaves a row for its badges.
+    let (viewport, badge_row) = super::mobile_rows::split_badge_row(viewport, total_rows, config);
     let max_scroll = total_rows.saturating_sub(usize::from(viewport.height));
     *scroll = (*scroll).min(max_scroll);
     if *reveal_workspace {
@@ -516,6 +518,18 @@ pub(super) fn render_mobile_switcher(
 
     let viewport_start = *scroll;
     let viewport_end = viewport_start.saturating_add(usize::from(viewport.height));
+    // Fork: badges for what is scrolled out of view.
+    super::mobile_rows::render_switcher_badges(
+        buffer,
+        Rect::new(area.x, rule_y, area.width, 1),
+        badge_row,
+        &items,
+        viewport_start..viewport_end,
+        endpoints,
+        active_endpoint_id,
+        palette,
+        hits,
+    );
     let mut document_row = 0usize;
     for item in items {
         let item_start = document_row;
