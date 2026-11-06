@@ -48,7 +48,10 @@ show_tab_status = "all"   # or "attention"
 - **stacked panes**: group panes into a stack within a split (`Node::Stack`), with
   `pane.stack`/`pane.unstack` API methods, keybinds, resize, and persistence.
 - **contextual hint bar** (`ui.hint_bar`): a zellij-style row below the panes showing the
-  active mode's keys from the live keymap, with an Alt-shortcut section.
+  active mode's keys from the live keymap, with an Alt-shortcut section. On the phone
+  layout it takes the header's second row while a mode is active or an error shows, so
+  the mode bar no longer covers the last pane line, except below 23 columns, where the
+  row is too narrow. The agent summary returns afterwards.
 - **zellij-style tab bar** (`ui.tabs.style`): Powerline tiles centered on the active tab,
   `+N` overflow tiles that count hidden blocked/working/finished agents and jump to the
   most urgent one, per-tab status dots (`ui.show_tab_status`), middle-click close,

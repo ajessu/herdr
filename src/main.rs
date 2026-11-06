@@ -356,6 +356,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # tab_bar_position = "top"
 
 # Contextual hint bar below the panes: the current mode and its keys.
+# On the phone layout it shows in the header while a mode is active or an error shows.
 # "full" shows every hint that fits, "compact" the four most important, "off" none.
 # hint_bar = "off"
 # tabs.powerline = true   # Powerline wedges between hint tiles and zellij tabs (needs a Nerd Font)

@@ -1107,7 +1107,8 @@ pub struct UiConfig {
     pub hide_tab_bar_when_single_tab: bool,
     /// Desktop tab row placement. Default: top.
     pub tab_bar_position: TabBarPositionConfig,
-    /// Fork: contextual hint bar below the panes: "full", "compact", or "off". Default: off.
+    /// Fork: contextual hint bar below the panes, or in the phone header while a mode is
+    /// active or an error shows: "full", "compact", or "off". Default: off.
     pub hint_bar: HintBarStyleConfig,
     /// Fork: tab and hint-bar styling.
     pub tabs: TabsConfig,

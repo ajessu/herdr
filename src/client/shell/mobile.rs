@@ -59,18 +59,26 @@ pub(super) fn render_mobile_header(
     }
     let palette = &config.palette;
     buffer.set_style(area, Style::default().bg(palette.panel_bg));
-    let button_width = MOBILE_BUTTON_WIDTH.min(area.width);
-    let button = Rect::new(
-        area.right().saturating_sub(button_width),
-        area.y,
-        button_width,
-        area.height,
-    );
+    let button = header_button_area(area);
     hits.mobile_switch = button;
-    let status_width = button.x.saturating_sub(area.x).saturating_sub(1);
-    let status = Rect::new(area.x, area.y, status_width, area.height);
-    render_header_status(buffer, status, snapshot, config);
+    render_header_status(buffer, header_status_area(area), snapshot, config);
     render_header_button(buffer, button, snapshot, config);
+}
+
+fn header_button_area(area: Rect) -> Rect {
+    let width = MOBILE_BUTTON_WIDTH.min(area.width);
+    Rect::new(
+        area.right().saturating_sub(width),
+        area.y,
+        width,
+        area.height,
+    )
+}
+
+pub(super) fn header_status_area(area: Rect) -> Rect {
+    let button = header_button_area(area);
+    let width = button.x.saturating_sub(area.x).saturating_sub(1);
+    Rect::new(area.x, area.y, width, area.height)
 }
 
 fn render_header_status(

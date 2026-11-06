@@ -1,13 +1,13 @@
 //! Fork: the contextual hint bar, a fixed row below the panes that shows the
-//! current mode and its keys (zellij-style).
+//! current mode and its keys (zellij-style). The phone layout has no such row
+//! and borrows the header's second row while a mode is active or an error shows.
 //!
-//! The row's height depends only on config and terminal size, never on the
-//! mode: mode changes repaint without resizing, and the surface-patch fast path
-//! assumes the pane rect stays put.
+//! The pane rect never depends on the mode: mode changes repaint without
+//! resizing, and the surface-patch fast path assumes the pane rect stays put.
 //!
 //! Tiles, section prefixes and width fitting are ported from the fork's
 //! pre-v0.9.0 `src/ui/hint_bar.rs`; the hint sets are built from the live
-//! keymap, so every configured key shows.
+//! keymap, so each action shows its first configured key.
 
 use std::borrow::Cow;
 
@@ -16,6 +16,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Clear, Widget},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -23,7 +24,15 @@ use crate::app::state::Palette;
 use crate::config::{ActionKeybinds, HintBarStyleConfig, Keybinds, StickyMode};
 
 use super::modal::ModalMode;
-use super::{ClientShellMode, ClientShellState};
+use super::{ClientShellLayout, ClientShellMode, ClientShellState};
+
+/// The narrowest header row worth borrowing: the longest badge it can show, or
+/// the copy prompt with a few cells of query. Narrower phones keep the mode bar.
+const HEADER_ROW_MIN_WIDTH: u16 = 12;
+
+const UPDATE_READY: &str = " update ready";
+/// The narrowest row that fits the notice beside the badge and the exit tile.
+const UPDATE_READY_MIN_ROW_WIDTH: u16 = 37;
 
 /// Take the hint row off the bottom of the pane region. Returns the remaining
 /// pane rect and the hint row, which is empty when the bar is off or the panes
@@ -43,10 +52,37 @@ pub(super) fn reserve_row(style: HintBarStyleConfig, panes: Rect) -> (Rect, Rect
 }
 
 impl ClientShellState {
+    /// Where this frame's hint row goes. The phone layout has no row of its
+    /// own, so a mode borrows the header's second status row from the agent
+    /// summary. Empty when there is nothing to say, in Navigate (the switcher
+    /// covers the header), under an overlay (it takes the keys), or when the
+    /// header has no such row.
+    pub(super) fn hint_row(&self, layout: ClientShellLayout) -> Rect {
+        if layout.mobile_header.is_empty() || self.config.hint_bar == HintBarStyleConfig::Off {
+            return layout.hint_bar;
+        }
+        let in_mode = self.mode != ClientShellMode::Terminal
+            || self.modal_locked
+            || self.endpoint_error.is_some();
+        let hidden = self.mode == ClientShellMode::Navigate || self.overlay.is_some();
+        let status = super::mobile::header_status_area(layout.mobile_header);
+        if !in_mode || hidden || status.height < 2 || status.width < HEADER_ROW_MIN_WIDTH {
+            return Rect::default();
+        }
+        Rect::new(status.x, status.y + 1, status.width, 1)
+    }
+
     /// Paint the hint row. Copy mode and endpoint errors keep upstream's mode
     /// bar (it carries the live search prompt and the error text), drawn in
     /// the hint row instead of over the panes.
-    pub(super) fn render_hint_row(&self, buffer: &mut Buffer, area: Rect, update_ready: bool) {
+    pub(super) fn render_hint_row(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        update_ready: bool,
+        exit_first: bool,
+    ) {
+        Clear.render(area, buffer);
         if self.endpoint_error.is_some() || self.mode == ClientShellMode::Copy {
             super::render::render_mode_bar(
                 buffer,
@@ -60,37 +96,43 @@ impl ClientShellState {
             );
             return;
         }
-        let hint_set = hints(
+        let mut hint_set = hints(
             self.mode,
             self.modal_locked,
             &self.config.keybinds.keybinds,
             &self.config.keybinds.prefix,
         );
+        if exit_first {
+            move_exit_first(&mut hint_set);
+        }
+        let session = matches!(
+            self.mode,
+            ClientShellMode::Navigate | ClientShellMode::Modal(ModalMode::Session)
+        );
+        let notice_width = if session && update_ready && area.width >= UPDATE_READY_MIN_ROW_WIDTH {
+            UPDATE_READY.width() as u16
+        } else {
+            0
+        };
         let line = build_hint_line(
             &hint_set,
             self.config.hint_bar,
             &self.config.palette,
-            area.width,
+            area.width - notice_width,
             self.config.powerline,
         );
         let palette = &self.config.palette;
         buffer.set_style(area, Style::default().bg(palette.panel_bg));
         buffer.set_line(area.x, area.y, &line, area.width);
 
-        let session = matches!(
-            self.mode,
-            ClientShellMode::Navigate | ClientShellMode::Modal(ModalMode::Session)
-        );
-        if session && update_ready {
-            let text = " update ready";
-            let width = (text.width() as u16).min(area.width);
-            let status = Rect::new(area.right() - width, area.y, width, 1);
+        if notice_width > 0 {
+            let status = Rect::new(area.right() - notice_width, area.y, notice_width, 1);
             buffer.set_style(status, Style::default().bg(palette.panel_bg));
             buffer.set_stringn(
                 status.x,
                 status.y,
-                text,
-                usize::from(width),
+                UPDATE_READY,
+                usize::from(notice_width),
                 Style::default()
                     .fg(palette.accent)
                     .bg(palette.panel_bg)
@@ -127,6 +169,15 @@ pub(super) struct HintSet {
     pub(super) badge: Badge,
     pub(super) hints: Vec<Hint>,
     pub(super) alt_hints: Vec<Hint>,
+}
+
+/// A phone row fits a tile or two, so the way out of a mode can't wait its turn.
+fn move_exit_first(set: &mut HintSet) {
+    if let Some(index) = set.hints.iter().position(|hint| hint.key == "esc") {
+        let mut exit = set.hints.remove(index);
+        exit.priority = 0;
+        set.hints.insert(0, exit);
+    }
 }
 
 fn sanitize_key(s: &str) -> Cow<'_, str> {
@@ -210,7 +261,8 @@ fn joined(labels: impl IntoIterator<Item = Option<String>>) -> Option<String> {
     (!labels.is_empty()).then(|| labels.join("/"))
 }
 
-/// The hints for the current mode. `locked` only matters in `Terminal`.
+/// The hints for the current mode. `locked` only changes what `Terminal` shows:
+/// `render_hint_row` draws `Copy` with the mode bar.
 pub(super) fn hints(
     mode: ClientShellMode,
     locked: bool,
@@ -1036,6 +1088,34 @@ mod tests {
         assert!(
             text.contains("ctrl+"),
             "modifier stays visible in tier 3: {text}"
+        );
+    }
+
+    #[test]
+    fn exit_first_leads_both_styles_and_moves_one_tile() {
+        let mut set = set_for(ClientShellMode::Modal(ModalMode::Pane));
+        move_exit_first(&mut set);
+        for style in [HintBarStyleConfig::Full, HintBarStyleConfig::Compact] {
+            let text = text(&render(&set, style, 200, true));
+            assert_eq!(text.find('<'), text.find("<esc>"), "{text}");
+        }
+
+        let mut set = HintSet {
+            badge: badge(),
+            hints: vec![hint("w", "nav"), hint("esc", "cancel"), hint("esc", "send")],
+            alt_hints: Vec::new(),
+        };
+        move_exit_first(&mut set);
+        assert_eq!(labels(&set), vec!["cancel", "nav", "send"]);
+    }
+
+    #[test]
+    fn degradation_tier3_keeps_the_desktop_tile_order() {
+        let set = set_for(ClientShellMode::Modal(ModalMode::Pane));
+        let text = text(&render(&set, HintBarStyleConfig::Full, 49, true));
+        assert!(
+            text.contains("<h/j/k/l>") && !text.contains("<esc>"),
+            "{text}"
         );
     }
 

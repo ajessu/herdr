@@ -66,7 +66,7 @@ pub(super) struct ClientShellLayout {
     pub tab_bar: Rect,
     pub mobile_header: Rect,
     pub pane_surface: Rect,
-    /// Fork: the hint bar row; empty when the bar is off.
+    /// Fork: the hint bar row; empty when the bar is off and on the phone layout.
     pub hint_bar: Rect,
 }
 
@@ -1895,7 +1895,11 @@ impl ClientShellState {
     /// Every assignment must go through this setter so a repeated identical
     /// message gets a fresh deadline instead of inheriting the previous one.
     pub(super) fn set_endpoint_error(&mut self, message: impl Into<String>) {
-        self.endpoint_error = Some(message.into());
+        let message = message.into();
+        if self.endpoint_error.as_deref() != Some(message.as_str()) {
+            tracing::warn!(%message, "client action error");
+        }
+        self.endpoint_error = Some(message);
         self.endpoint_error_deadline = Some(
             std::time::Instant::now() + std::time::Duration::from_secs(ENDPOINT_ERROR_TIMEOUT_SECS),
         );

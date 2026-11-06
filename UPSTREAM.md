@@ -203,6 +203,13 @@ fails: agent hooks, the statusLine wrapper, and plugin commands.
   active machine. On each sync, diff upstream's `mobile_items` agent, space and tabs
   bodies against `mobile_rows.rs`. Under the same gate `render_header_status` draws the
   focused tab's dot, so re-check it if upstream reshapes the tab text.
+- **The phone header's second row doubles as the hint row.** `hint_row` in
+  `src/client/shell/hint_bar.rs` picks it per frame, because `layout()` must not depend
+  on the mode, and takes its width from `header_status_area`, split out of upstream's
+  `render_mobile_header`. `compose` paints over the agent summary already drawn there,
+  and checks `hint_row` before the overlay guard. If upstream changes when the switcher
+  covers the header, re-check `hint_row`'s `hidden`. `set_endpoint_error` also logs the
+  message, because the row cuts long errors; keep that line when syncing `state.rs`.
 - **A CST/AST-based settings.json editor is genuinely upstream's, not the fork's**
   (`d742e515 fix: preserve claude settings formatting (#2089)`, `src/integration/
   claude_settings.rs`). Any future settings.json-editing fork feature (e.g. more
