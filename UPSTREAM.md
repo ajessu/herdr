@@ -350,6 +350,23 @@ fails: agent hooks, the statusLine wrapper, and plugin commands.
   `v0.9.4` change makes one obsolete.
 - **Rollout notes**: build with `ZIG=~/.zvm/0.16.0/zig`. No new `config.toml` keys.
   Hand off from the fork `v0.9.3` server and keep its binary for back-out.
+- **Rollout state (2026-10-13)**:
+  - **Done:** `main`/`update` force-pushed to `eda5ae0a`. The handoff from fork
+    `v0.9.3` to fork `v0.9.4` was rehearsed on a throwaway server. Pane ids, `sleep` PIDs
+    and a `Node::Stack` all survived. `~/.local/bin/herdr` is now `v0.9.4`; the old
+    binary is `~/.local/bin/herdr.fork-0.9.3`, and the config backup is
+    `config.toml.pre-v0.9.4.bak`.
+  - **Sessions:** `astro` (2 panes), `gz` (41) and `p` (53) were live-handed off, with
+    identical pane-id lists before and after. `g` was a dead socket. `herdr config check`
+    passed with the fork keys unchanged, both `claude-statusline` wrappers were current,
+    and agent statuses were reported in every session. The shared checkout was clean,
+    with no session running in it, and was moved to the new `origin/main`.
+  - **Pending:** nothing.
+- **Rehearsal gotchas**: the throwaway server's socket path must be short. Under the
+  scratchpad it overflowed `sun_path`, so use something like `/tmp/claude-1000/hr`.
+  Expand `~` before overriding `HOME`. In a fresh `HOME`, the first `pane run` can lose
+  its first character while zsh starts up, so check that the `sleep`s are really
+  running.
 
 ### 2026-10-09 — upstream sync to v0.9.3 (routine rebase)
 
