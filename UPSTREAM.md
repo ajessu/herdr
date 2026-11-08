@@ -287,6 +287,40 @@ fails: agent hooks, the statusLine wrapper, and plugin commands.
 
 <!-- Append one entry per session, most recent first. -->
 
+### 2026-11-08 — upstream sync to v0.9.5 (routine rebase)
+
+- **Target**: `v0.9.5`, 8 commits past `v0.9.4`. It is a fix release cut beside
+  `master`, so it is not an ancestor of `upstream/master`. Branch `sync/v0.9.5` in the
+  `../waves/herdr-update` worktree was taken from `origin/main` (`cb30947d`) and rebased
+  with `git rebase --onto v0.9.5 v0.9.4`. The old tip stays on `origin/main` until the
+  push. As before, the local upstream clone needed a fetch first.
+- **All 19 fork commits replayed with no conflicts. None were dropped or rebuilt.** That
+  is the 11 from the v0.9.4 sync plus 8 features landed since: the agents divider, the
+  phone rows, the tab marks, the active-tab colours and the ranked labels. Those 8 were
+  not squashed, since they had just landed. Two changes needed fixups:
+  - **Kitty plain text in Herdr-owned modes (#5277).** `host_text_commit` now commits
+    text only in `ClientShellMode::Terminal` with no overlay. The fork's sticky modes
+    are `Modal(..)`, so on a report-all kitty host a plain `n` in Pane mode now splits
+    the pane. Before, it typed `n` into the pane. Locked mode is `Terminal`, so it
+    still hands plain text over. New test:
+    `plain_text_in_a_sticky_mode_runs_the_binding_on_a_report_all_host`. It fails
+    without upstream's mode check.
+  - **`HERDR_TEST_CAPTURE`**: a new test-only var in a Windows hook test. It was added
+    to the `env.rs` drift-test exemptions.
+- **Validation**:
+  - Passed: `cargo fmt --check`, clippy with `-D warnings`, `just maintenance-test`,
+    `ui-hot-path-architecture-test`, `integration-assets-test`, `docs-contract-test` and
+    `config_reference_check.py`. All ran with `ZIG` set and `~/.bun/bin` on `PATH`.
+  - Full nextest: 4366 of 4366 passed, 14 skipped.
+  - Not run: `just windows-lint`, because the SDK is still not set up.
+- **README cross-check (step 8)**: done. The `v0.9.5` fixes cover Windows hooks and
+  remotes, Claude and Codex detection, and kitty prefix input. None of them overlaps a
+  README bullet or makes one obsolete.
+- **Rollout notes**: build with `ZIG=~/.zvm/0.16.0/zig`. No new `config.toml` keys.
+  Hand off from the fork `0.9.4` build at `cb30947d`. A handoff resets `done` statuses to
+  `idle` and drops the `pr`, `target` and `model` pane tokens, so save
+  `herdr api snapshot` for each session first.
+
 ### 2026-10-13 — upstream sync to v0.9.4 (routine rebase)
 
 - **Target**: `v0.9.4` (73 upstream commits past `v0.9.3`), branch `sync/v0.9.4` in the
