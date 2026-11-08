@@ -422,7 +422,7 @@ where
 
 /// Fork: `divider_token = "$name"` uses the custom row token syntax; the
 /// name is stored without its `$`.
-fn deserialize_divider_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+pub(crate) fn deserialize_divider_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -432,7 +432,10 @@ where
         .map_err(serde::de::Error::custom)
 }
 
-fn serialize_divider_token<S>(name: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+pub(crate) fn serialize_divider_token<S>(
+    name: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {

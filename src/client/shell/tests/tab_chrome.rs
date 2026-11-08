@@ -314,3 +314,46 @@ fn tab_dots_follow_show_tab_status_and_the_client_projection() {
     let row = top_row(&mut state, 106);
     assert!(!row.contains('●'), "{row}");
 }
+
+fn marked_agent(tab_id: &str, value: &str) -> ClientShellAgent {
+    ClientShellAgent {
+        pane_id: format!("pane_{tab_id}"),
+        workspace_id: "ws_1".into(),
+        tab_id: tab_id.into(),
+        name: None,
+        display_agent: Some("claude".into()),
+        agent: Some("claude".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: crate::api::schema::AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: vec![("agent_mark".into(), value.into())],
+        focused: false,
+    }
+}
+
+#[test]
+fn tab_mark_token_flags_tabs_with_a_marked_pane_in_both_styles() {
+    let mut projected = three_tabs(0);
+    projected.tabs[1].label = "two".into();
+    projected.tabs[2].label = "three".into();
+    // tab_2 is marked; tab_3's agent has the token but an empty value.
+    projected
+        .agents
+        .extend([marked_agent("tab_2", "⚑"), marked_agent("tab_3", "")]);
+    let mut state = zellij_shell(projected.clone());
+    assert!(!top_row(&mut state, 106).contains('⚑'), "off by default");
+
+    state.config.tab_mark_token = Some("agent_mark".into());
+    let row = top_row(&mut state, 106);
+    assert!(row.contains("⚑ two"), "{row}");
+    assert_eq!(row.matches('⚑').count(), 1, "{row}");
+
+    state.config.tab_style = crate::config::TabStyleConfig::Upstream;
+    state.config.tab_mark_glyph = "*".into();
+    let row = top_row(&mut state, 106);
+    assert!(row.contains("* two"), "{row}");
+    assert!(!row.contains("* three"), "{row}");
+}

@@ -1431,6 +1431,18 @@
           "description": "Draw Powerline wedges between zellij-style tabs and hint-bar tiles. Needs a Powerline or Nerd Font."
         },
         {
+          "key": "ui.tabs.mark_token",
+          "type": "string",
+          "default": "unset",
+          "description": "Custom $name pane metadata token that marks a tab: a tab with any pane holding a non-empty value shows mark_glyph before its name, in the theme accent (the label colour on the active tab)."
+        },
+        {
+          "key": "ui.tabs.mark_glyph",
+          "type": "string",
+          "default": "\"\u2691\"",
+          "description": "Glyph drawn on tabs marked by mark_token."
+        },
+        {
           "key": "ui.show_tab_status",
           "type": "enum",
           "default": "\"off\"",

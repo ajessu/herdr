@@ -27,6 +27,9 @@ pub(crate) struct ClientShellConfig {
     /// Fork: tab bar style and which agent states get a tab status dot.
     pub(super) tab_style: crate::config::TabStyleConfig,
     pub(super) tab_status: crate::config::TabStatusModeConfig,
+    /// Fork: pane token that marks a tab, and the glyph drawn for it.
+    pub(super) tab_mark_token: Option<String>,
+    pub(super) tab_mark_glyph: String,
     pub(super) sidebar_style: crate::config::SidebarStyleConfig,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,

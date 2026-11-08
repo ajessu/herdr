@@ -330,6 +330,14 @@ tabs.style = "zellij"
 show_tab_status = "attention"   # or "all"; "off" is the default
 ```
 
+Set `tabs.mark_token` to a custom `$name` pane metadata token to mark tabs: a tab with any pane holding a non-empty value for it shows `tabs.mark_glyph` (default `"⚑"`) before its name, in the theme accent, or the label colour on the active tab. It works in both tab styles. Pair it with a plugin that sets the token, such as agent-marks' `$agent_mark`.
+
+```toml
+[ui]
+tabs.mark_token = "$agent_mark"
+tabs.mark_glyph = "⚑"
+```
+
 Configure an ordered tmux-style status area at the right edge of the tab row:
 
 ```toml

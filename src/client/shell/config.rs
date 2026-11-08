@@ -125,6 +125,8 @@ impl ClientShellConfig {
             powerline: config.ui.tabs.powerline,
             tab_style: config.ui.tabs.style,
             tab_status: config.ui.show_tab_status,
+            tab_mark_token: config.ui.tabs.mark_token.clone(),
+            tab_mark_glyph: config.ui.tabs.mark_glyph.clone(),
             sidebar_style: config.ui.sidebar.style,
             spaces: config.ui.sidebar.spaces.clone(),
             agents: config.ui.sidebar.agents.clone(),
@@ -357,6 +359,8 @@ impl ClientShellConfig {
                 self.powerline = ui.tabs.powerline;
                 self.tab_style = ui.tabs.style;
                 self.tab_status = ui.show_tab_status;
+                self.tab_mark_token = ui.tabs.mark_token.clone();
+                self.tab_mark_glyph = ui.tabs.mark_glyph.clone();
                 self.sidebar_style = ui.sidebar.style;
                 self.spaces = ui.sidebar.spaces.clone();
                 self.agents = ui.sidebar.agents.clone();

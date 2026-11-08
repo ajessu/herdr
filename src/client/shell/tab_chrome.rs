@@ -60,10 +60,19 @@ pub(super) struct TabStatusDot {
     pub(super) style: Style,
 }
 
+/// Fork: the `ui.tabs.mark_token` glyph. Accent on inactive tabs; the active
+/// tab's background is the accent, so there it takes the label colour.
+#[derive(Debug, Clone)]
+struct TabMark {
+    glyph: String,
+    style: Style,
+}
+
 /// One tab's label model.
 #[derive(Debug, Clone)]
 struct TabChrome {
     status: Option<TabStatusDot>,
+    mark: Option<TabMark>,
     name: String,
     zoomed: bool,
     custom_label: bool,
@@ -86,20 +95,37 @@ impl TabChrome {
             .unwrap_or(0)
     }
 
+    /// Columns of the mark glyph plus its separating space, or 0.
+    fn mark_cols(&self) -> u16 {
+        self.mark
+            .as_ref()
+            .map(|mark| {
+                u16::try_from(mark.glyph.width())
+                    .unwrap_or(u16::MAX)
+                    .saturating_add(1)
+            })
+            .unwrap_or(0)
+    }
+
     fn display_width(&self) -> u16 {
         let name_w = u16::try_from(sanitize_display_name(&self.name).width()).unwrap_or(u16::MAX);
         let zoom_w: u16 = if self.zoomed { 2 } else { 0 };
         self.status_cols()
+            .saturating_add(self.mark_cols())
             .saturating_add(name_w)
             .saturating_add(zoom_w)
     }
 
-    /// ` [dot ]name[ Z]` padded to `rect_width`. Never truncated: an over-wide
+    /// ` [dot ][mark ]name[ Z]` padded to `rect_width`. Never truncated: an over-wide
     /// name is clipped at the rect, with no ellipsis (zellij).
     fn to_spans(&self, rect_width: u16) -> Vec<Span<'static>> {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(6);
         if let Some(ref dot) = self.status {
             spans.push(Span::styled(dot.glyph, dot.style));
+            spans.push(Span::raw(" "));
+        }
+        if let Some(ref mark) = self.mark {
+            spans.push(Span::styled(mark.glyph.clone(), mark.style));
             spans.push(Span::raw(" "));
         }
         spans.push(Span::raw(sanitize_display_name(&self.name).into_owned()));
@@ -136,10 +162,22 @@ pub(super) fn tab_status_dot(
     })
 }
 
-fn build_chromes(tabs: &[&ClientShellTab], config: &ClientShellConfig) -> Vec<TabChrome> {
+fn build_chromes(
+    tabs: &[&ClientShellTab],
+    marked: &HashSet<&str>,
+    config: &ClientShellConfig,
+) -> Vec<TabChrome> {
     tabs.iter()
         .map(|tab| TabChrome {
             status: tab_status_dot(tab.agent_status, config.tab_status, config),
+            mark: marked.contains(tab.tab_id.as_str()).then(|| TabMark {
+                glyph: config.tab_mark_glyph.clone(),
+                style: if tab.focused {
+                    Style::default()
+                } else {
+                    Style::default().fg(config.palette.accent)
+                },
+            }),
             name: tab.label.clone(),
             zoomed: tab.zoomed,
             custom_label: tab.custom_label,
@@ -518,6 +556,7 @@ pub(super) fn render_tabs(
     buffer: &mut Buffer,
     area: Rect,
     tabs: &[&ClientShellTab],
+    marked: &HashSet<&str>,
     config: &ClientShellConfig,
     hits: &mut ShellHitMap,
 ) {
@@ -527,7 +566,7 @@ pub(super) fn render_tabs(
     } else {
         SeparatorStyle::AlternatingBg
     };
-    let chromes = build_chromes(tabs, config);
+    let chromes = build_chromes(tabs, marked, config);
     let active = tabs.iter().position(|tab| tab.focused).unwrap_or(0);
     let mouse_chrome = config.mouse_capture;
     let view = compute_tab_bar_view(&chromes, active, area, mouse_chrome);
@@ -718,6 +757,7 @@ mod tests {
     fn chrome(name: &str) -> TabChrome {
         TabChrome {
             status: None,
+            mark: None,
             name: name.to_owned(),
             zoomed: false,
             custom_label: true,
@@ -869,6 +909,47 @@ mod tests {
     }
 
     #[test]
+    fn tab_mark_sits_after_the_dot_and_counts_toward_the_width() {
+        let mut tab = chrome("name");
+        let plain = tab.display_width();
+        tab.status = Some(TabStatusDot {
+            glyph: "●",
+            style: Style::default(),
+        });
+        tab.mark = Some(TabMark {
+            glyph: "⚑".into(),
+            style: Style::default(),
+        });
+        assert_eq!(tab.display_width(), plain + 4);
+        assert_eq!(text(&tab.to_spans(tab.display_width() + 2)), " ● ⚑ name ");
+    }
+
+    #[test]
+    fn tab_mark_is_accent_except_on_the_active_tab() {
+        let mut config = ClientShellConfig::from_config(&crate::config::Config::default());
+        config.palette = Palette::catppuccin();
+        let tabs: Vec<ClientShellTab> = (0..3)
+            .map(|i| ClientShellTab {
+                tab_id: format!("t{i}"),
+                workspace_id: "w".into(),
+                number: i + 1,
+                label: format!("tab{i}"),
+                custom_label: true,
+                zoomed: false,
+                focused: i == 0,
+                agent_status: AgentStatus::Idle,
+            })
+            .collect();
+        let refs: Vec<&ClientShellTab> = tabs.iter().collect();
+        let marked: HashSet<&str> = ["t0", "t1"].into_iter().collect();
+        let chromes = build_chromes(&refs, &marked, &config);
+        let style = |i: usize| chromes[i].mark.as_ref().map(|mark| mark.style.fg);
+        assert_eq!(style(0), Some(None), "active tab inherits the label colour");
+        assert_eq!(style(1), Some(Some(config.palette.accent)));
+        assert_eq!(style(2), None);
+    }
+
+    #[test]
     fn to_spans_orders_dot_name_zoom_and_never_truncates() {
         let mut tab = chrome("name");
         tab.zoomed = true;
@@ -939,7 +1020,14 @@ mod tests {
         let area = bar(width);
         let mut buffer = Buffer::empty(area);
         let mut hits = ShellHitMap::default();
-        render_tabs(&mut buffer, area, &refs, &config, &mut hits);
+        render_tabs(
+            &mut buffer,
+            area,
+            &refs,
+            &HashSet::new(),
+            &config,
+            &mut hits,
+        );
         (buffer, hits)
     }
 

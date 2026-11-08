@@ -21,12 +21,13 @@ pub(crate) fn render_tab_bar(
         .iter()
         .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
         .collect::<Vec<_>>();
+    let marked = marked_tab_ids(snapshot, config);
     if config.tab_style == crate::config::TabStyleConfig::Zellij {
         // Fork: zellij-style tabs; no scroll state, the window follows the active tab.
         *tab_scroll = 0;
         *reveal_focused_tab = false;
         let content = tab_bar_content_area(snapshot, area);
-        super::super::tab_chrome::render_tabs(buffer, content, &tabs, config, hits);
+        super::super::tab_chrome::render_tabs(buffer, content, &tabs, &marked, config, hits);
         if let Some(x) =
             tab_drag_insert_index.and_then(|index| tab_drop_indicator_x(hits, &tabs, index))
         {
@@ -46,7 +47,7 @@ pub(crate) fn render_tab_bar(
     let desired_widths = tabs
         .iter()
         .map(|tab| {
-            let label = tab_label(tab);
+            let label = tab_label(tab, &marked, config);
             display_width(&label).saturating_add(4).max(MIN_TAB_WIDTH)
         })
         .collect::<Vec<_>>();
@@ -114,7 +115,7 @@ pub(crate) fn render_tab_bar(
     let mut first_visible = None;
     let mut last_visible = None;
     for (index, tab) in tabs.iter().enumerate().skip(*tab_scroll) {
-        let name = tab_label(tab);
+        let name = tab_label(tab, &marked, config);
         let desired = desired_widths[index];
         let remaining = tab_right.saturating_sub(x);
         let width = desired.min(remaining);
@@ -393,12 +394,38 @@ fn max_tab_scroll(widths: &[u16], available: u16) -> usize {
     start
 }
 
-fn tab_label(tab: &ClientShellTab) -> String {
-    if tab.zoomed {
-        format!("{} Z", tab.label)
+/// Fork: tabs with a pane whose `ui.tabs.mark_token` value is non-empty.
+fn marked_tab_ids<'a>(
+    snapshot: &'a ClientShellSnapshot,
+    config: &ClientShellConfig,
+) -> HashSet<&'a str> {
+    let Some(token) = config.tab_mark_token.as_deref() else {
+        return Default::default();
+    };
+    snapshot
+        .agents
+        .iter()
+        .filter(|agent| {
+            agent
+                .tokens
+                .iter()
+                .any(|(name, value)| name == token && !value.is_empty())
+        })
+        .map(|agent| agent.tab_id.as_str())
+        .collect()
+}
+
+fn tab_label(tab: &ClientShellTab, marked: &HashSet<&str>, config: &ClientShellConfig) -> String {
+    // Fork: the mark glyph leads, as in the zellij-style bar.
+    let mut label = if marked.contains(tab.tab_id.as_str()) {
+        format!("{} {}", config.tab_mark_glyph, tab.label)
     } else {
         tab.label.clone()
+    };
+    if tab.zoomed {
+        label.push_str(" Z");
     }
+    label
 }
 
 #[cfg(test)]

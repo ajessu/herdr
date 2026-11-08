@@ -62,6 +62,16 @@ pub struct TabsConfig {
     /// Draw Powerline wedges (U+E0B0) between zellij-style tabs and hint-bar tiles.
     /// Needs a Powerline or Nerd Font. Default: true.
     pub powerline: bool,
+    /// Fork: custom `$name` pane token that marks a tab: a tab with any pane
+    /// holding a non-empty value shows `mark_glyph` before its name.
+    #[serde(
+        deserialize_with = "super::sidebar::deserialize_divider_token",
+        serialize_with = "super::sidebar::serialize_divider_token",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mark_token: Option<String>,
+    /// Fork: the glyph drawn for `mark_token`. Default: "⚑".
+    pub mark_glyph: String,
 }
 
 impl Default for TabsConfig {
@@ -69,6 +79,8 @@ impl Default for TabsConfig {
         Self {
             style: TabStyleConfig::Upstream,
             powerline: true,
+            mark_token: None,
+            mark_glyph: "⚑".to_owned(),
         }
     }
 }
@@ -106,6 +118,39 @@ mod tests {
         );
         let config: Config = toml::from_str("[ui]\nsidebar.style = \"zellij\"\n").unwrap();
         assert_eq!(config.ui.sidebar.style, SidebarStyleConfig::Zellij);
+    }
+
+    #[test]
+    fn tab_mark_token_is_off_by_default_and_parses_a_custom_token() {
+        let config = Config::default();
+        assert_eq!(config.ui.tabs.mark_token, None);
+        assert_eq!(config.ui.tabs.mark_glyph, "⚑");
+        assert!(!toml::to_string(&config.ui.tabs)
+            .unwrap()
+            .contains("mark_token"));
+
+        let config: Config =
+            toml::from_str("[ui.tabs]\nmark_token = \"$agent_mark\"\nmark_glyph = \"*\"\n")
+                .unwrap();
+        assert_eq!(config.ui.tabs.mark_token.as_deref(), Some("agent_mark"));
+        assert_eq!(config.ui.tabs.mark_glyph, "*");
+        let encoded = toml::to_string(&config.ui.tabs).unwrap();
+        assert!(
+            encoded.contains("mark_token = \"$agent_mark\""),
+            "{encoded}"
+        );
+        assert_eq!(
+            toml::from_str::<TabsConfig>(&encoded).unwrap(),
+            config.ui.tabs
+        );
+
+        for value in ["\"agent_mark\"", "\"$\"", "\"$bad.name\""] {
+            let input = format!("[ui.tabs]\nmark_token = {value}\n");
+            assert!(
+                toml::from_str::<Config>(&input).is_err(),
+                "accepted {value}"
+            );
+        }
     }
 
     #[test]

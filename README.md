@@ -56,6 +56,8 @@ show_tab_status = "all"   # or "attention"
   `+N` overflow tiles that count hidden blocked/working/finished agents and jump to the
   most urgent one, per-tab status dots (`ui.show_tab_status`), middle-click close,
   double-click rename, and Move left/right in the tab context menu.
+  `ui.tabs.mark_token = "$name"` puts `ui.tabs.mark_glyph` (default ⚑) on tabs with a
+  pane carrying that token, in either tab style.
 - **zellij-style sidebar** (`ui.sidebar.style`): a 7-column collapsed rail with attention
   markers and attention-gated agent clicks, `+N` overflow badges on the rail and the
   expanded lists, agent labels that stay bright while pending and dim once settled, and
