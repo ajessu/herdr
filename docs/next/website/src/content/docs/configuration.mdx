@@ -479,6 +479,13 @@ active_tab = "status"
 rows = [["state_icon", "tab", { token = "workspace", bold = false }, "agent"]]
 ```
 
+With the zellij sidebar style, `labels = "ranked"` keeps a settled row readable by ranking its labels from bright to dim: the tab, then the workspace a step dimmer, then the agent, dim as before. Working, blocked and finished-unseen rows are unchanged. Unset, every label on a settled row is dim. A token's own `fg` still wins:
+
+```toml
+[ui.sidebar.agents]
+labels = "ranked"
+```
+
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 
 ```toml

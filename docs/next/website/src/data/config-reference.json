@@ -1544,6 +1544,15 @@
           ]
         },
         {
+          "key": "ui.sidebar.agents.labels",
+          "type": "string",
+          "default": "unset",
+          "description": "With the zellij sidebar style, how Agent row labels are coloured against each other. \"ranked\" lifts a settled row's tab and workspace above its dim agent label, tab brightest, so the row stays readable. Unset, a settled row's labels are all dim.",
+          "values": [
+            "ranked"
+          ]
+        },
+        {
           "key": "ui.sidebar.agents.token_separator",
           "type": "string",
           "default": "\" \u00b7 \"",

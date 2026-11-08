@@ -427,6 +427,18 @@ pub(super) fn agent_row_lines(
     } else {
         (name_style, secondary)
     };
+    // Fork: `labels = "ranked"` lifts a settled row's tab and workspace above
+    // its dim agent label, tab brightest, so the row stays readable.
+    let ranked = super::sidebar_chrome::zellij(config)
+        && config.agents.labels == Some(crate::config::AgentLabelsStyle::Ranked);
+    let (name_style, tab_style) = if ranked && !super::sidebar_chrome::needs_attention(row.status) {
+        (
+            Style::default().fg(palette.overlay1),
+            Style::default().fg(palette.subtext0),
+        )
+    } else {
+        (name_style, tab_style)
+    };
     let state_icon_only = [vec![crate::ui::ResolvedToken {
         kind: crate::ui::ResolvedTokenKind::StateIcon,
         style: Default::default(),

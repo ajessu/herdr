@@ -2086,3 +2086,38 @@ fn token_separator_only_changes_agent_rows_that_set_it() {
     let text = row_text(&mut spaced);
     assert!(text.contains("○ mytab client-shell"), "{text:?}");
 }
+
+#[test]
+fn ranked_labels_step_a_settled_rows_tab_and_space_down_to_the_agent() {
+    use crate::protocol::color_to_u32;
+    let statuses = [AgentStatus::Working, AgentStatus::Idle];
+    let rows = r#"rows = [["state_icon", "tab", { token = "workspace", bold = false }, "agent"]]"#;
+    let mut state = styled_agents_state(
+        &statuses,
+        &format!("active_tab = \"status\"\nlabels = \"ranked\"\n{rows}"),
+    );
+    // The panel is narrow, so labels are matched by the prefix it always shows.
+    let palette = state.config.palette.clone();
+    let style = |color| (color_to_u32(color), false);
+
+    assert_eq!(
+        label_style(&mut state, 0, "mytab"),
+        (color_to_u32(palette.yellow), true),
+        "a working row keeps its status-coloured tab"
+    );
+    assert_eq!(label_style(&mut state, 0, "clien"), style(palette.text));
+    assert_eq!(label_style(&mut state, 0, "agen"), style(palette.overlay0));
+    assert_eq!(label_style(&mut state, 1, "mytab"), style(palette.subtext0));
+    assert_eq!(label_style(&mut state, 1, "clien"), style(palette.overlay1));
+    assert_eq!(label_style(&mut state, 1, "agen"), style(palette.overlay0));
+
+    // Unset, a settled row stays dim throughout.
+    let mut state = styled_agents_state(&statuses, &format!("active_tab = \"status\"\n{rows}"));
+    for label in ["mytab", "clien", "agen"] {
+        assert_eq!(
+            label_style(&mut state, 1, label),
+            style(palette.overlay0),
+            "{label}"
+        );
+    }
+}

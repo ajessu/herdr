@@ -66,6 +66,8 @@ show_tab_status = "all"   # or "attention"
   `ui.sidebar.agents.token_separator` sets the string between row tokens, and
   `ui.sidebar.agents.active_tab = "status"` colours an active agent's tab name like its
   status icon.
+  `ui.sidebar.agents.labels = "ranked"` lifts a settled row's tab and space above its dim
+  agent label, tab brightest, so settled rows stay readable.
   The phone switcher draws its agent and space rows with the same `[ui.sidebar.agents]`
   and `[ui.sidebar.spaces]` rows, divider, highlight and `row_gap`. Each space on the
   active machine lists its tabs beneath it, with `ui.show_tab_status` dots, in place of

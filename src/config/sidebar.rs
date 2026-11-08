@@ -453,6 +453,14 @@ pub enum AgentActiveTabStyle {
     Status,
 }
 
+/// Fork: `ui.sidebar.agents.labels` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentLabelsStyle {
+    /// Tab, then workspace, then agent, from bright to dim.
+    Ranked,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AgentsSidebarConfig {
@@ -492,6 +500,9 @@ pub struct AgentsSidebarConfig {
     /// Fork: how a working, blocked or finished-unseen row marks its tab name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_tab: Option<AgentActiveTabStyle>,
+    /// Fork: how the tab, workspace and agent labels are coloured against each other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<AgentLabelsStyle>,
 }
 
 impl AgentsSidebarConfig {
@@ -524,6 +535,7 @@ impl Default for AgentsSidebarConfig {
             highlight_bg: None,
             token_separator: None,
             active_tab: None,
+            labels: None,
         }
     }
 }
@@ -580,6 +592,7 @@ mod tests {
         assert_eq!(config.agents.row_gap, 0);
         assert_eq!(config.agents.token_separator, None);
         assert_eq!(config.agents.active_tab, None);
+        assert_eq!(config.agents.labels, None);
         assert_eq!(
             config.spaces.rows,
             vec![
@@ -851,14 +864,18 @@ rows = [[{ token = "$status", rules = [{ contains = "error", bold = true }] }]]
     #[test]
     fn agents_token_separator_and_active_tab_parse_and_stay_out_when_unset() {
         let parsed: AgentsSidebarConfig =
-            toml::from_str("token_separator = \" \"\nactive_tab = \"status\"").unwrap();
+            toml::from_str("token_separator = \" \"\nactive_tab = \"status\"\nlabels = \"ranked\"")
+                .unwrap();
         assert_eq!(parsed.token_separator.as_deref(), Some(" "));
         assert_eq!(parsed.active_tab, Some(AgentActiveTabStyle::Status));
+        assert_eq!(parsed.labels, Some(AgentLabelsStyle::Ranked));
 
         assert!(toml::from_str::<AgentsSidebarConfig>("active_tab = \"loud\"").is_err());
+        assert!(toml::from_str::<AgentsSidebarConfig>("labels = \"loud\"").is_err());
 
         let encoded = toml::to_string(&AgentsSidebarConfig::default()).unwrap();
         assert!(!encoded.contains("token_separator"), "{encoded}");
         assert!(!encoded.contains("active_tab"), "{encoded}");
+        assert!(!encoded.contains("labels"), "{encoded}");
     }
 }

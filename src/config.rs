@@ -31,8 +31,8 @@ pub use self::{
         UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
-        AgentActiveTabStyle, AgentSidebarToken, AgentsSidebarConfig, SidebarConfig,
-        SidebarTokenStyle, SpaceSidebarToken, SpacesSidebarConfig,
+        AgentActiveTabStyle, AgentLabelsStyle, AgentSidebarToken, AgentsSidebarConfig,
+        SidebarConfig, SidebarTokenStyle, SpaceSidebarToken, SpacesSidebarConfig,
     },
     sound::SoundConfig,
     tab_bar::TabBarRightEntryConfig,
