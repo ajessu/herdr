@@ -68,6 +68,9 @@ show_tab_status = "all"   # or "attention"
   status icon.
   `ui.sidebar.agents.labels = "ranked"` lifts a settled row's tab and space above its dim
   agent label, tab brightest, so settled rows stay readable.
+  Back and forward buttons on the `spaces` header (Nerd Font chevrons) step through the
+  tabs visited, across spaces, and forget them when the client restarts. They dim with
+  nowhere to go, and hovering one names the tab it leads to.
   The phone switcher draws its agent and space rows with the same `[ui.sidebar.agents]`
   and `[ui.sidebar.spaces]` rows, divider, highlight and `row_gap`. Each space on the
   active machine lists its tabs beneath it, with `ui.show_tab_status` dots, in place of

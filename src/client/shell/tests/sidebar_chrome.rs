@@ -3,6 +3,7 @@
 use super::*;
 use crate::api::schema::Method;
 use crate::client::shell::sidebar_chrome::SidebarJump;
+use crate::client::shell::tab_trail::{BACK, FORWARD};
 
 fn workspaces_snapshot(count: usize, focused: usize) -> ClientShellSnapshot {
     let mut snapshot = snapshot();
@@ -525,4 +526,135 @@ fn divider_label_is_clipped_to_the_rule_width_without_an_ellipsis() {
         "── 固─",
         "wide labels are clipped by cell width"
     );
+}
+
+fn three_tabs(focused: usize, revision: u64) -> ClientShellSnapshot {
+    let mut snapshot = workspaces_snapshot(2, 0);
+    let template = snapshot.tabs[0].clone();
+    snapshot.tabs = (1..=3)
+        .map(|n| ClientShellTab {
+            tab_id: format!("tab_{n}"),
+            workspace_id: if n == 3 { "ws_2" } else { "ws_1" }.into(),
+            focused: n == focused,
+            ..template.clone()
+        })
+        .collect();
+    snapshot.focused_tab_id = Some(format!("tab_{focused}"));
+    snapshot.revision = revision;
+    snapshot
+}
+
+fn visit(state: &mut ClientShellState, tab: usize, revision: u64) -> Buffer {
+    state.set_snapshot(Box::new(three_tabs(tab, revision)));
+    let mut surface = surface();
+    surface.projection_revision = revision;
+    state.set_pane_surface(surface);
+    compose(state, 106, 24)
+}
+
+fn focused_tab(outcome: &ClientShellInput) -> Option<String> {
+    match methods(outcome)[..] {
+        [Method::TabFocus(target)] => Some(target.tab_id.clone()),
+        [] => None,
+        ref other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn the_back_and_forward_buttons_walk_visited_tabs() {
+    let mut state = zellij(three_tabs(1, 1));
+    visit(&mut state, 2, 2);
+    let buffer = visit(&mut state, 3, 3);
+    let back = badge(&state, &SidebarJump::Back);
+    let forward = badge(&state, &SidebarJump::Forward);
+    let row = row_text(&buffer, back.y, 0, state.hits.sidebar_divider.x + 1);
+    println!("[{row}]");
+    assert!(row.contains(" spaces") && row.contains(&format!(" {BACK}  {FORWARD} ")));
+    assert_eq!(focused_tab(&click(&mut state, forward)), None);
+    assert_eq!(
+        focused_tab(&click(&mut state, back)).as_deref(),
+        Some("tab_2")
+    );
+    visit(&mut state, 2, 4);
+    assert_eq!(
+        focused_tab(&click(&mut state, back)).as_deref(),
+        Some("tab_1")
+    );
+    assert_eq!(
+        focused_tab(&click(&mut state, forward)).as_deref(),
+        Some("tab_3")
+    );
+}
+
+#[test]
+fn a_server_reboot_clears_the_tab_trail() {
+    let mut state = zellij(three_tabs(1, 1));
+    state.set_snapshot(Box::new(three_tabs(2, 2)));
+    let mut rebooted = three_tabs(2, 3);
+    rebooted.boot_id = "boot-2".into();
+    state.set_snapshot(Box::new(rebooted));
+    assert!(state.tab_trail_step(true).is_none());
+}
+
+#[test]
+fn upstream_style_has_no_back_and_forward_buttons() {
+    let mut state = shell(
+        three_tabs(1, 1),
+        crate::config::SidebarStyleConfig::Upstream,
+    );
+    compose(&mut state, 106, 24);
+    assert!(state.hits.sidebar_overflow.is_empty());
+}
+
+#[test]
+fn back_and_forward_buttons_need_the_mouse_and_room() {
+    let mut state = zellij(three_tabs(1, 1));
+    state.config.mouse_capture = false;
+    compose(&mut state, 106, 24);
+    assert!(state.hits.sidebar_overflow.is_empty());
+    let mut hits = ShellHitMap {
+        workspace_body: Rect::new(0, 2, 12, 5),
+        ..ShellHitMap::default()
+    };
+    state.config.mouse_capture = true;
+    super::super::tab_trail::place_buttons(&state.config, &mut hits);
+    assert!(hits.sidebar_overflow.is_empty());
+}
+
+#[test]
+fn back_and_forward_buttons_show_where_they_lead() {
+    let mut state = zellij(three_tabs(1, 1));
+    visit(&mut state, 2, 2);
+    let buffer = visit(&mut state, 3, 3);
+    let back = badge(&state, &SidebarJump::Back);
+    let forward = badge(&state, &SidebarJump::Forward);
+    let palette = state.config.palette.clone();
+    let glyph = |buffer: &Buffer, rect: Rect| buffer[(rect.x + 1, rect.y)].style();
+    assert_eq!(glyph(&buffer, back).fg, Some(palette.text));
+    assert_eq!(
+        glyph(&buffer, forward).fg,
+        Some(palette.surface1),
+        "nowhere to go"
+    );
+
+    let moved = mouse(&mut state, MouseEventKind::Moved, back.x, back.y);
+    assert!(moved.repaint);
+    let buffer = compose(&mut state, 106, 24);
+    assert_eq!(glyph(&buffer, back).bg, Some(palette.surface1));
+    let below = row_text(&buffer, back.y + 1, 0, state.hits.sidebar_divider.x);
+    assert!(below.ends_with("1 · space-1"), "{below:?}");
+    let still = mouse(&mut state, MouseEventKind::Moved, back.x + 1, back.y);
+    assert!(!still.repaint, "same button");
+
+    // A button with nowhere to go doesn't light up or name a tab.
+    mouse(&mut state, MouseEventKind::Moved, forward.x, forward.y);
+    let buffer = compose(&mut state, 106, 24);
+    assert_ne!(glyph(&buffer, forward).bg, Some(palette.surface1));
+    assert_eq!(
+        row_text(&buffer, back.y + 1, 0, state.hits.sidebar_divider.x).trim(),
+        ""
+    );
+    let left = mouse(&mut state, MouseEventKind::Moved, 60, 10);
+    assert!(left.repaint);
+    assert_eq!(state.tab_trail_hover, None);
 }

@@ -45,6 +45,9 @@ pub(super) enum SidebarJump {
         pane_id: String,
         index: usize,
     },
+    /// The back/forward buttons.
+    Back,
+    Forward,
 }
 
 pub(super) fn zellij(config: &ClientShellConfig) -> bool {
@@ -512,6 +515,7 @@ pub(super) fn workspace_list_badges(
         &config.palette,
         hits,
     );
+    super::tab_trail::place_buttons(config, hits);
 }
 
 /// Agents-panel badges. Called by upstream's `render_agent_panel` after the
@@ -572,6 +576,12 @@ impl ClientShellState {
                 self.agent_scroll = index;
                 outcome.repaint = true;
                 crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget { pane_id })
+            }
+            SidebarJump::Back | SidebarJump::Forward => {
+                let Some(method) = self.tab_trail_step(jump == SidebarJump::Back) else {
+                    return true;
+                };
+                method
             }
         };
         self.push_endpoint_method(method, outcome);

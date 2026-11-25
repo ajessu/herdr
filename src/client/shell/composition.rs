@@ -235,6 +235,7 @@ impl ClientShellState {
                 workspace_drop_indicator_row,
             },
         );
+        self.paint_tab_trail(&mut buffer); // Fork.
         self.hits.panes = surface
             .panes
             .iter()

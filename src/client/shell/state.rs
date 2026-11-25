@@ -936,6 +936,9 @@ pub(crate) struct ClientShellState {
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
     pub(super) previous_pane_id: Option<String>,
+    pub(super) tab_trail: super::tab_trail::TabTrail, // Fork.
+    /// Fork: the back (true) or forward button under the pointer.
+    pub(super) tab_trail_hover: Option<bool>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
     /// Fork: last tab click, for double-click-to-rename on zellij-style tabs.
@@ -1116,6 +1119,8 @@ impl ClientShellState {
             reveal_navigation_workspace: false,
             overlay,
             previous_pane_id: None,
+            tab_trail: Default::default(), // Fork.
+            tab_trail_hover: None,
             pane_mouse_gesture: None,
             link_hover: None,
             last_tab_click: None,
@@ -1313,6 +1318,7 @@ impl ClientShellState {
             .startup_onboarding
             .then_some(ClientShellOverlay::Onboarding);
         self.previous_pane_id = None;
+        self.tab_trail = Default::default(); // Fork.
         self.pane_mouse_gesture = None;
         self.link_hover = None;
         self.url_click_consumes_until_up = false;
@@ -1416,6 +1422,13 @@ impl ClientShellState {
         {
             self.hits = ShellHitMap::default();
         }
+        // Fork: back/forward buttons.
+        let focused_tab = self
+            .snapshot
+            .as_deref()
+            .and_then(|current| current.focused_tab_id.as_deref());
+        self.tab_trail
+            .observe(focused_tab, snapshot.focused_tab_id.as_deref());
         if boot_changed {
             // A reboot must not turn Enter on a stale preview into focus on a reused ID.
             let preview = (self.mode == ClientShellMode::Navigate)

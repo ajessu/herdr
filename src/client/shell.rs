@@ -39,6 +39,7 @@ mod sidebar_chrome; // Fork: zellij-style sidebar.
 mod state;
 mod surface_patch;
 mod tab_chrome; // Fork: zellij-style tab bar.
+mod tab_trail; // Fork: back/forward buttons.
 mod text_editor;
 mod word_selection;
 mod worktrees;
